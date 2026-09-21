@@ -6,6 +6,8 @@
  * 在 zsh 下很容易撞到通配/引号问题（已经撞过一次）。用 Node 写清楚一点。
  *
  * 用法：SESSION_TOKEN=... node tests/e2e/submit-generation.mjs
+ *       SESSION_TOKEN=... REFERENCE_IMAGE=/uploads/generated/image/.../x.png \
+ *         node tests/e2e/submit-generation.mjs     # 走图生图（image-edit）
  */
 
 import { createRequire } from 'node:module'
@@ -19,6 +21,10 @@ const PROVIDER_ID = process.env.PROVIDER_ID || 'cmub9tmb500cr96wpql0pwlc3'
 const MODEL_KEY = process.env.MODEL_KEY || 'gpt-image-2'
 const SIZE = process.env.SIZE || '1024x1024'
 const QUALITY = process.env.QUALITY || 'standard'
+// 图生图：给一张 /uploads/... 的参考图就切到 image-edit 分支（走后端 multipart）。
+// 不给则维持文生图的原有行为，方便两种链路用同一个脚本对比。
+const REFERENCE_IMAGE = String(process.env.REFERENCE_IMAGE || '').trim()
+const REQUEST_MODE = REFERENCE_IMAGE ? 'image-edit' : 'image-generation'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
@@ -27,17 +33,19 @@ const headers = {
   Cookie: `canana_session=${TOKEN}`,
 }
 
-const prompt = `一只红色苹果放在白色桌面上，电商产品摄影，纯白背景，${Date.now()}`
+const prompt = REFERENCE_IMAGE
+  ? `把参考图的产品背景换成纯白电商主图风格，保留产品本身不变，${Date.now()}`
+  : `一只红色苹果放在白色桌面上，电商产品摄影，纯白背景，${Date.now()}`
 
 const payload = {
   source: 'workflow',
   type: 'image',
-  requestMode: 'image-generation',
+  requestMode: REQUEST_MODE,
   prompt,
   modelKey: MODEL_KEY,
   ratio: SIZE,
   resolution: QUALITY,
-  referenceImages: [],
+  referenceImages: REFERENCE_IMAGE ? [REFERENCE_IMAGE] : [],
   requestBody: {
     model: MODEL_KEY,
     prompt,
@@ -49,7 +57,9 @@ const payload = {
 }
 
 const main = async () => {
-  console.log(`\n【提交真实生成】model=${MODEL_KEY} size=${SIZE} quality=${QUALITY}\n`)
+  console.log(`\n【提交真实生成】mode=${REQUEST_MODE} model=${MODEL_KEY} size=${SIZE} quality=${QUALITY}`)
+  if (REFERENCE_IMAGE) console.log(`  参考图：${REFERENCE_IMAGE}`)
+  console.log('')
 
   const created = await fetch(`${API}/api/generation-tasks`, {
     method: 'POST',

@@ -264,6 +264,49 @@
 
 > 每项 = 新执行策略 + 任务轮询 + 结算。`image` 策略是现成模板，照着做。
 
+### 3.0 先决条件：中转站的实际能力边界（2026-09-21 实测）
+
+这一节是 B1~B3 能不能做的前提。**结论：当前这把 Key 只能出图，视频和对话都在账号层被挡住，
+不是代码问题。** 写清楚是为了以后不重复排查。
+
+**抓法**（比试路径可靠）：中转站是 new-api，`GET /api/pricing` 会逐模型返回
+`supported_endpoint_types` 与 `enable_groups`，这才是权威答案。
+
+**Key 实际落在哪个组**：`gpt-绘画4k专用`。该组下**一共 11 个模型，全是图像**：
+
+| 模型 | 端点类型 | 价格 |
+| --- | --- | --- |
+| `gpt-image-2` | openai / image-generation / image-edits | $0.03 |
+| `gpt-image-2.5` / `-flare` / `-sunburst` | openai / image-generation / image-edits | $0.04~0.05 |
+| `gemini-3-pro-image-preview`(-c) | gemini / openai | ratio 榜 |
+| `gemini-3.1-flash-image-preview`(-c) | gemini / openai | $0.08~0.15 |
+| `grok-imagine-image-2.0` / `-quality` | openai / openai-response | $0.035~0.08 |
+| `grok-imagine-video-1.5` | openai / openai-response | $0.20 |
+
+**视频不可用的证据**：全站只有 `grok-imagine-0.9` 声明了 `openai-videos` + `查询视频`
+（也就是中转站真正铺了视频路由的那个），它**不在本组**：
+
+```
+POST /v1/video/generations  {"model":"grok-imagine-0.9"}
+→ 503 No available channel for model grok-imagine-0.9 under group gpt-绘画4k专用
+```
+
+而本组里那个 `grok-imagine-video-1.5` 虽然名字像视频模型，但没铺视频路由
+（`invalid api platform: 48`），走 `chat/completions` 是 `502 openai_error`、
+走 `responses` 是上游直接拒。**它在 /v1/models 里出现，不代表能用。**
+
+**对话不可用**：`gemini-3-pro-preview` 等一并 `No available channel ... under group
+gpt-绘画4k专用` —— 该组没有任何 chat 模型。
+
+**要解锁需要**：在中转站后台新建一个属于 `AI视频`（视频）或 `a全模型综合组-1倍率`（对话）
+分组的令牌。分组是绑在令牌上的，不是绑在账号上的，所以改 Token 即可，不用改代码。
+拿到新 Key 后只需在后台「厂商配置」里新增一个厂商，B1/B3 就能接。
+
+**图生图已实测可用**（这是电商出图的主路径，不依赖上面的解锁）：
+`POST /v1/images/edits` 用 gpt-image-2 + 参考图 → 200 / 89 秒 / 返回 `b64_json`；
+走应用自己的后端（`requestMode=image-edit`）→ 90 秒完成、落盘。
+提示词「把背景换成纯白电商主图风格，保留产品本身不变」实测**主体保持不变**。
+
 ### B1. 视频生成策略 `后端`
 - **依据**：`[公告]` Seedance 2.5 / MiniMax H3 Max / Wan 3.0；`[现状]` 服务端 `GenerationTaskStrategyKey` 只有 4 个值，**没有 video**
 - **做法**：新增 `video` 策略（提交上游 → 轮询 → 落 `generation_outputs` → 结算 / 退款）；前端视频节点已经组装好参数，接上即可
