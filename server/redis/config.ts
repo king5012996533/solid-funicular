@@ -35,8 +35,28 @@ const normalizeBoolean = (value: string, defaultValue: boolean) => {
   return defaultValue
 }
 
-const normalizeInteger = (value: string, defaultValue: number, minValue = 1) => {
-  const parsed = Number(value)
+/**
+ * 把环境变量解析成整数，**未设置或非法时用默认值**。
+ *
+ * 这里踩过一个影响面很大的坑（2026-09-21 修）：
+ *   调用方一律写 `process.env.X || ''`，于是环境变量未设置时传进来的是**空字符串**。
+ *   而 `Number('')` 等于 **0**（不是 NaN），`Number.isFinite(0)` 为真 ——
+ *   于是"未设置"被当成了"显式配了 0"，最后 `Math.max(minValue, 0)` 返回 1。
+ *   结果是**所有没在 .env 里显式配置的 Redis 参数都变成了 1**：
+ *     · taskLockTtlMs 变成 1 毫秒 → 执行锁瞬间过期 → 续期永远 ownership_lost
+ *       → **任何耗时超过 5 秒的生成任务都会被中断**（这就是本库长期出不了图的原因：
+ *          秒回的认证错误能活下来，真正开始生成的任务活不过 5 秒）
+ *     · 各类缓存 TTL 变成 1 秒、并发上限与限流阈值全变成 1
+ *
+ * 所以必须先判空字符串再判数值。空字符串是"没配"，不是"配了 0"。
+ */
+export const normalizeInteger = (value: string, defaultValue: number, minValue = 1) => {
+  const raw = String(value ?? '').trim()
+  if (!raw) {
+    return defaultValue
+  }
+
+  const parsed = Number(raw)
   if (!Number.isFinite(parsed)) {
     return defaultValue
   }

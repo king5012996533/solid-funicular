@@ -39,10 +39,17 @@ const BURST_RATE_RETRY_DELAYS = [1200, 2600, 5200]
 // 网络层错误（TypeError: fetch failed / socket reset / TLS abort 等）的重试节奏。
 // 与 BURST_RATE 分开计数：429 是上游显式拒绝，网络错是底层失败，二者重试策略不耦合。
 const NETWORK_ERROR_RETRY_DELAYS = [1500, 4000]
-// 单次上游请求的硬超时基线（毫秒）。单张文生图/图生图正常 5-30s，基线 90s 给慢模型留余量。
-// 一次请求 n>1 时由 resolveUpstreamFetchTimeoutMs 按张数线性放宽，避免 N 张被一刀 90s 截断。
-const UPSTREAM_FETCH_TIMEOUT_BASE_MS = 90_000
-const UPSTREAM_FETCH_TIMEOUT_PER_IMAGE_MS = 60_000
+// 单次上游请求的硬超时基线（毫秒）。
+//
+// 原来是 90_000，注释写的是「单张文生图正常 5-30s」—— 那是按直连官方 API 估的。
+// 实测（2026-09-21，ggwk1 中转站的 gpt-image-2，多次取样）：
+//   50s / 82s / 195s（1536x1024 + hd）/ 228s
+// 同一个模型同一档参数的耗时能差 4 倍，而且 240s 那次只剩 12 秒余量 ——
+// 超时失败的代价是用户白等一场还扣了积分，所以基线放宽到 300s。
+// 它只是**上限**、不是延迟：上游快的时候照样很快返回，不会让用户多等。
+// 上限仍是 600s，避免一个挂死的请求占着执行锁太久。
+const UPSTREAM_FETCH_TIMEOUT_BASE_MS = 300_000
+const UPSTREAM_FETCH_TIMEOUT_PER_IMAGE_MS = 90_000
 const UPSTREAM_FETCH_TIMEOUT_MAX_MS = 600_000
 
 const resolveUpstreamFetchTimeoutMs = (imageCount?: number) => {
