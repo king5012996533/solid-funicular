@@ -66,6 +66,12 @@ export const NODE_TYPE_PRESENTATION: NodeTypePresentation[] = [
     color: 'var(--brand-llm)',
     icon: getCanvasIcon('llm'),
   },
+  {
+    type: 'asset',
+    name: '素材',
+    color: 'var(--text-secondary)',
+    icon: getCanvasIcon('folder'),
+  },
 ]
 
 const PRESENTATION_BY_TYPE = new Map(NODE_TYPE_PRESENTATION.map(item => [item.type, item]))
@@ -91,6 +97,8 @@ const COHERENT_DOWNSTREAM: Record<WorkflowNodeType, WorkflowNodeType[]> = {
   text: ['image', 'video', 'llmConfig'],
   llmConfig: ['image', 'video', 'llmConfig'],
   image: ['image', 'video'],
+  // 素材给下游当参考图 / 首帧，和图片节点的下游一致
+  asset: ['image', 'video'],
   video: [],
 }
 

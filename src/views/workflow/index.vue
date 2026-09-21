@@ -30,6 +30,7 @@ import TextNode from './components/nodes/TextNode.vue'
 import ImageNode from './components/nodes/ImageNode.vue'
 import VideoNode from './components/nodes/VideoNode.vue'
 import LlmConfigNode from './components/nodes/LlmConfigNode.vue'
+import AssetNode from './components/nodes/AssetNode.vue'
 
 // 边组件
 import ImageRoleEdge from './components/edges/ImageRoleEdge.vue'
@@ -85,6 +86,7 @@ const nodeTypes = {
   image: markRaw(ImageNode),
   video: markRaw(VideoNode),
   llmConfig: markRaw(LlmConfigNode),
+  asset: markRaw(AssetNode),
 } as any
 
 // 注册自定义边类型
@@ -972,7 +974,7 @@ const openPaneContextMenu = (event: MouseEvent) => {
   // 与拖线落空、双击空白列的是同一批节点，所以共用构造器（图标/文案一致）
   contextMenuItems.value = [
     ...buildNodeTypeMenuItems(
-      ['text', 'image', 'video'],
+      ['text', 'image', 'video', 'asset'],
       'pane-add',
       type => () => addNode(type, flowPos),
     ),

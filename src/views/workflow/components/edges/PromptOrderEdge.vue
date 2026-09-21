@@ -4,7 +4,7 @@
  */
 import { ref, computed } from 'vue'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, useVueFlow } from '@vue-flow/core'
-import { edges } from '../../composables/useWorkflowCanvas'
+import { inboundEdgesByTargetType } from '../../composables/workflow-graph-index'
 import EdgeDeleteButton from '../EdgeDeleteButton.vue'
 
 const { updateEdgeData, onEdgeMouseEnter, onEdgeMouseLeave } = useVueFlow()
@@ -40,7 +40,9 @@ const orderLabels = [
 ]
 
 const orderOptions = computed(() => {
-  const count = edges.value.filter(e => e.target === props.target && e.type === 'promptOrder').length || 1
+  // 走共享索引：原先每条边组件都要遍历整个 edges（950 条边时就是每帧 90 万次操作），
+  // 这是画布在节点多时掉帧的主因
+  const count = (inboundEdgesByTargetType.value.get(`${props.target}::${'promptOrder'}`) || []).length || 1
   return orderLabels.slice(0, count)
 })
 
@@ -66,7 +68,7 @@ const readPromptOrder = (data: unknown) => (data && typeof data === 'object' && 
   : 1)
 
 const handleSelect = (newOrder: number) => {
-  const sameEdges = edges.value.filter(e => e.target === props.target && e.type === 'promptOrder')
+  const sameEdges = inboundEdgesByTargetType.value.get(`${props.target}::${'promptOrder'}`) || []
   const conflict = sameEdges.find(e => e.id !== props.id && readPromptOrder(e.data) === newOrder)
   if (conflict) updateEdgeData(conflict.id, { promptOrder: currentOrder.value })
   updateEdgeData(props.id, { promptOrder: newOrder })

@@ -10,14 +10,13 @@
  * 因为资产清单的来源本来就是画布连线。
  */
 import {
-  edges,
-  nodes,
   type WorkflowCanvasNode,
   type WorkflowImageNodeData,
   type WorkflowLlmConfigNodeData,
   type WorkflowTextNodeData,
   type WorkflowVideoNodeData,
 } from './useWorkflowCanvas'
+import { nodeIndex, inboundEdges } from './workflow-graph-index'
 
 export type ReferenceKind = 'image' | 'text' | 'video'
 
@@ -105,9 +104,9 @@ export const collectReferenceableAssets = (nodeId: string): ReferenceableAsset[]
   const counters: Record<ReferenceKind, number> = { image: 0, text: 0, video: 0 }
   const buckets: Record<ReferenceKind, ReferenceableAsset[]> = { image: [], text: [], video: [] }
 
-  for (const edge of edges.value.filter((item) => item.target === nodeId)) {
+  for (const edge of inboundEdges.value.get(nodeId) || []) {
     // 历史快照里可能存在指向已删节点的悬挂边，读不到就跳过
-    const sourceNode = nodes.value.find((item) => item.id === edge.source)
+    const sourceNode = nodeIndex.value.get(edge.source)
     if (!sourceNode) continue
 
     const entry = readNodeAsset(sourceNode)

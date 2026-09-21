@@ -8,7 +8,8 @@
  * 这里统一成一处，顺手把 LLM 节点也接上。
  */
 
-import { edges, nodes, type WorkflowCanvasNode } from './useWorkflowCanvas'
+import { type WorkflowCanvasNode } from './useWorkflowCanvas'
+import { nodeIndex, inboundEdges } from './workflow-graph-index'
 
 /**
  * 一个节点能对外贡献的提示词文本。
@@ -33,8 +34,9 @@ export const readNodePromptText = (node?: WorkflowCanvasNode): string => {
 export const collectUpstreamPromptText = (nodeId: string): string => {
   const entries: Array<{ order: number; content: string }> = []
 
-  for (const edge of edges.value.filter((item) => item.target === nodeId)) {
-    const sourceNode = nodes.value.find((item) => item.id === edge.source)
+  // 走共享索引：每次调用是 O(入边数)，不再各自遍历整个 edges / nodes
+  for (const edge of inboundEdges.value.get(nodeId) || []) {
+    const sourceNode = nodeIndex.value.get(edge.source)
     const content = readNodePromptText(sourceNode)
     if (!content) continue
     const order = Number((edge.data as { promptOrder?: number })?.promptOrder) || 1

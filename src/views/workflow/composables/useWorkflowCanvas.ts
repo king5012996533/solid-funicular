@@ -23,10 +23,17 @@ import { getDefaultChatModelKey } from '@/config/models'
 import { migrateLegacyConfigNodes } from './legacy-config-node-migration'
 import type { WorkflowCanvasPosition } from './workflow-orchestrator-types'
 
-export type WorkflowNodeType = 'text' | 'image' | 'video' | 'llmConfig'
+export type WorkflowNodeType = 'text' | 'image' | 'video' | 'llmConfig' | 'asset'
 
 export interface WorkflowNodeDataBase {
   label?: string
+  /**
+   * 折叠态：只留标题与一行摘要，卡片主体收起。
+   * 对齐 LibTV 标题前的 ▶ —— 节点多了以后折叠是主要的降噪手段。
+   * 存在节点 data 上而不是组件局部状态：折叠是画布形态的一部分，
+   * 要跟画布一起保存、也要能撤销。
+   */
+  collapsed?: boolean
   createdAt?: number
   updatedAt?: number
   loading?: boolean
@@ -87,6 +94,25 @@ export interface WorkflowVideoNodeData extends WorkflowNodeDataBase, WorkflowGen
   duration: number
 }
 
+/**
+ * 素材节点（清单 F6）
+ *
+ * 对齐 LibTV「添加节点 → 素材库」。它不产内容，只把资产库里的某个素材
+ * 接到画布上，作为下游生成节点的参考图来源。
+ * 存在 `url` 上而不是只存 assetId：下游收集参考图时读的是 url，
+ * 存下来就不用为了渲染再去查一遍资产接口。
+ */
+export interface WorkflowAssetNodeData extends WorkflowNodeDataBase {
+  /** 选中素材的地址（图片走 previewUrl/fileUrl，视频走 fileUrl） */
+  url?: string
+  /** 素材 id，便于回溯与去重 */
+  assetId?: string
+  /** 素材名，折叠态与选中栏要显示它 */
+  name?: string
+  /** 素材种类：决定下游怎么用它 */
+  assetType?: 'image' | 'video'
+}
+
 export interface WorkflowLlmConfigNodeData extends WorkflowNodeDataBase {
   systemPrompt?: string
   model?: string
@@ -99,6 +125,7 @@ export interface WorkflowNodeDataMap {
   image: WorkflowImageNodeData
   video: WorkflowVideoNodeData
   llmConfig: WorkflowLlmConfigNodeData
+  asset: WorkflowAssetNodeData
 }
 
 export type WorkflowNodeData = WorkflowNodeDataMap[WorkflowNodeType]
@@ -348,6 +375,8 @@ const getDefaultNodeData = <T extends WorkflowNodeType>(type: T): WorkflowNodeDa
         label: '视频节点'
       } as WorkflowNodeDataMap[T]
     }
+    case 'asset':
+      return { label: '素材' } as WorkflowNodeDataMap[T]
     case 'llmConfig':
       return {
         systemPrompt: '',

@@ -30,8 +30,6 @@ import {
   updateNode,
   removeNode,
   duplicateNode,
-  nodes,
-  edges,
   type WorkflowVideoNodeData,
 } from '../../composables/useWorkflowCanvas'
 import { uploadStorageFile } from '@/api/storage'
@@ -39,6 +37,8 @@ import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type V
 import { describeAspectRatio, pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
+import { useNodeCollapse } from '../../composables/useNodeCollapse'
+import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 
 const props = defineProps<{
@@ -75,8 +75,8 @@ const upstreamPromptText = computed(() => collectUpstreamPromptText(props.id))
 /** 上游图片节点的出图 → 作为首帧/参考帧 */
 const upstreamFrameUrls = computed<string[]>(() => {
   const frames: string[] = []
-  for (const edge of edges.value.filter((e) => e.target === props.id)) {
-    const sourceNode = nodes.value.find((n) => n.id === edge.source)
+  for (const edge of inboundEdges.value.get(props.id) || []) {
+    const sourceNode = nodeIndex.value.get(edge.source)
     if (sourceNode?.type !== 'image') continue
     const url = String((sourceNode.data as { url?: string })?.url || '').trim()
     if (url) frames.push(url)
@@ -180,6 +180,7 @@ const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
 const showVideo = computed(() => !isLoading.value && !errorMsg.value && !!videoUrl.value)
 const inputState = useNodeInputState(() => props.id)
+const { collapsed, toggleCollapse } = useNodeCollapse(() => props.id)
 
 // ready 的判定改成「上游真的产出了内容」而不是「有一条边」：
 // 连了一个还没出图的节点不算已连接，否则界面会说谎
@@ -318,6 +319,18 @@ const handlePromptSend = (
 <template>
   <div class="video-node-wrapper" @mouseenter="showActions = true" @mouseleave="showActions = false">
     <div class="video-node-title" :title="titleEdit.editing.value ? '' : '双击编辑名称'" @dblclick.stop="titleEdit.start">
+      <button
+        type="button"
+        class="node-collapse-toggle nodrag nopan"
+        :class="{ 'is-collapsed': collapsed }"
+        :title="collapsed ? '展开节点' : '折叠节点'"
+        @click.stop="toggleCollapse"
+        @mousedown.stop
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
       <el-icon class="video-node-title-icon"><VideoCamera /></el-icon>
       <input
         v-if="titleEdit.editing.value"
@@ -342,8 +355,15 @@ const handlePromptSend = (
       </span>
     </div>
 
-    <div class="video-node-card" :class="{ 'is-selected': isSelected }">
+    <div class="video-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }">
 
+      <div v-if="collapsed" class="node-collapsed-summary">
+        <span class="node-collapsed-summary__text">
+          {{ inputState.connectedLabel || inputState.emptyLabel }}
+        </span>
+      </div>
+
+      <template v-else>
       <!-- 空态：按类型声明需要什么输入（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="video-node-empty">
         <div class="video-node-empty-hint">{{ inputState.emptyLabel }}</div>
@@ -405,6 +425,7 @@ const handlePromptSend = (
         style="display: none"
         @change="handleFileChange"
       />
+      </template>
     </div>
 
     <CanvasNodeAddHandle side="left" :visible="isSelected" />

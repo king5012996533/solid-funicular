@@ -33,6 +33,7 @@ import type { CreationType } from '@/components/generate/selectors'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { useNodeInputState } from '../../composables/node-input-requirements'
+import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import {
   updateNode,
   removeNode,
@@ -76,6 +77,7 @@ const chatModelOptions = computed(() => getAllChatModels().map((m) => ({ label: 
 const isEmpty = computed(() => !forceEditMode.value && !content.value.trim())
 // 输入需求状态：文本节点不消费上游，文案由声明表给
 const inputState = useNodeInputState(() => props.id)
+const { collapsed, toggleCollapse } = useNodeCollapse(() => props.id)
 
 watch(
   chatModelOptions,
@@ -307,6 +309,18 @@ watch(content, async () => {
   <div class="text-node-wrapper" @mouseenter="showActions = true" @mouseleave="showActions = false">
     <!-- 节点外置标题：浮在节点上方左侧 -->
     <div class="text-node-title" :title="titleEdit.editing.value ? '' : '双击编辑名称'" @dblclick.stop="titleEdit.start">
+      <button
+        type="button"
+        class="node-collapse-toggle nodrag nopan"
+        :class="{ 'is-collapsed': collapsed }"
+        :title="collapsed ? '展开节点' : '折叠节点'"
+        @click.stop="toggleCollapse"
+        @mousedown.stop
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
       <el-icon class="text-node-title-icon"><Document /></el-icon>
       <input
         v-if="titleEdit.editing.value"
@@ -324,7 +338,16 @@ watch(content, async () => {
     </div>
 
     <!-- 节点本体 -->
-    <div class="text-node-card" :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing }">
+    <div class="text-node-card" :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing, 'is-collapsed': collapsed }">
+
+      <!-- 折叠态：显示正文开头，光看标题认不出哪段文本 -->
+      <div v-if="collapsed" class="node-collapsed-summary">
+        <span class="node-collapsed-summary__text">
+          {{ (data?.content || '').trim().slice(0, 40) || '空文本' }}
+        </span>
+      </div>
+
+      <template v-else>
       <!-- AI 润色中指示器（右上角，spin + 渐变流光文字） -->
       <Transition name="text-node-polish-indicator">
         <div v-if="isPolishing" class="text-node-polish-indicator nodrag nopan" aria-live="polite">
@@ -376,6 +399,7 @@ watch(content, async () => {
         style="display: none"
         @change="handleFileChange"
       />
+      </template>
     </div>
 
     <!-- 左右连接点：用 CanvasNodeAddHandle 直接做 "+" 按钮 + 拖拽连线 -->

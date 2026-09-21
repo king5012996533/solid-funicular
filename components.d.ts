@@ -84,6 +84,7 @@ declare module 'vue' {
     ImagePreview: typeof import('./src/components/ImagePreview.vue')['default']
     ImageToolbar: typeof import('./src/components/generate/toolbars/ImageToolbar.vue')['default']
     InfiniteCanvas: typeof import('./src/components/canana/InfiniteCanvas.vue')['default']
+    InlineMentionInput: typeof import('./src/components/generate/InlineMentionInput.vue')['default']
     LeftToolbar: typeof import('./src/components/canana/LeftToolbar.vue')['default']
     LoginModal: typeof import('./src/components/LoginModal.vue')['default']
     MarketingModal: typeof import('./src/components/MarketingModal.vue')['default']

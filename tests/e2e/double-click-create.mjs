@@ -20,7 +20,8 @@ const APP_URL = process.env.APP_URL || 'http://localhost:5011'
 const SESSION_TOKEN = process.env.SESSION_TOKEN || ''
 const CHROME_PATH = '/Users/mima1234/.local/lib/chrome-for-testing/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
 
-const ALL_NODE_TYPES = ['文本节点', '图片生成', '视频生成', 'LLM 文本生成']
+// 双击空白给的是全局调色板：全部节点类型（含素材节点）
+const ALL_NODE_TYPES = ['文本节点', '图片生成', '视频生成', 'LLM 文本生成', '素材']
 
 let passed = 0
 let failed = 0
@@ -123,7 +124,7 @@ const main = async () => {
     const after = await readCanvas(page)
 
     check('菜单可见', after.menuVisible, true)
-    check('候选是全部四类节点', after.menuItems.sort(), [...ALL_NODE_TYPES].sort())
+    check('候选是全部五类节点', after.menuItems.sort(), [...ALL_NODE_TYPES].sort())
     check('选类型之前不会凭空多出节点', after.nodeCount, initial.nodeCount)
     check('不会凭空多出边', after.edgeCount, initial.edgeCount)
 

@@ -180,7 +180,8 @@ const main = async () => {
     await dragFromHandleTo(page, '.vue-flow__node-image .canvas-node-add-handle--left', { x: 700, y: 880 })
     const after = await readCanvas(page)
     check('菜单可见', after.menuVisible, true)
-    check('候选是上游提示词来源', after.menuItems.sort(), ['图片生成', '文本节点', 'LLM 文本生成'].sort())
+    // 素材节点（asset）也能给图片节点当上游，所以候选里有「素材」
+    check('候选是上游提示词/素材来源', after.menuItems.sort(), ['图片生成', '文本节点', 'LLM 文本生成', '素材'].sort())
   }
 
   console.log('\n【6】全程没有 console error')

@@ -1500,3 +1500,59 @@ html[data-theme='light'] .wf-quick-link-banner__close {
 @media (prefers-reduced-motion: reduce) {
   .workflow-canvas .vue-flow__node { animation: none; }
 }
+
+/* ===== 节点折叠（F1，对齐 LibTV 标题前的 ▶）=====
+   三处节点共用这几个类，所以放在这里而不是各自的 scoped 样式里 */
+
+.node-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: transform 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+}
+
+.node-collapse-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-block-secondary-hover);
+}
+
+/* 收起时箭头转向下 —— 和文件树同一套直觉 */
+.node-collapse-toggle.is-collapsed {
+  transform: rotate(90deg);
+}
+
+.node-collapsed-summary {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  /* 不裁的话超长摘要会溢出卡片，压到相邻节点上 */
+  overflow: hidden;
+}
+
+.node-collapsed-summary__text {
+  /* min-width: 0 是 flex 子元素能显示省略号的前提 ——
+     flex 项默认 min-width:auto，会被内容撑开，text-overflow 就不生效了 */
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 折叠后卡片不能再撑高，否则"收起"没有意义 */
+.vue-flow__node .is-collapsed {
+  min-height: 0;
+}

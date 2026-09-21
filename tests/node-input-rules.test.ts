@@ -51,22 +51,19 @@ console.log('\n【2】收集实际上游输入（只算真的产出了内容的�
     node('t', 'text', { content: '一只猫' }),
     node('i', 'image', { url: '/uploads/a.png' }),
     node('i2', 'image', { url: '' }),
-    node('target', 'image', {}),
-    node('other', 'image', {}),
   ]
-  const edges = [
-    edge('t', 'target'),
-    edge('i', 'target'),
-    edge('i2', 'target'),   // 上游还没出图，不该算
-    edge('other', 'i'),     // 与 target 无关
-  ]
-  check('只收集 target 的上游', collectUpstreamKinds(nodes, edges, 'target'), ['text', 'image'])
+  // 新签名：调用方给「入边列表 + 按 id 取节点的函数」，
+  // 不再把整个 nodes/edges 传进来重建 Map（那是每帧百万级操作的来源）
+  const readNode = (id: string) => nodes.find(n => n.id === id)
+  const inboundToTarget = [edge('t', 'target'), edge('i', 'target'), edge('i2', 'target')]
+
+  check('只收集 target 的上游', collectUpstreamKinds(inboundToTarget, readNode), ['text', 'image'])
   check('多次连同一类只算一次', collectUpstreamKinds(
-    [...nodes, node('t2', 'text', { content: '补充' })],
-    [...edges, edge('t2', 'target')],
-    'target',
+    [...inboundToTarget, edge('t', 'target')],
+    readNode,
   ), ['text', 'image'])
-  check('没有上游 → 空', collectUpstreamKinds(nodes, edges, 'other'), [])
+  check('没有入边 → 空', collectUpstreamKinds([], readNode), [])
+  check('入边指向不存在的节点 → 忽略', collectUpstreamKinds([edge('ghost', 'target')], readNode), [])
 }
 
 console.log('\n【3】就绪文案按实际输入拼，不再写死')

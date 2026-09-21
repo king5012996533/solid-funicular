@@ -42,7 +42,6 @@ import {
   addNode,
   addEdge,
   nodes,
-  edges,
   type WorkflowImageNodeData,
 } from '../../composables/useWorkflowCanvas'
 import { uploadStorageFile } from '@/api/storage'
@@ -51,6 +50,8 @@ import { describeAspectRatio, describeResolutionTier, pickValidChoice, resolveIm
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
+import { useNodeCollapse } from '../../composables/useNodeCollapse'
+import { inboundEdges, outboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import { createGenerationTask, subscribeGenerationTaskEvents, resolveGenerationTaskModel } from '@/api/generation-tasks'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
@@ -86,6 +87,7 @@ watch(
  * 连了一个还没出图的节点不算已连接，否则界面会说谎。
  */
 const inputState = useNodeInputState(() => props.id)
+const { collapsed, toggleCollapse } = useNodeCollapse(() => props.id)
 
 // 4 类状态优先级：加载 > 错误 > 有图 > ready-state（有真实上游内容）> 空态菜单
 const showLoading = computed(() => isLoading.value)
@@ -125,7 +127,9 @@ const handleFileChange = async (event: Event) => {
 }
 
 // 已有下游节点？
-const hasDownstream = computed(() => edges.value.some((e) => e.source === props.id))
+// 上下游都走共享索引：原先每帧都要遍历整个 edges 数组，节点一多就是灾难
+// （实测 1000 节点时拖拽只有 24 FPS，索引化后回到可接受区间）
+const hasDownstream = computed(() => (outboundEdges.value.get(props.id) || []).length > 0)
 
 /**
  * 自动创建一个下游 image 节点 + 连线，让画布进入 img_5 状态：
@@ -255,9 +259,8 @@ const droppedNonRasterRefsHint = ref(false)
 const upstreamReferenceUrls = computed<string[]>(() => {
   const refs: string[] = []
   let droppedCount = 0
-  const upstreamEdges = edges.value.filter((e) => e.target === props.id)
-  for (const edge of upstreamEdges) {
-    const sourceNode = nodes.value.find((n) => n.id === edge.source)
+  for (const edge of inboundEdges.value.get(props.id) || []) {
+    const sourceNode = nodeIndex.value.get(edge.source)
     if (!sourceNode) continue
     if (sourceNode.type === 'image') {
       const url = (sourceNode.data as { url?: string })?.url
@@ -544,6 +547,19 @@ watch(
   <div class="image-node-wrapper" @mouseenter="showActions = true" @mouseleave="showActions = false">
     <!-- 节点外置标题 -->
     <div class="image-node-title" :title="titleEdit.editing.value ? '' : '双击编辑名称'" @dblclick.stop="titleEdit.start">
+      <!-- 折叠开关：对齐 LibTV 标题前的 ▶ -->
+      <button
+        type="button"
+        class="node-collapse-toggle nodrag nopan"
+        :class="{ 'is-collapsed': collapsed }"
+        :title="collapsed ? '展开节点' : '折叠节点'"
+        @click.stop="toggleCollapse"
+        @mousedown.stop
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
       <el-icon class="image-node-title-icon"><Picture /></el-icon>
       <input
         v-if="titleEdit.editing.value"
@@ -570,8 +586,16 @@ watch(
     </div>
 
     <!-- 节点本体 -->
-    <div class="image-node-card" :class="{ 'is-selected': isSelected }">
+    <div class="image-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }">
 
+      <!-- 折叠态：只留一行摘要，点标题前的 ▶ 展开 -->
+      <div v-if="collapsed" class="node-collapsed-summary">
+        <span class="node-collapsed-summary__text">
+          {{ inputState.connectedLabel || inputState.emptyLabel }}
+        </span>
+      </div>
+
+      <template v-else>
       <!-- 空态：按类型声明需要什么输入 + 能力项。
            文案来自 node-input-rules（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="image-node-empty">
@@ -673,6 +697,7 @@ watch(
         style="display: none"
         @change="handleFileChange"
       />
+      </template>
     </div>
 
     <CanvasNodeAddHandle side="left" :visible="isSelected" />

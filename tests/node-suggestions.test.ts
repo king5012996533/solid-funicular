@@ -13,7 +13,7 @@ import {
 } from '../src/views/workflow/config/node-suggestions'
 import type { WorkflowNodeType } from '../src/views/workflow/composables/useWorkflowCanvas'
 
-const ALL_TYPES: WorkflowNodeType[] = ['text', 'image', 'video', 'llmConfig']
+const ALL_TYPES: WorkflowNodeType[] = ['text', 'image', 'video', 'llmConfig', 'asset']
 
 let passed = 0
 let failed = 0
@@ -41,7 +41,7 @@ console.log('\n【1】展示信息覆盖全部节点类型，且展示顺序稳�
     llmConfig: types.includes('llmConfig'),
   }
   check('四类节点都有展示信息', coverage, { text: true, image: true, video: true, llmConfig: true })
-  check('展示顺序固定为 文本/图片/视频/LLM', types, ['text', 'image', 'video', 'llmConfig'])
+  check('展示顺序固定为 文本/图片/视频/LLM/素材', types, ['text', 'image', 'video', 'llmConfig', 'asset'])
   check('每项都有名字和图标', NODE_TYPE_PRESENTATION.every(i => !!i.name && !!i.icon && !!i.color), true)
   check('能按类型取到展示信息', getNodeTypePresentation('image')?.name, '图片生成')
 }
@@ -58,8 +58,8 @@ console.log('\n【2】从右侧拖出（下游）：只给「下游真的会读�
 console.log('\n【3】从左侧拖出（上游）：新节点会变成上游，候选要反查')
 {
   // 会读上游文本与参考图的：图片、视频
-  check('图片的上游 → 文本/LLM/图片', suggestNodeTypes('image', 'upstream'), ['text', 'image', 'llmConfig'])
-  check('视频的上游 → 文本/LLM/图片', suggestNodeTypes('video', 'upstream'), ['text', 'image', 'llmConfig'])
+  check('图片的上游 → 文本/LLM/图片/素材', suggestNodeTypes('image', 'upstream'), ['text', 'image', 'llmConfig', 'asset'])
+  check('视频的上游 → 文本/LLM/图片/素材', suggestNodeTypes('video', 'upstream'), ['text', 'image', 'llmConfig', 'asset'])
   // 会读上游文本的：LLM 节点（链式），所以 LLM 可以接在文本或 LLM 后面
   check('LLM 的上游 → 文本/LLM', suggestNodeTypes('llmConfig', 'upstream'), ['text', 'llmConfig'])
   // 文本节点不读上游，所以它没有上游候选

@@ -66,6 +66,12 @@ export const NODE_INPUT_SPECS: Record<WorkflowNodeType, NodeInputSpec> = {
     optional: ['text'],
     emptyHint: '连接文本节点作为输入，或直接写系统提示词',
   },
+  // 素材节点是上游来源，不消费别的节点
+  asset: {
+    required: [],
+    optional: [],
+    emptyHint: '从素材库选择一个素材，或上传新的',
+  },
 }
 
 /** 上游节点的最小形状，避免纯规则层依赖完整的 Vue Flow 类型 */
@@ -104,21 +110,33 @@ export const readUpstreamKind = (node?: UpstreamNodeLike): NodeInputKind | null 
     return node.type === 'image' ? 'image' : 'video'
   }
 
+  // 素材节点：按素材种类提供图片或视频输入 —— 它对下游就是一个素材来源
+  if (node.type === 'asset') {
+    const data = (node.data || {}) as { url?: string; assetType?: 'image' | 'video' }
+    const url = String(data.url || '').trim()
+    if (!url) return null
+    return data.assetType === 'video' ? 'video' : 'image'
+  }
+
   return null
 }
 
-/** 收集某个节点**实际可用**的上游输入种类（去重、按固定顺序） */
+/**
+ * 收集某个节点**实际可用**的上游输入种类（去重、按固定顺序）。
+ *
+ * 参数是「入边列表 + 按 id 取节点的函数」而不是完整的 nodes/edges 数组：
+ * 早期版本每次都 `new Map(nodesList.map(...))`，在节点组件里调用即变成
+ * 每帧每节点重建一次全量 Map（1000 节点 = 每帧百万级操作）。
+ * 现在由调用方提供画布级的索引，这里只做 O(入边数) 的工作。
+ */
 export const collectUpstreamKinds = (
-  nodesList: UpstreamNodeLike[],
-  edgesList: EdgeLike[],
-  nodeId: string,
+  inboundEdges: EdgeLike[],
+  readNode: (id: string) => UpstreamNodeLike | undefined,
 ): NodeInputKind[] => {
-  const byId = new Map(nodesList.map((node) => [node.id, node]))
   const kinds = new Set<NodeInputKind>()
 
-  for (const edge of edgesList) {
-    if (edge.target !== nodeId) continue
-    const kind = readUpstreamKind(byId.get(edge.source))
+  for (const edge of inboundEdges) {
+    const kind = readUpstreamKind(readNode(edge.source))
     if (kind) kinds.add(kind)
   }
 

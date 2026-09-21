@@ -7,7 +7,8 @@
  */
 
 import { computed, type ComputedRef } from 'vue'
-import { edges, nodes, type WorkflowNodeType } from './useWorkflowCanvas'
+import { type WorkflowNodeType } from './useWorkflowCanvas'
+import { nodeIndex, inboundEdges } from './workflow-graph-index'
 import {
   NODE_INPUT_SPECS,
   collectUpstreamKinds,
@@ -26,12 +27,12 @@ export * from '../config/node-input-rules'
 export const useNodeInputState = (nodeId: () => string): ComputedRef<NodeInputState> =>
   computed(() => {
     const id = nodeId()
-    const node = nodes.value.find((item) => item.id === id)
-    const spec = NODE_INPUT_SPECS[(node?.type as WorkflowNodeType) || 'text'] || NODE_INPUT_SPECS.text
+    const spec = NODE_INPUT_SPECS[(nodeIndex.value.get(id)?.type as WorkflowNodeType) || 'text']
+      || NODE_INPUT_SPECS.text
+    // 走共享索引：只遍历本节点的入边，不再把整个 nodes/edges 传进去重建 Map
     const kinds = collectUpstreamKinds(
-      nodes.value as unknown as Parameters<typeof collectUpstreamKinds>[0],
-      edges.value as unknown as Parameters<typeof collectUpstreamKinds>[1],
-      id,
+      inboundEdges.value.get(id) || [],
+      sourceId => nodeIndex.value.get(sourceId),
     )
     return deriveNodeInputState(spec, kinds)
   })
