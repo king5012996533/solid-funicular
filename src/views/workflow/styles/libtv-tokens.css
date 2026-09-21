@@ -1,0 +1,135 @@
+/**
+ * 画布外观对齐 LibTV
+ *
+ * 这里的值全部是从 LibTV 线上画布实测抓下来的，不是凭感觉调的：
+ *
+ *   画布底            #141414
+ *   网格              点阵，间距 16px，圆点 r=0.5，颜色 #474747
+ *   节点卡片底色      #262626
+ *   节点卡片圆角      12px
+ *   节点卡片描边      1px；未选中 #ffffff14（叠在 #262626 上约等于 #333），选中 #a8a8a8
+ *   悬浮面板          #1f1f1ff2（玻璃）/ #242424（实心）
+ *   分隔与描边        #ffffff14 / #ffffff1f / #ffffff29
+ *   文字              #fff / #fff9（60%）/ #ffffff4d（30%）
+ *   品牌色            #13d5ff（底）/ #5ddcff（文字与图标）
+ *
+ * 和我们原来的差别主要有两点，都不是随便改的：
+ *   1. 我们原来的中性色是偏蓝的（#0f0f12 / #1a1a1c / #ccddff1f / #e0f5ff99），
+ *      LibTV 用的是纯中性灰（#fff 加透明度叠在深灰上）。偏蓝会显得"科技感重"，
+ *      纯中性更适合当图片、视频的衬底 —— 素材本身的颜色不被底色带偏。
+ *   2. 我们原来选中节点是 2px 青色描边 + 流光动效 + 外发光；
+ *      LibTV 只是把 1px 描边从 #ffffff14 换成 #a8a8a8。少即是多：
+ *      选中态不该比节点内容本身还抢眼。
+ *
+ * 作用域故意收在 .workflow-container 内：
+ * 这次只改画布，/generate 等其它页面保持原样，方便对比后再决定要不要全局推。
+ */
+
+.workflow-container {
+  /* —— 画布表面 —— */
+  --canvas-workflow-bg: #141414;
+  --canvas-bg: #141414;
+  /* LibTV 只有点阵；网格线模式给一个同等低调的值，切过去也不会跳 */
+  --canvas-grid-dot: #474747;
+  --canvas-grid-line: #2a2a2a;
+
+  /* —— 节点卡片 —— */
+  --canvas-node-bg: #262626;
+  --canvas-node-border: #ffffff14;
+  --canvas-node-border-selected: #a8a8a8;
+
+  /* —— 悬浮件（工具栏、弹层、参数面板）—— */
+  --canvas-float-block-default: #1f1f1ff2;
+  --canvas-float-block-hover: #ffffff14;
+  --canvas-float-block-pressed: #ffffff1a;
+
+  /* —— 画布内的「块」级底色（小地图遮罩等）——
+     全局值 #0f0f12a8 是偏蓝的，配现在的 #141414 中性画布会泛蓝，所以在这里换成中性灰 */
+  --canvas-bg-block-default: #161616a8;
+  --canvas-bg-block-hover: #1f1f1fa8;
+  --canvas-bg-block-pressed: #0f0f0fa8;
+
+  /* —— 描边层级 —— */
+  --stroke-secondary: #ffffff14;
+  --stroke-tertiary: #ffffff14;
+
+  /* —— 叠加态（hover / active）——
+     原来带蓝的 #ccddff 会让 hover 泛青，LibTV 是纯白叠加 */
+  --bg-block-secondary-default: #ffffff0f;
+  --bg-block-secondary-hover: #ffffff14;
+  --bg-block-secondary-pressed: #ffffff1a;
+  --bg-block-primary-default: #ffffff0f;
+  --bg-block-primary-hover: #ffffff14;
+  --bg-block-primary-pressed: #ffffff1a;
+
+  /* —— 文字 —— */
+  --text-primary: #ffffff;
+  --text-secondary: #ffffff9a;
+  --text-tertiary: #ffffff4d;
+  --text-disabled: #ffffff4d;
+
+  /* —— 品牌色 —— */
+  --brand-main-default: #13d5ff;
+  /* 节点类型分色：图片/视频用全局已有的 --brand-image / --brand-video。
+     LLM 没有专属品牌色，而 --brand-bright-* 会被运行时主题接管
+     （theme-runtime.ts 会按后台配置的 primary 覆盖它），
+     拿它当节点颜色会导致「改了后台品牌色，LLM 节点图标跟着变色」。
+     所以这里显式定义一个画布内专用的 --brand-llm，颜色可预期。 */
+  --brand-llm: #a855f7;
+  --canvas-selection-border: #a8a8a8;
+}
+
+/* 浅色主题下不能直接套深色值，给一套对位的 */
+html[data-theme='light'] .workflow-container,
+body[lv-theme='light'] .workflow-container {
+  --canvas-workflow-bg: #f4f4f4;
+  --canvas-bg: #f4f4f4;
+  --canvas-grid-dot: #d4d4d4;
+  --canvas-grid-line: #e6e6e6;
+
+  --canvas-node-bg: #ffffff;
+  --canvas-node-border: #00000014;
+  --canvas-node-border-selected: #6b6b6b;
+
+  --canvas-float-block-default: #ffffffeb;
+  --canvas-float-block-hover: #0000000d;
+  --canvas-float-block-pressed: #00000012;
+
+  --canvas-bg-block-default: #eaeaeaeb;
+  --canvas-bg-block-hover: #e0e0e0eb;
+  --canvas-bg-block-pressed: #d8d8d8eb;
+
+  --stroke-secondary: #00000014;
+  --stroke-tertiary: #00000014;
+
+  --bg-block-secondary-default: #00000008;
+  --bg-block-secondary-hover: #0000000d;
+  --bg-block-secondary-pressed: #00000012;
+  --bg-block-primary-default: #00000008;
+  --bg-block-primary-hover: #0000000d;
+  --bg-block-primary-pressed: #00000012;
+
+  --text-primary: #161616;
+  --text-secondary: #1616169a;
+  --text-tertiary: #1616164d;
+  --text-disabled: #1616164d;
+
+  --brand-main-default: #05a3c5;
+  --brand-llm: #8b3dff;
+  --canvas-selection-border: #6b6b6b;
+}
+
+/* 画布底：LibTV 是 #141414 的点阵，间距 16、圆点半径 0.5 */
+.workflow-canvas .vue-flow__background {
+  background-color: var(--canvas-workflow-bg, #141414);
+}
+
+.workflow-canvas .vue-flow__background pattern circle {
+  fill: var(--canvas-grid-dot, #474747);
+}
+
+/* 节点选中态：只换描边颜色，不加外发光、不动效。
+   我们的节点卡片自己带 1px 描边，所以这里彻底清掉 Vue Flow 的默认描边与阴影。 */
+.workflow-canvas .vue-flow__node.selected .wf-node {
+  box-shadow: none;
+}
