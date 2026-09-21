@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onUnmounted, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useLoginModalStore } from '@/stores/login-modal'
 import { useSystemSettingsStore } from '@/stores/system-settings'
@@ -10,6 +11,17 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 import { TypeSelector, type CreationType } from './selectors'
 import { AgentToolbar, ImageToolbar, VideoToolbar, DigitalHumanToolbar } from './toolbars'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
+import {
+  probeReferenceUrls,
+  validateReferenceUrls,
+} from '@/config/reference-validation'
+import {
+  STYLE_PRESETS,
+  appendPreset,
+  hasPreset,
+  removePreset,
+  type PromptPreset,
+} from '@/config/prompt-presets'
 import MentionPicker from './MentionPicker.vue'
 // 引用解析是纯逻辑（工作包 A 拥有实现），composer 只调用冻结接口
 import {
@@ -173,6 +185,25 @@ const emit = defineEmits<{
 
 // 输入内容
 const inputValue = ref('')
+/**
+ * 「自动校验素材」开关（对齐 LibTV 的节点开关）。
+ *
+ * 默认开启：上游只接受栅格格式、CDN 签名会过期，这两类问题在提交前拦下来
+ * 比等上游报错划算。想强制提交可以在 composer 上关掉它。
+ * 做成持久化偏好 —— 这是用户的习惯，不该每次刷新都重置。
+ */
+const AUTO_VALIDATE_STORAGE_KEY = 'canana:generator:auto-validate-references'
+const readAutoValidatePreference = (): boolean => {
+  if (typeof window === 'undefined') return true
+  const stored = window.localStorage.getItem(AUTO_VALIDATE_STORAGE_KEY)
+  return stored === null ? true : stored === '1'
+}
+const autoValidateReferences = ref(readAutoValidatePreference())
+watch(autoValidateReferences, (on) => {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(AUTO_VALIDATE_STORAGE_KEY, on ? '1' : '0')
+})
+
 const imageReferenceImages = ref<string[]>([])
 const videoFirstFrameImage = ref('')
 const videoLastFrameImage = ref('')
@@ -386,6 +417,48 @@ const handleInput = (e: Event) => {
 // token 是纯文本 `@图片1`，这里只负责「触发面板 / 插入 token / 解析成载荷」，
 // 解析规则全部来自工作包 A 的冻结接口，composer 不自己实现语义。
 
+// ===== 能力 chip 行（F3）=====
+// 图片/视频类型才有 chip；文本与数字人类型不显示
+const showCapabilityChips = computed(() => currentType.value === 'image' || currentType.value === 'video')
+
+const styleChipRef = ref<HTMLElement | null>(null)
+const stylePanelOpen = ref(false)
+
+const toggleStyleChip = (e: Event) => {
+  e.stopPropagation()
+  stylePanelOpen.value = !stylePanelOpen.value
+}
+
+/** 当前提示词里已经套用了几个风格片段（chip 的角标与高亮用） */
+const appliedStyleCount = computed(() =>
+  STYLE_PRESETS.filter(preset => hasPreset(inputValue.value, preset)).length,
+)
+const hasStylePreset = (preset: PromptPreset) => hasPreset(inputValue.value, preset)
+
+/**
+ * 点风格项：已在提示词里就移除，否则追加。
+ * 做成可切换是因为风格是"套在描述上的附加说明"，
+ * 试几个再取消是常见操作；靠手动删文本会很烦。
+ */
+const toggleStylePreset = (preset: PromptPreset) => {
+  inputValue.value = hasPreset(inputValue.value, preset)
+    ? removePreset(inputValue.value, preset)
+    : appendPreset(inputValue.value, preset)
+}
+
+/** 从 chip 打开 @ 素材引用面板：锚点取提示词输入框，和敲 @ 的效果一致 */
+const openMentionFromChip = () => {
+  const el = document.querySelector('.prompt-textarea') as HTMLElement | null
+  if (el) {
+    const rect = el.getBoundingClientRect()
+    mentionAnchor.value = { x: rect.left, y: rect.top }
+  }
+  mentionCaret.value = inputValue.value.length
+  mentionTarget.value = 'textarea'
+  stylePanelOpen.value = false
+  mentionVisible.value = true
+}
+
 const mentionVisible = ref(false)
 const mentionAnchor = ref({ x: 0, y: 0 })
 /** 敲下 @ 那一刻的光标位置：插入 token 必须回到这里，否则会插到句子末尾 */
@@ -534,11 +607,60 @@ const handleKeydown = (e: KeyboardEvent) => {
 }
 
 // 提交消息
-const handleSubmit = () => {
+/**
+ * 收集本次要发出去的参考图（按类型分别取）。
+ * 抽出来是因为「校验」和「组装载荷」都要用同一份列表 ——
+ * 两处各自算一次的话，很容易出现"校验的时候是这个数组、发出去的是另一个"。
+ */
+const collectOutgoingReferences = (resolvedMedia: string[]): string[] => {
+  if (currentType.value === 'image') {
+    return hasReferenceTokens.value ? [...resolvedMedia] : [...imageReferenceImages.value]
+  }
+  if (currentType.value === 'video') {
+    return hasReferenceTokens.value
+      ? [...resolvedMedia]
+      : [videoFirstFrameImage.value, videoLastFrameImage.value].filter(Boolean)
+  }
+  return []
+}
+
+/**
+ * 提交前校验参考图（对齐 LibTV 的「自动校验素材」开关）。
+ *
+ * 两层：先同步查格式（零成本），再并发探测可访问性。
+ * 为什么值得做：上游只接受栅格格式，SVG/HEIC 会让服务端 PIL 解码失败；
+ * 而 CDN 的签名 URL 会过期（我们实测过 403）。这类问题在提交前就能发现，
+ * 不必浪费一次任务和积分去换一个必然的失败。
+ *
+ * 返回 true 表示可以继续提交。
+ */
+const ensureReferencesUsable = async (urls: string[]): Promise<boolean> => {
+  if (!autoValidateReferences.value || !urls.length) return true
+
+  const formatResult = validateReferenceUrls(urls)
+  const issues = [...formatResult.invalid]
+
+  // 格式没问题的再探可访问性，避免对注定要拦的 URL 白发请求
+  if (formatResult.valid.length) {
+    issues.push(...await probeReferenceUrls(formatResult.valid))
+  }
+
+  if (!issues.length) return true
+
+  const detail = issues.slice(0, 3).map(i => i.reason).join('；')
+  const more = issues.length > 3 ? ` 等 ${issues.length} 处` : ''
+  ElMessage.warning(`参考素材校验未通过：${detail}${more}。可在下方关掉「自动校验素材」后强制提交`)
+  return false
+}
+
+const handleSubmit = async () => {
   const resolved = resolvedReferences.value
   // 没有引用任何 token 时直接用原始输入，保证既有调用方行为逐字节不变
   const message = (hasReferenceTokens.value ? resolved.text : inputValue.value).trim()
   if (!message) return
+
+  // 提交前校验参考图；不通过就停在本地，不发请求
+  if (!await ensureReferencesUsable(collectOutgoingReferences(resolved.media))) return
 
   // 引用失效（序号不存在 / 资产已废弃）不阻塞提交，但要把原文带出去让调用方提示
   const unresolvedOptions = resolved.unresolved.length
@@ -561,7 +683,7 @@ const handleSubmit = () => {
       ratio: toolbar?.currentSize || '',
       resolution: sizeConfig?.quality || '',
       // 显式引用覆盖自动注入：只要有 token，参考图就完全按解析结果来
-      referenceImages: hasReferenceTokens.value ? [...resolved.media] : [...imageReferenceImages.value],
+      referenceImages: collectOutgoingReferences(resolved.media),
       count: toolbar?.currentCount || 1,
       ...unresolvedOptions,
     }
@@ -572,9 +694,7 @@ const handleSubmit = () => {
     emit('send', message, currentType.value, {
       model: toolbar.getCurrentModelLabel(),
       // 无引用时首帧 / 尾帧按位置映射进 referenceImages；有引用时以解析结果为准
-      referenceImages: hasReferenceTokens.value
-        ? [...resolved.media]
-        : [videoFirstFrameImage.value, videoLastFrameImage.value].filter(Boolean),
+      referenceImages: collectOutgoingReferences(resolved.media),
       ratio: toolbar.currentSize,
       resolution: sizeConfig.quality,
       duration: toolbar.currentDuration,
@@ -1414,6 +1534,63 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <!-- 能力 chip 行（对齐 LibTV）。只摆有真实行为的两项：
+               `参考` 打开 @ 素材引用面板；`风格` 把风格片段追加到提示词。
+               LibTV 的 `标记 / 特效 / 角色库 / 运镜` 需要后端能力，不摆 —— 宁缺勿假。 -->
+          <div
+            v-if="!isCollapsed && showCapabilityChips"
+            class="generator-capability-chips"
+          >
+            <button
+              v-if="referenceableAssets !== undefined"
+              type="button"
+              class="generator-capability-chip"
+              title="引用上游素材（也可以直接在提示词里敲 @）"
+              @click.stop="openMentionFromChip"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              <span>参考</span>
+            </button>
+
+            <button
+              ref="styleChipRef"
+              type="button"
+              class="generator-capability-chip"
+              :class="{ 'is-active': appliedStyleCount > 0 }"
+              :title="appliedStyleCount ? `已套用 ${appliedStyleCount} 个风格，点开可取消` : '套用风格片段'"
+              @click.stop="toggleStyleChip"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 3l2.1 5.1L19 10l-4.9 1.9L12 17l-2.1-5.1L5 10l4.9-1.9L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+              </svg>
+              <span>风格</span>
+              <span v-if="appliedStyleCount" class="generator-capability-chip__count">{{ appliedStyleCount }}</span>
+            </button>
+          </div>
+
+          <SelectPopup
+            v-model:visible="stylePanelOpen"
+            :trigger-ref="styleChipRef"
+            :placement="popupPlacement"
+            title="风格"
+          >
+            <ul class="generator-preset-list">
+              <li
+                v-for="preset in STYLE_PRESETS"
+                :key="preset.key"
+                class="generator-preset-item"
+                :class="{ 'is-active': hasStylePreset(preset) }"
+                :title="preset.fragment"
+                @click.stop="toggleStylePreset(preset)"
+              >
+                <span class="generator-preset-item__label">{{ preset.label }}</span>
+                <span v-if="hasStylePreset(preset)" class="generator-preset-item__check">✓</span>
+              </li>
+            </ul>
+          </SelectPopup>
+
           <!-- 提示词输入区域 -->
           <div :class="['prompt-container', 'prompt-editor-container-HRhsP7', { 'collapsed-L4sRxQ': isCollapsed && !isSidebar }]"
                :style="`--content-generator-prompt-control-height:${promptControlHeight};--content-generator-prompt-control-line-height:24px`">
@@ -1632,6 +1809,26 @@ onUnmounted(() => {
                 @last-frame-change="handleVideoLastFrameChange"
                 @clear-last-frame="clearVideoLastFrame"
               />
+
+              <!-- 自动校验素材（对齐 LibTV 的节点开关）：提交前查格式与可访问性。
+                   只做这一个开关 —— 联网搜索 / 智能引用 AutoLink 需要后端能力，不摆。 -->
+              <button
+                v-if="showAdvancedParams"
+                type="button"
+                class="generator-switch"
+                :class="{ 'is-on': autoValidateReferences }"
+                role="switch"
+                :aria-checked="autoValidateReferences"
+                :title="autoValidateReferences
+                  ? '提交前会校验参考素材的格式与可访问性，不通过则拦下'
+                  : '已关闭：不校验参考素材，直接提交'"
+                @click.stop="autoValidateReferences = !autoValidateReferences"
+              >
+                <span class="generator-switch__track" aria-hidden="true">
+                  <span class="generator-switch__thumb" />
+                </span>
+                <span class="generator-switch__label">自动校验素材</span>
+              </button>
             </template>
           </div>
         </div>
@@ -2523,4 +2720,138 @@ onUnmounted(() => {
 .generator-param-chip.is-active .generator-param-chip-hint {
   color: var(--brand-main-default);
 }
+/* ===== 能力 chip 行（F3）===== */
+.generator-capability-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 8px;
+}
+
+.generator-capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--stroke-secondary);
+  background: var(--bg-block-secondary-default);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.generator-capability-chip:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+
+/* 已套用风格时才高亮：它是有状态的；「参考」是纯入口，不需要状态 */
+.generator-capability-chip.is-active {
+  color: var(--brand-main-default);
+  border-color: var(--brand-main-default);
+}
+
+.generator-capability-chip__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--brand-main-default);
+  color: var(--canvas-workflow-bg, #141414);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* ===== 风格预设面板 ===== */
+.generator-preset-list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.generator-preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.generator-preset-item:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+
+.generator-preset-item.is-active {
+  color: var(--brand-main-default);
+}
+
+.generator-preset-item__check {
+  font-size: 12px;
+}
+
+/* ===== 节点开关（F4）===== */
+.generator-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.generator-switch:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+
+.generator-switch__track {
+  position: relative;
+  display: inline-block;
+  width: 26px;
+  height: 15px;
+  border-radius: 8px;
+  background: var(--bg-block-secondary-pressed);
+  transition: background-color 0.16s ease;
+}
+
+.generator-switch__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: transform 0.16s ease, background-color 0.16s ease;
+}
+
+.generator-switch.is-on .generator-switch__track {
+  background: var(--brand-main-default);
+}
+
+.generator-switch.is-on .generator-switch__thumb {
+  transform: translateX(11px);
+  background: #fff;
+}
+
 </style>

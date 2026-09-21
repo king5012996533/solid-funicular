@@ -48,6 +48,7 @@ import {
 import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
 import { describeAspectRatio, describeResolutionTier, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
+import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
@@ -250,18 +251,6 @@ onMounted(() => {
 // 上游图片素材 → 作为图生图参考图（直接拿 url 数组）
 // 注意：上游图生图模型（如 gpt-image-2）只接受栅格格式，SVG/PDF/HEIC 等会让 PIL 在
 // BytesIO 解码时报 "cannot identify image file"，必须在客户端过滤掉。
-const RASTER_REFERENCE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'])
-const isRasterReferenceUrl = (url: string): boolean => {
-  if (!url) return false
-  // data url 直接放行
-  if (url.startsWith('data:image/')) return true
-  // 截掉 query/hash 再取扩展名
-  const cleanUrl = url.split('?')[0].split('#')[0]
-  const dotIndex = cleanUrl.lastIndexOf('.')
-  if (dotIndex < 0) return true // 无扩展名时不强制拦截
-  const ext = cleanUrl.slice(dotIndex + 1).toLowerCase()
-  return RASTER_REFERENCE_EXTENSIONS.has(ext)
-}
 const droppedNonRasterRefsHint = ref(false)
 const upstreamReferenceUrls = computed<string[]>(() => {
   const refs: string[] = []

@@ -1,4 +1,5 @@
 <script setup>
+import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import ContentGenerator from '@/components/generate/ContentGenerator.vue'
 import SidebarEmptyState from '@/components/canana/SidebarEmptyState.vue'
@@ -283,20 +284,8 @@ const handleAddImageToCanvas = (url) => {
   emit('add-image-to-canvas', { url })
 }
 
-// 仅允许栅格格式的参考图（svg/pdf/heic 等矢量格式上游 PIL 解码会失败）
-const RASTER_REFERENCE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'])
-const isRasterReferenceUrl = (url) => {
-  if (!url) return false
-  if (typeof url === 'string' && url.startsWith('data:image/')) {
-    // 排除 svg+xml
-    return !url.startsWith('data:image/svg')
-  }
-  const clean = String(url).split('?')[0].split('#')[0]
-  const dot = clean.lastIndexOf('.')
-  if (dot < 0) return true
-  return RASTER_REFERENCE_EXTENSIONS.has(clean.slice(dot + 1).toLowerCase())
-}
-
+// 参考图格式校验统一放在 config/reference-validation.ts ——
+// 这里原来另写了一份，且和 ImageNode 那份行为不一致（漏了 SVG 的 data URL）
 // 调用图片生成 API（写入到指定 aiMsg.images）
 const runImageGeneration = async (prompt, refImages, aiMsg) => {
   try {
