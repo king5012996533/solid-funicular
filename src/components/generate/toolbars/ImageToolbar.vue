@@ -8,6 +8,7 @@
 
 import { ref, computed, watch, onMounted } from 'vue'
 import SelectPopup from '../common/SelectPopup.vue'
+import GeneratorCountStepper from '../GeneratorCountStepper.vue'
 import {
   getAllImageModels,
   getDefaultImageModelKey,
@@ -93,11 +94,6 @@ const hasQualityControl = computed(() => qualityOptions.value.length > 0)
 // 当前生成数量：用户每次打开都从 1 开始，不记忆历史值
 const currentCount = ref<number>(IMAGE_COUNT_DEFAULT)
 
-const clampCount = (value: number) => {
-  if (!Number.isFinite(value)) return IMAGE_COUNT_DEFAULT
-  return Math.min(currentImageMax.value, Math.max(IMAGE_COUNT_MIN, Math.floor(value)))
-}
-
 const findChoice = (choices: ParamChoice[], key: string) => choices.find(item => item.key === key) || null
 
 const currentSizeChoice = computed(() => findChoice(sizeOptions.value, currentSize.value))
@@ -122,13 +118,16 @@ const hasModel = computed(() => modelVersions.value.length > 0)
  * 参数摘要：一行页脚文案，格式固定为 `比例 · 画质 · 分辨率 · 数量`。
  * 模型没声明的段直接跳过，不补一个它不支持的假参数。
  */
+// 摘要格式对齐 LibTV：`16:9 · 标准画质 · 2K · 1张`
+// 数量段**始终显示**（LibTV 的 `1张` 也是始终在的）；
+// 能不能改由模型上限决定 —— 上限为 1 时不摆步进器，但摘要里照样交代清楚是 1 张
 const paramSummary = computed(() => {
   const parts: string[] = []
   const size = currentSizeChoice.value
   if (size) parts.push(size.label)
   if (currentQualityChoice.value) parts.push(currentQualityChoice.value.label)
   if (size?.hint) parts.push(size.hint)
-  if (currentImageMax.value > 1) parts.push(`${currentCount.value}张`)
+  parts.push(`${currentCount.value}张`)
   return parts.join(' · ')
 })
 
@@ -174,21 +173,6 @@ const selectSize = (size: string) => {
 
 const selectQuality = (quality: string) => {
   currentQuality.value = quality
-}
-
-const decreaseCount = (e: Event) => {
-  e.stopPropagation()
-  currentCount.value = clampCount(currentCount.value - 1)
-}
-
-const increaseCount = (e: Event) => {
-  e.stopPropagation()
-  currentCount.value = clampCount(currentCount.value + 1)
-}
-
-const handleCountInput = (e: Event) => {
-  const value = Number((e.target as HTMLInputElement).value)
-  currentCount.value = clampCount(value)
 }
 
 // 模型列表变化时，保证选中项一定存在于目录里
@@ -422,20 +406,7 @@ defineExpose({
 
           <div v-if="currentImageMax > 1" class="generator-param-row">
             <div class="generator-param-row-label">数量</div>
-            <div class="image-count-stepper" :title="`单次生成数量（该模型上限 ${currentImageMax} 张）`" @click.stop>
-              <button type="button" class="image-count-step-btn" :disabled="currentCount <= 1" aria-label="减少生成数量" @click="decreaseCount">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M5 12h14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-                </svg>
-              </button>
-              <input type="number" class="image-count-value" :min="1" :max="currentImageMax" :step="1"
-                     :value="currentCount" @input="handleCountInput" @click.stop />
-              <button type="button" class="image-count-step-btn" :disabled="currentCount >= currentImageMax" aria-label="增加生成数量" @click="increaseCount">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-                </svg>
-              </button>
-            </div>
+            <GeneratorCountStepper v-model:value="currentCount" :max="currentImageMax" unit="张" />
           </div>
         </div>
       </SelectPopup>
@@ -464,62 +435,4 @@ defineExpose({
 }
 
 /* 生成数量步进器（摘要面板内） */
-.image-count-stepper {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 32px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--bg-block-primary-default);
-  border: 1px solid var(--stroke-secondary);
-}
-
-.image-count-step-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.image-count-step-btn:hover:not(:disabled) {
-  background: var(--bg-block-secondary-hover);
-}
-
-.image-count-step-btn:active:not(:disabled) {
-  background: var(--bg-block-secondary-pressed);
-}
-
-.image-count-step-btn:disabled {
-  color: var(--text-disabled);
-  cursor: not-allowed;
-}
-
-.image-count-value {
-  width: 28px;
-  height: 22px;
-  text-align: center;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  background: transparent;
-  border: none;
-  outline: none;
-  padding: 0;
-  -moz-appearance: textfield;
-}
-
-.image-count-value::-webkit-outer-spin-button,
-.image-count-value::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
 </style>

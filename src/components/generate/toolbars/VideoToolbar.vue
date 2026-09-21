@@ -6,6 +6,7 @@
 
 import { ref, computed, watch, onMounted } from 'vue'
 import SelectPopup from '../common/SelectPopup.vue'
+import GeneratorCountStepper from '../GeneratorCountStepper.vue'
 import {
   getAllVideoModels,
   getDefaultVideoModelKey,
@@ -13,7 +14,7 @@ import {
   getModelByName,
   type VideoModel,
 } from '@/config/models'
-import { resolveVideoParamSchema, type ParamChoice } from '@/config/model-params'
+import { describeAspectRatio, resolveVideoParamSchema, type ParamChoice } from '@/config/model-params'
 
 // 弹出方向类型
 type Placement = 'top' | 'bottom' | 'auto'
@@ -106,12 +107,26 @@ const getCurrentSizeConfig = () => ({
 })
 
 /** 页脚摘要：`比例 · 时长 · 分辨率 · 数量`；模型没声明的段直接跳过（视频无画质维度） */
+/**
+ * 摘要格式对齐 LibTV：`16:9 · 720P · 5s · 1个`
+ *
+ * 三个细节和原来的写法不同，都是照着 LibTV 的实测格式来的：
+ *   1. 顺序是「比例 · 分辨率 · 时长 · 数量」—— 原来把时长排在了分辨率前面
+ *   2. 比例用紧凑写法（`16:9` 而不是选项里的 `16:9 横版`）
+ *   3. 时长用 `5s` 而不是 `5 秒`；数量段**始终显示**，单位是「个」
+ */
+const compactDuration = computed(() => {
+  const key = currentDurationChoice.value?.key || ''
+  if (!key) return ''
+  return /s$/i.test(key) ? key : `${key}s`
+})
+
 const paramSummary = computed(() => {
   const parts: string[] = []
-  if (currentRatioChoice.value) parts.push(currentRatioChoice.value.label)
-  if (currentDurationChoice.value) parts.push(currentDurationChoice.value.label)
+  if (currentRatioChoice.value) parts.push(describeAspectRatio(currentRatioChoice.value.key))
   if (currentResolutionChoice.value) parts.push(currentResolutionChoice.value.label)
-  if (currentVideoMax.value > 1) parts.push(`${currentCount.value}条`)
+  if (compactDuration.value) parts.push(compactDuration.value)
+  parts.push(`${currentCount.value}个`)
   return parts.join(' · ')
 })
 
@@ -395,6 +410,13 @@ defineExpose({
                 @click.stop="selectResolution(resolution.key)"
               >{{ resolution.label }}</button>
             </div>
+          </div>
+
+          <!-- 数量：只在模型声明上限 > 1 时出现。
+               上游只支持单条却摆一个按不动的控件是噪音，但摘要里照样交代「1个」 -->
+          <div v-if="currentVideoMax > 1" class="generator-param-row">
+            <div class="generator-param-row-label">数量</div>
+            <GeneratorCountStepper v-model:value="currentCount" :max="currentVideoMax" unit="个" />
           </div>
         </div>
       </SelectPopup>

@@ -250,6 +250,47 @@ console.log('\n【12】失效值校验：旧画布里的占位值不能透传到
   )
 }
 
+console.log('\n【13】参数维度按节点类型分开：图片和视频不能互相泄漏维度')
+{
+  // 对齐 LibTV 的依据：图片节点的摘要形如 `16:9 · 标准画质 · 2K · 1张`，
+  // 视频节点是 `16:9 · 720P · 5s · 1个` —— 两边暴露的参数维度完全不同。
+  // 这条守的是「同一个模型在图片节点和视频节点上问的是不同的东西」。
+  const img = resolveImageParamSchema(imageModel(), 'standard')
+  const vid = resolveVideoParamSchema(videoModel())
+
+  const imgDims = Object.keys(img).filter(k => Array.isArray((img as Record<string, unknown>)[k]))
+  const vidDims = Object.keys(vid).filter(k => Array.isArray((vid as Record<string, unknown>)[k]))
+
+  check('图片侧暴露尺寸维度', imgDims.includes('sizes'), true)
+  check('图片侧暴露画质维度', imgDims.includes('qualities'), true)
+  check('图片侧不暴露视频的维度',
+    imgDims.some(k => ['ratios', 'durations', 'resolutions', 'features'].includes(k)), false)
+
+  check('视频侧暴露比例维度', vidDims.includes('ratios'), true)
+  check('视频侧暴露时长维度', vidDims.includes('durations'), true)
+  check('视频侧暴露分辨率维度', vidDims.includes('resolutions'), true)
+  check('视频侧暴露输入模式维度', vidDims.includes('features'), true)
+  check('视频侧不暴露图片的维度',
+    vidDims.some(k => ['sizes', 'qualities'].includes(k)), false)
+
+  // 数量上限两边都读同一个字段，但各自独立解析
+  check('图片数量上限默认 1', img.maxCount, 1)
+  check('视频数量上限默认 1', vid.maxCount, 1)
+}
+
+console.log('\n【14】数量上限：声明了才放开，没声明保守为 1')
+{
+  check('图片：声明 4 → 4', resolveImageParamSchema(
+    imageModel({ capabilityJson: { maxImagesPerRequest: 4 } }), 'standard').maxCount, 4)
+  // 视频侧同样读 capabilityJson，字段名兼容 maxImagesPerRequest / maxCount
+  check('视频：声明 maxImagesPerRequest 2 → 2', resolveVideoParamSchema(
+    videoModel({ capabilityJson: { maxImagesPerRequest: 2 } })).maxCount, 2)
+  check('视频：声明 maxCount 3 → 3', resolveVideoParamSchema(
+    videoModel({ capabilityJson: { maxCount: 3 } })).maxCount, 3)
+  check('视频：非法值 → 回落到 1', resolveVideoParamSchema(
+    videoModel({ capabilityJson: { maxCount: 0 } })).maxCount, 1)
+}
+
 console.log(`\n${'─'.repeat(52)}`)
 console.log(`  通过 ${passed} / 失败 ${failed}`)
 process.exit(failed ? 1 : 0)

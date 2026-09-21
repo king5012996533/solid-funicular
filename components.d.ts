@@ -71,6 +71,7 @@ declare module 'vue' {
     ElTag: typeof import('element-plus/es')['ElTag']
     FailedTasksDrawer: typeof import('./src/components/FailedTasksDrawer.vue')['default']
     FrontstagePageShell: typeof import('./src/components/layout/FrontstagePageShell.vue')['default']
+    GeneratorCountStepper: typeof import('./src/components/generate/GeneratorCountStepper.vue')['default']
     GlobalLoadingOverlay: typeof import('./src/components/common/GlobalLoadingOverlay.vue')['default']
     Header: typeof import('./src/components/canana/Header.vue')['default']
     HomeBanner: typeof import('./src/components/home/components/HomeBanner.vue')['default']
