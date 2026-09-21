@@ -280,30 +280,42 @@ const createDefaultSystemConfig = () => ({
   },
 })
 
+/**
+ * 归一化一个「限流 / 并发」配置项。
+ *
+ * 踩过的坑（与 server/redis/config.ts 的 normalizeInteger 是同一类）：
+ * `Number(null)` 和 `Number('')` 都等于 0，而 0 是有限数 —— 于是"没填这个值"
+ * 被当成"填了 0"，再被 Math.max(1, ...) 抬成 **1**。
+ * 后果是后台把这些限流显式存成 1 之后，就永久盖住了正确的默认值：
+ * 登录 1 次/分钟、提交任务 1 次/分钟，用户第一次点完就一直是"过于频繁"。
+ *
+ * 所以判定顺序是：先判"空"（null / undefined / 空串）→ 默认值；
+ * 再判数值合法性；非正数同样视为未配置 → 默认值。只有明确填了正数才用它。
+ */
+export const normalizeRuntimeLimit = (value: unknown, fallback: number, max: number) => {
+  const raw = typeof value === 'string' ? value.trim() : value
+  if (raw === null || raw === undefined || raw === '') {
+    return fallback
+  }
+
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback
+  }
+
+  return Math.max(1, Math.min(max, Math.floor(parsed)))
+}
+
 const normalizeRedisRuntimeSettings = (value?: SystemRedisRuntimeSettingsPayload | null) => {
   const defaults = createDefaultSystemConfig().redisRuntimeSettings
   return {
-    taskSubmitRateLimit: Number.isFinite(Number(value?.taskSubmitRateLimit))
-      ? Math.max(1, Math.min(200, Number(value?.taskSubmitRateLimit)))
-      : defaults.taskSubmitRateLimit,
-    authVerificationRateLimit: Number.isFinite(Number(value?.authVerificationRateLimit))
-      ? Math.max(1, Math.min(200, Number(value?.authVerificationRateLimit)))
-      : defaults.authVerificationRateLimit,
-    authLoginRateLimit: Number.isFinite(Number(value?.authLoginRateLimit))
-      ? Math.max(1, Math.min(200, Number(value?.authLoginRateLimit)))
-      : defaults.authLoginRateLimit,
-    providerModelDiscoverRateLimit: Number.isFinite(Number(value?.providerModelDiscoverRateLimit))
-      ? Math.max(1, Math.min(200, Number(value?.providerModelDiscoverRateLimit)))
-      : defaults.providerModelDiscoverRateLimit,
-    taskUserConcurrencyLimit: Number.isFinite(Number(value?.taskUserConcurrencyLimit))
-      ? Math.max(1, Math.min(200, Number(value?.taskUserConcurrencyLimit)))
-      : defaults.taskUserConcurrencyLimit,
-    taskSkillConcurrencyLimit: Number.isFinite(Number(value?.taskSkillConcurrencyLimit))
-      ? Math.max(1, Math.min(200, Number(value?.taskSkillConcurrencyLimit)))
-      : defaults.taskSkillConcurrencyLimit,
-    taskProviderConcurrencyLimit: Number.isFinite(Number(value?.taskProviderConcurrencyLimit))
-      ? Math.max(1, Math.min(500, Number(value?.taskProviderConcurrencyLimit)))
-      : defaults.taskProviderConcurrencyLimit,
+    taskSubmitRateLimit: normalizeRuntimeLimit(value?.taskSubmitRateLimit, defaults.taskSubmitRateLimit, 200),
+    authVerificationRateLimit: normalizeRuntimeLimit(value?.authVerificationRateLimit, defaults.authVerificationRateLimit, 200),
+    authLoginRateLimit: normalizeRuntimeLimit(value?.authLoginRateLimit, defaults.authLoginRateLimit, 200),
+    providerModelDiscoverRateLimit: normalizeRuntimeLimit(value?.providerModelDiscoverRateLimit, defaults.providerModelDiscoverRateLimit, 200),
+    taskUserConcurrencyLimit: normalizeRuntimeLimit(value?.taskUserConcurrencyLimit, defaults.taskUserConcurrencyLimit, 200),
+    taskSkillConcurrencyLimit: normalizeRuntimeLimit(value?.taskSkillConcurrencyLimit, defaults.taskSkillConcurrencyLimit, 200),
+    taskProviderConcurrencyLimit: normalizeRuntimeLimit(value?.taskProviderConcurrencyLimit, defaults.taskProviderConcurrencyLimit, 500),
   }
 }
 
