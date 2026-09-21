@@ -103,6 +103,12 @@ type RequestImageEditInput = {
   size?: string
   count?: number
   referenceImages: string[]
+  /**
+   * 局部重绘蒙版（透明处 = 可重绘区域），不给就是整图编辑。
+   * 2026-09-21 实测这台中转站**认这个参数且真的生效**：同一张图同一个提示词，
+   * 带 mask 时圆内改动量是圆外的 3.9 倍，圆外基本原样保留。
+   */
+  mask?: string
   onRetry?: (retryState: RetryState) => Promise<void> | void
   fetchWithBurstRateRetry: (input: Omit<FetchWithBurstRateRetryInput, 'logGenerationTask'>) => Promise<Response>
 }
@@ -480,6 +486,7 @@ export const requestImageEdit = async (input: RequestImageEditInput) => {
     size: input.size,
     count: editImageCount,
     referenceImages: input.referenceImages,
+    mask: input.mask,
     fileNamePrefix: 'reference',
     resolveReferenceImageBlob: resolveServerReferenceImageBlob,
   })

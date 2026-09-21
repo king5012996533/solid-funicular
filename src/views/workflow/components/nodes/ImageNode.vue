@@ -23,6 +23,7 @@ import {
   Sunny,
   Upload as UploadIcon,
   Aim,
+  EditPen,
   Refresh,
   MoreFilled,
   Crop,
@@ -30,6 +31,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import ImageCropDialog from '@/components/canvas/ImageCropDialog.vue'
+import ImageMaskBrushDialog from '@/components/canvas/ImageMaskBrushDialog.vue'
 import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/canvas/CanvasNodeHoverToolbar.vue'
 import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canvas/CanvasNodeTopToolbar.vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
@@ -294,6 +296,112 @@ const openCropDialog = () => {
     return
   }
   cropVisible.value = true
+}
+
+const maskVisible = ref(false)
+const openMaskDialog = () => {
+  if (!imageUrl.value) {
+    ElMessage.info('这个节点还没有图')
+    return
+  }
+  maskVisible.value = true
+}
+
+/**
+ * 局部重绘：蒙版 + 用户写的改动要求 → 走同一条图生图管线（多带一个 mask）。
+ * 蒙版要先上传拿 publicUrl —— 后端是照着 /uploads 路径去读二进制再拼 multipart 的。
+ * 结果同样落到新节点，不覆盖原图。
+ */
+const handleMaskConfirm = async ({ mask, prompt }: { mask: Blob; prompt: string }) => {
+  const sourceUrl = String(imageUrl.value || '').trim()
+  const sourceNode = nodes.value.find((n) => n.id === props.id)
+  if (!sourceUrl || !sourceNode) return
+  if (isGenerating.value) return
+
+  isGenerating.value = true
+  const targetId = addNode('image', { x: sourceNode.position.x + 520, y: sourceNode.position.y }, {
+    label: '局部重绘',
+    loading: true,
+    prompt,
+  })
+  addEdge({
+    source: props.id,
+    target: targetId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+    type: 'imageOrder',
+    data: { imageOrder: 1 },
+  })
+
+  try {
+    const maskFile = new File([mask], `mask-${Date.now()}.png`, { type: 'image/png' })
+    const uploadedMask = await uploadStorageFile(maskFile, 'asset')
+    if (!uploadedMask) throw new Error('蒙版上传失败')
+
+    const fallbackKey = String(props.data?.model || '').trim()
+    const { providerId, modelKey } = resolveGenerationTaskModel({
+      modelKey: fallbackKey,
+      fallbackModelKey: fallbackKey,
+      category: 'IMAGE',
+      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+    })
+
+    const model = getModelByName(modelKey) as ImageModel | null
+    const schema = resolveImageParamSchema(model, String(props.data?.quality || 'standard'))
+    const requestBody: Record<string, unknown> = {
+      model: modelKey,
+      prompt,
+      n: 1,
+      providerId,
+    }
+    if (schema.defaultSize) requestBody.size = schema.defaultSize
+
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'image',
+      requestMode: 'image-edit',
+      prompt,
+      modelKey,
+      referenceImages: [sourceUrl],
+      mask: uploadedMask.publicUrl,
+      requestBody: {
+        ...appendImageReferencesToRequestBody(requestBody, [sourceUrl]),
+        mask: uploadedMask.publicUrl,
+      },
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('图片任务创建失败')
+
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'snapshot' || event.type === 'completed') {
+          const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+          if (urls.length) {
+            updateNode(targetId, { url: urls[0], loading: false, error: '', executed: true, taskRecordId: taskId })
+            isGenerating.value = false
+          }
+        }
+        if (event.type === 'failed') {
+          updateNode(targetId, { loading: false, error: String(event.message || event.record?.error || '局部重绘失败') })
+          isGenerating.value = false
+        }
+        if (event.type === 'stopped') {
+          updateNode(targetId, { loading: false, error: '任务已停止' })
+          isGenerating.value = false
+        }
+      },
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '局部重绘失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+    isGenerating.value = false
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
 }
 
 /**
@@ -626,6 +734,7 @@ const topToolbarItems = computed<NodeTopToolbarItem[]>(() => [
     dropdownItems: LIGHT_PRESETS.map(presetToDropdownItem),
   },
   { id: 'hd', label: ENHANCE_PRESET.label, icon: PictureFilled, onClick: () => runEditJob(ENHANCE_PRESET) },
+  { id: 'edit-element', label: '编辑元素', icon: EditPen, onClick: openMaskDialog },
   { id: 'panorama', label: PANORAMA_PRESET.label, icon: Aim, onClick: () => runEditJob(PANORAMA_PRESET) },
   {
     id: 'more',
@@ -954,6 +1063,9 @@ watch(
 
     <!-- 裁剪对话框：纯前端 canvas 裁切，结果上传后落到新节点 -->
     <ImageCropDialog v-model="cropVisible" :src="imageUrl" @confirm="handleCropConfirm" />
+
+    <!-- 局部重绘：涂抹要改的区域 + 写一句改动要求，蒙版随请求一起给上游 -->
+    <ImageMaskBrushDialog v-model="maskVisible" :src="imageUrl" @confirm="handleMaskConfirm" />
 
     <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，         自己糊一个只会少功能。
          teleported 必须开：画布节点的祖先是 .vue-flow__viewport，它带 transform，

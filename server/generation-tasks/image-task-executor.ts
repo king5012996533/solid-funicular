@@ -133,6 +133,8 @@ export const executeImageTask = async (
       size: String(requestBody.size || '').trim() || undefined,
       count: requestImageCount,
       referenceImages,
+      // 局部重绘蒙版：payload 或 requestBody 里带就透传，没有就是整图编辑
+      mask: String(payload.mask || requestBody.mask || '').trim() || undefined,
       onRetry: (retryState) => context.markTaskRetryState(task, retryState),
     })
     : await context.requestImageGeneration({

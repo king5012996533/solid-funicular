@@ -23,6 +23,8 @@ export interface GenerationTaskStartPayload {
   feature?: string
   skill?: string
   referenceImages?: string[]
+  /** 局部重绘蒙版（透明处 = 可重绘区域），仅 image-edit 用得上 */
+  mask?: string
   researchConfig?: Partial<ResearchTaskConfig> | null
   requestBody?: Record<string, unknown> | null
 }

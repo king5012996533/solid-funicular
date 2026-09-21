@@ -103,6 +103,8 @@ export const buildImageEditRequestFormData = async (input: {
   quality?: string
   count?: number
   referenceImages: string[]
+  /** 局部重绘蒙版：透明处 = 允许重绘的区域。必须是带透明通道的 PNG */
+  mask?: string
   fileNamePrefix?: string
   resolveReferenceImageBlob?: (imageValue: string) => Promise<Blob>
 }) => {
@@ -115,6 +117,19 @@ export const buildImageEditRequestFormData = async (input: {
   const fileNamePrefix = normalizeStringValue(input.fileNamePrefix) || 'reference-image'
   const resolveReferenceImageBlob = input.resolveReferenceImageBlob
 
+  const readBlob = async (imageValue: string) => {
+    if (resolveReferenceImageBlob) {
+      return resolveReferenceImageBlob(imageValue)
+    }
+
+    const response = await fetch(imageValue)
+    if (!response.ok) {
+      throw new Error(`参考图读取失败 (${response.status})`)
+    }
+
+    return response.blob()
+  }
+
   if (modelKey) formData.append('model', modelKey)
   if (prompt) formData.append('prompt', prompt)
   // 仅保证下限：上限由 image-task-executor 按模型 capabilityJson.maxImagesPerRequest 兜底。
@@ -125,18 +140,22 @@ export const buildImageEditRequestFormData = async (input: {
 
   for (let index = 0; index < referenceImages.length; index += 1) {
     const imageValue = referenceImages[index]
-    const blob = resolveReferenceImageBlob
-      ? await resolveReferenceImageBlob(imageValue)
-      : await fetch(imageValue).then(async (response) => {
-          if (!response.ok) {
-            throw new Error(`参考图读取失败 (${response.status})`)
-          }
-
-          return response.blob()
-        })
+    const blob = await readBlob(imageValue)
     const mimeType = blob.type || resolveImageMimeType(imageValue)
     const extension = resolveImageFileExtension(mimeType)
     formData.append('image', blob, `${fileNamePrefix}-${index + 1}.${extension}`)
+  }
+
+  // 蒙版单独收口：不带透明通道的图当蒙版传上去，等于整张都可重绘（或者被上游含糊拒绝），
+  // 所以这里先判死 —— 蒙版必须是 PNG。
+  const mask = normalizeStringValue(input.mask)
+  if (mask) {
+    const blob = await readBlob(mask)
+    if (blob.type && blob.type !== 'image/png') {
+      throw new Error('局部重绘的蒙版必须是带透明通道的 PNG')
+    }
+
+    formData.append('mask', blob, 'mask.png')
   }
 
   return formData
