@@ -514,6 +514,34 @@ canana-vue/
 
 MIT
 
+本项目在 MIT 许可下发布。MIT 的要求是：在分发的所有副本中保留**版权声明**与**许可声明**（即下方 `LICENSE` 全文）。
+
+```
+Copyright (c) 2026 xpnobug (https://github.com/xpnobug/CanvasMind)
+Copyright (c) 2026 Sam
+```
+
+## 🙏 第三方声明
+
+本项目包含以下第三方代码，各自遵循其原始许可证。分发时请一并保留对应声明。
+
+### src-cutia —— 视频编辑器模块
+
+`src-cutia/` 目录下的代码来自 [msgbyte/cutia](https://github.com/msgbyte/cutia)（*An open-source, in-browser alternative to CapCut*），
+采用 **MIT** 许可，原始版权声明为 `Copyright 2025 Cutia`。
+完整的许可文本见 [`src-cutia/LICENSE`](./src-cutia/LICENSE)。
+
+### 服务端依赖中涉及 LGPL 的部分
+
+以下依赖采用 LGPL，均**仅用于服务端**（不随前端产物分发），因此不触发 LGPL 的传染性条件：
+
+| 依赖 | 许可证 |
+|---|---|
+| `mariadb` | LGPL-2.1-or-later |
+| `@img/sharp-libvips-*` | LGPL-3.0-or-later |
+
+本项目不包含任何 GPL / AGPL 依赖。
+
 ## 🔗 相关链接
 
 - [Vue 3 文档](https://vuejs.org/)
