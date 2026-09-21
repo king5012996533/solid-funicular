@@ -37,6 +37,8 @@
   --canvas-node-bg: #262626;
   --canvas-node-border: #ffffff14;
   --canvas-node-border-selected: #a8a8a8;
+  /* 有图节点的图片宽度：图片满宽，卡片高度按图片比例撑开 */
+  --image-node-image-width: 420px;
 
   /* —— 悬浮件（工具栏、弹层、参数面板）—— */
   --canvas-float-block-default: #1f1f1ff2;

@@ -173,6 +173,46 @@ const handleDownload = async () => {
   }
 }
 
+/**
+ * 点图放大预览。
+ *
+ * 为什么不能直接绑在 click 上：图片在可拖拽的节点内部，拖节点时鼠标也会
+ * 在图片上按下再抬起，浏览器同样会补一个 click —— 那样"拖一下节点"就会
+ * 弹出大图。所以按下时记坐标，抬起时位移超过阈值就当作拖拽，不开预览。
+ */
+const previewVisible = ref(false)
+const previewTarget = ref('')
+const previewPointerStart = { x: 0, y: 0 }
+/** 位移阈值（px）：触屏/触控板手抖也会有几像素，给一点余量 */
+const PREVIEW_CLICK_TOLERANCE = 4
+
+const handleImagePointerDown = (event: PointerEvent) => {
+  previewPointerStart.x = event.clientX
+  previewPointerStart.y = event.clientY
+}
+
+const openImagePreview = (url?: unknown) => {
+  // 只认字符串：工具栏那份是 `item.onClick()`（无参），但悬停工具栏是
+  // `@click.stop="action.onClick"` —— 那样 Vue 会把 MouseEvent 当第一个参数传进来，
+  // 于是 `String(event)` 会变成 "[object MouseEvent]" 把预览打坏。
+  const explicit = typeof url === 'string' ? url.trim() : ''
+  const target = explicit || String(imageUrl.value || '').trim()
+  if (!target) return
+  previewTarget.value = target
+  previewVisible.value = true
+}
+
+const handleImageClick = (event: MouseEvent) => {
+  const moved = Math.abs(event.clientX - previewPointerStart.x)
+    + Math.abs(event.clientY - previewPointerStart.y)
+  if (moved > PREVIEW_CLICK_TOLERANCE) return
+  // 折叠的批量组上，双击的既有语义是"展开"；而双击必然先触发两次单击，
+  // 那样大图会盖住刚展开的宫格，看起来像坏了。折叠态不弹预览，
+  // 展开后点具体子图即可看大图。
+  if (isBatchGroupVisible.value && !props.data?.batchExpanded) return
+  openImagePreview()
+}
+
 const handleDelete = () => removeNode(props.id)
 const handleDuplicate = () => {
   const newId = duplicateNode(props.id)
@@ -400,7 +440,7 @@ const topToolbarItems = computed<NodeTopToolbarItem[]>(() => [
   { type: 'divider' },
   { id: 'crop', label: '裁剪', icon: Crop, iconOnly: true, onClick: () => ElMessage.info('裁剪：接入中') },
   { id: 'download-mini', label: '下载', icon: Download, iconOnly: true, onClick: handleDownload },
-  { id: 'preview', label: '放大预览', icon: ZoomIn, iconOnly: true, onClick: () => imageUrl.value && window.open(imageUrl.value, '_blank') },
+  { id: 'preview', label: '放大预览', icon: ZoomIn, iconOnly: true, onClick: openImagePreview },
   { type: 'divider' },
   { id: 'agent', label: '加入 Agent', textMark: 'R', onClick: () => ElMessage.info('加入 Agent：接入中') },
 ])
@@ -657,7 +697,17 @@ watch(
           <div class="image-node-batch-frame image-node-batch-frame--2" aria-hidden="true" />
           <div class="image-node-batch-frame image-node-batch-frame--1" aria-hidden="true" />
         </template>
-        <img :src="imageUrl" alt="生成图片" class="image-node-image" />
+        <!-- 不要 @click.stop：Vue Flow 靠冒泡到节点上才把节点选中，
+             挡住了就会出现"点标题能选中、点图片选不中"的怪现象。
+             拖拽误触由 handleImageClick 里的位移阈值挡掉。 -->
+        <img
+          :src="imageUrl"
+          alt="生成图片"
+          class="image-node-image"
+          title="点击放大查看"
+          @pointerdown="handleImagePointerDown"
+          @click="handleImageClick"
+        />
         <button
           class="image-node-replace-btn nodrag nopan"
           title="替换图片"
@@ -678,7 +728,14 @@ watch(
             :class="{ 'is-primary': child.id === data?.primaryImageId }"
             @click.stop
           >
-            <img :src="child.url" alt="批量子图" />
+            <img
+              :src="child.url"
+              alt="批量子图"
+              title="点击放大查看"
+              @pointerdown="handleImagePointerDown"
+              @click.stop="openImagePreview(child.url)"
+            />
+
             <button
               class="image-node-batch-set-primary"
               title="设为主图"
@@ -704,6 +761,21 @@ watch(
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
 
     <CanvasNodeHoverToolbar :visible="showActions" :actions="hoverActions" />
+
+    <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，
+         自己糊一个只会少功能。
+         teleported 必须开：画布节点的祖先是 .vue-flow__viewport，它带 transform，
+         而 position:fixed 遇上 transform 祖先会以该祖先为参照物 —— 不开 teleport
+         的话查看器只有节点那么大，根本铺不满屏幕（Element 文档也点了这一条）。
+         z-index 要高过画布内的悬浮层，否则会被工具栏压住。 -->
+    <el-image-viewer
+      v-if="previewVisible"
+      :url-list="[previewTarget]"
+      :z-index="4000"
+      teleported
+      hide-on-click-modal
+      @close="previewVisible = false"
+    />
 
     <!-- 选中态顶部悬浮工具栏（仅有图时显示） -->
     <CanvasNodeTopToolbar :visible="isSelected && showImage" :items="topToolbarItems" />
@@ -837,10 +909,15 @@ watch(
   overflow: hidden;
   transition: border-color 0.16s, min-width 0.2s ease;
 }
-/* 有图态：节点变宽，图片居中（参照 RunningHUB 生成结果布局 img_11） */
+/* 有图态：卡片就"是"这张图 —— 宽度固定，高度由图片比例撑开。
+   之前是 580×340 的横版框 + 320px 上限的图，方形图四周留出 260px 空白，
+   视觉上很虚（用户反馈"两边留空很大，冲击力不够"）。现在图满宽、卡片贴合比例。 */
 .image-node-card:has(.image-node-display) {
-  min-width: 580px;
-  min-height: 340px;
+  width: var(--image-node-image-width, 420px);
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  transition: border-color 0.16s;
 }
 .image-node-card.is-selected {
   border-color: var(--canvas-node-border-selected);
@@ -982,23 +1059,24 @@ watch(
   to { transform: rotate(360deg); }
 }
 
-/* 批量组叠卡 / 有图态：图片居中，最大尺寸限制让节点周围有黑色边距（参照 img_11） */
+/* 批量组叠卡 / 有图态：图片满宽，高度按自身比例撑开 */
 .image-node-display {
   position: relative;
-  flex: 1 1 0;
-  display: inline-flex;
-  justify-content: center;
+  flex: 1 1 auto;
+  display: block;
   overflow: hidden;
 }
+/* 图即卡片：满宽、不裁切、不要圆角（外层卡片已 overflow:hidden + 12px 圆角负责裁边） */
 .image-node-image {
-  max-width: 320px;
-  max-height: 100%;
-  width: auto;
+  display: block;
+  width: 100%;
   height: auto;
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   position: relative;
   z-index: 1;
-  border-radius: var(--lv-border-radius-medium);
+  cursor: zoom-in;
 }
 .image-node-batch-frame {
   position: absolute;
