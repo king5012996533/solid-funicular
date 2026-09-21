@@ -25,7 +25,7 @@ const CHROME_PATH = '/Users/mima1234/.local/lib/chrome-for-testing/chrome-mac-ar
 const ROUTES = [
   { path: '/', name: '首页', expect: ['#app'] },
   { path: '/generate', name: '生成页', expect: ['#app'] },
-  { path: '/canvas', name: '画布(旧)', expect: ['#app'] },
+  // /canvas 已随废弃的 canana 原型一起删除（2026-09-21），路由与导航项都已移除
   { path: '/workflow', name: '工作流画布', expect: ['.vue-flow__pane'] },
   { path: '/agentic-assets-canvas', name: '资产画布', expect: ['#app'] },
 ]

@@ -6,7 +6,6 @@ import { useLoadingStore } from '../stores/loading'
 // 核心页面懒加载，避免全部进入主 bundle 拖慢首屏
 const Home = () => import('../views/home/home.vue')
 const Generate = () => import('../views/generate/generate.vue')
-const Canana = () => import('../views/canana/canana.vue')
 const AccountManagement = () => import('../views/account/AccountManagement.vue')
 const PublishCenter = () => import('../views/publish/PublishCenter.vue')
 const AssetManagement = () => import('../views/asset/AssetManagement.vue')
@@ -51,11 +50,6 @@ const routes: RouteRecordRaw[] = [
     path: '/generate',
     name: 'Generate',
     component: Generate,
-  },
-  {
-    path: '/canvas',
-    name: 'Canvas',
-    component: Canana,
   },
   {
     path: '/account',
