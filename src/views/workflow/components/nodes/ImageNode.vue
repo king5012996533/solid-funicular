@@ -23,13 +23,13 @@ import {
   Sunny,
   Upload as UploadIcon,
   Aim,
-  EditPen,
   Refresh,
   MoreFilled,
   Crop,
   ZoomIn,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import ImageCropDialog from '@/components/canvas/ImageCropDialog.vue'
 import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/canvas/CanvasNodeHoverToolbar.vue'
 import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canvas/CanvasNodeTopToolbar.vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
@@ -46,7 +46,14 @@ import {
 } from '../../composables/useWorkflowCanvas'
 import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
-import { describeAspectRatio, describeResolutionTier, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
+import { describeAspectRatio, describeResolutionTier, pickSizeByAspect, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
+import {
+  ANGLE_PRESETS,
+  ENHANCE_PRESET,
+  LIGHT_PRESETS,
+  PANORAMA_PRESET,
+  type ImageEditPreset,
+} from '../../config/image-edit-presets'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
@@ -157,8 +164,167 @@ const autoCreateDownstreamImageNode = () => {
   }, 100)
 }
 
-const handleDownload = async () => {
-  if (!imageUrl.value) return
+/**
+ * 「加工」统一入口：拿本节点这张图 + 一句固定指令走图生图。
+ *
+ * 两个刻意的决定：
+ *  1. **结果落到新节点，不覆盖原图**。加工是可对比、可回退的操作 ——
+ *     打光打坏了还能拿原图重来；覆盖掉就找不回来了。
+ *  2. 提示词与尺寸都来自预设（见 config/image-edit-presets），不在这里写死文案；
+ *     尺寸按**当前模型声明的档位**取最接近的一档，模型不认的值绝不会透传上去。
+ */
+const runEditJob = async (preset: ImageEditPreset) => {
+  const sourceUrl = String(imageUrl.value || '').trim()
+  if (!sourceUrl) {
+    ElMessage.info('这个节点还没有图')
+    return
+  }
+  if (isGenerating.value) return
+
+  const sourceNode = nodes.value.find((n) => n.id === props.id)
+  if (!sourceNode) return
+
+  isGenerating.value = true
+  taskStreamController.value?.abort()
+
+  // 先建结果节点：用户点下去立刻能看到"活干起来了"，而不是等几秒才出现
+  const targetId = addNode('image', { x: sourceNode.position.x + 520, y: sourceNode.position.y }, {
+    label: preset.label,
+    loading: true,
+    prompt: preset.prompt,
+  })
+  addEdge({
+    source: props.id,
+    target: targetId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+    type: 'imageOrder',
+    data: { imageOrder: 1 },
+  })
+
+  try {
+    const fallbackKey = String(props.data?.model || '').trim()
+    const { providerId, modelKey } = resolveGenerationTaskModel({
+      modelKey: fallbackKey,
+      fallbackModelKey: fallbackKey,
+      category: 'IMAGE',
+      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+    })
+
+    // 尺寸总是显式给：需要换画幅的（如全景图）按意图挑，其余用模型自己的默认档。
+    // 不带 size 时要不要上游兜底是**上游的自由**，而实测中转站对"少字段"的请求
+    // 回的是那句含糊的 "Image request could not be completed" —— 与其猜，不如把
+    // 参数给全。档位仍然只从模型声明的列表里取，不会出现模型不认的值。
+    const model = getModelByName(modelKey) as ImageModel | null
+    const schema = resolveImageParamSchema(model, String(props.data?.quality || 'standard'))
+    const size = preset.sizeIntent
+      ? (pickSizeByAspect(schema.sizes, preset.sizeIntent) || schema.defaultSize)
+      : schema.defaultSize
+
+    const requestBody: Record<string, unknown> = {
+      model: modelKey,
+      prompt: preset.prompt,
+      n: 1,
+      providerId,
+    }
+    if (size) requestBody.size = size
+
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'image',
+      requestMode: 'image-edit',
+      prompt: preset.prompt,
+      modelKey,
+      resolution: String(props.data?.quality || '').trim() || undefined,
+      referenceImages: [sourceUrl],
+      requestBody: appendImageReferencesToRequestBody(requestBody, [sourceUrl]),
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('图片任务创建失败')
+
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'snapshot' || event.type === 'completed') {
+          const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+          if (urls.length) {
+            updateNode(targetId, { url: urls[0], loading: false, error: '', executed: true, taskRecordId: taskId })
+            isGenerating.value = false
+          }
+        }
+        if (event.type === 'failed') {
+          updateNode(targetId, { loading: false, error: String(event.message || event.record?.error || '加工失败') })
+          isGenerating.value = false
+        }
+        if (event.type === 'stopped') {
+          updateNode(targetId, { loading: false, error: '任务已停止' })
+          isGenerating.value = false
+        }
+      },
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '加工失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+    isGenerating.value = false
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
+
+const handleCopyImageUrl = async () => {
+  const url = String(imageUrl.value || '').trim()
+  if (!url) return
+  try {
+    // 相对路径补成全量 URL：贴到别处（如工单、聊天）时相对路径是没用的
+    const absolute = new URL(url, window.location.origin).toString()
+    await navigator.clipboard.writeText(absolute)
+    ElMessage.success('图片地址已复制')
+  } catch {
+    ElMessage.error('复制失败，浏览器可能拒绝了剪贴板权限')
+  }
+}
+
+const cropVisible = ref(false)
+const openCropDialog = () => {
+  if (!imageUrl.value) {
+    ElMessage.info('这个节点还没有图')
+    return
+  }
+  cropVisible.value = true
+}
+
+/**
+ * 裁剪结果落到新节点（与「加工」一致：不覆盖原图）。
+ * 裁剪本身纯前端，只有把结果留存到服务器才需要走一次上传。
+ */
+const handleCropConfirm = async (blob: Blob) => {
+  const sourceNode = nodes.value.find((n) => n.id === props.id)
+  if (!sourceNode) return
+
+  const targetId = addNode('image', { x: sourceNode.position.x + 520, y: sourceNode.position.y }, {
+    label: '裁剪',
+    loading: true,
+  })
+
+  try {
+    const file = new File([blob], `crop-${Date.now()}.png`, { type: 'image/png' })
+    const uploaded = await uploadStorageFile(file, 'asset')
+    if (!uploaded) throw new Error('裁剪结果上传失败')
+    updateNode(targetId, { url: uploaded.publicUrl, loading: false, error: '', executed: true })
+    ElMessage.success('已裁剪并生成新节点')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '裁剪结果上传失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
+
+const handleDownload = async () => {  if (!imageUrl.value) return
   try {
     const res = await fetch(imageUrl.value)
     const blob = await res.blob()
@@ -434,20 +600,48 @@ const paramChips = computed(() => {
   return chips
 })
 
-// 顶部悬浮工具栏（参照 RunningHUB .image-toolbar）：仅在选中 + 有图时显示
+// 顶部悬浮工具栏：仅在选中 + 有图时显示。
+// 每项都必须有真实行为 —— 点了只弹「接入中」的入口比不摆更差（项目自身的规范）。
+// 「角度」「打光」是可选预设，所以走真下拉（dropdownItems）；其余是单击即执行。
+const presetToDropdownItem = (preset: ImageEditPreset) => ({
+  id: preset.key,
+  label: preset.label,
+  description: preset.description,
+  onClick: () => runEditJob(preset),
+})
+
 const topToolbarItems = computed<NodeTopToolbarItem[]>(() => [
-  { id: 'panorama', label: '全景图', icon: Aim, hasDropdown: true, onClick: () => ElMessage.info('全景图：接入中') },
-  { id: 'hd', label: 'HD 增强', icon: PictureFilled, onClick: () => ElMessage.info('HD 增强：接入中') },
-  { id: 'edit-element', label: '编辑元素', icon: EditPen, onClick: () => ElMessage.info('编辑元素：接入中') },
-  { id: 'angle', label: '角度', icon: Refresh, onClick: () => ElMessage.info('角度：接入中') },
-  { id: 'light', label: '打光', icon: Sunny, onClick: () => ElMessage.info('打光：接入中') },
-  { id: 'more', label: '更多', icon: MoreFilled, onClick: () => ElMessage.info('更多：接入中') },
+  {
+    id: 'angle',
+    label: '角度',
+    icon: Refresh,
+    hasDropdown: true,
+    dropdownItems: ANGLE_PRESETS.map(presetToDropdownItem),
+  },
+  {
+    id: 'light',
+    label: '打光',
+    icon: Sunny,
+    hasDropdown: true,
+    dropdownItems: LIGHT_PRESETS.map(presetToDropdownItem),
+  },
+  { id: 'hd', label: ENHANCE_PRESET.label, icon: PictureFilled, onClick: () => runEditJob(ENHANCE_PRESET) },
+  { id: 'panorama', label: PANORAMA_PRESET.label, icon: Aim, onClick: () => runEditJob(PANORAMA_PRESET) },
+  {
+    id: 'more',
+    label: '更多',
+    icon: MoreFilled,
+    hasDropdown: true,
+    dropdownItems: [
+      { id: 'copy-url', label: '复制图片地址', description: '复制这张图的 URL，可直接贴到别处', onClick: handleCopyImageUrl },
+      { id: 'download-file', label: '下载原图', description: '存到本地', onClick: handleDownload },
+      { id: 'open-new-tab', label: '在新标签页打开', description: '看原尺寸', onClick: () => imageUrl.value && window.open(imageUrl.value, '_blank') },
+    ],
+  },
   { type: 'divider' },
-  { id: 'crop', label: '裁剪', icon: Crop, iconOnly: true, onClick: () => ElMessage.info('裁剪：接入中') },
+  { id: 'crop', label: '裁剪', icon: Crop, iconOnly: true, onClick: openCropDialog },
   { id: 'download-mini', label: '下载', icon: Download, iconOnly: true, onClick: handleDownload },
   { id: 'preview', label: '放大预览', icon: ZoomIn, iconOnly: true, onClick: openImagePreview },
-  { type: 'divider' },
-  { id: 'agent', label: '加入 Agent', textMark: 'R', onClick: () => ElMessage.info('加入 Agent：接入中') },
 ])
 
 // ContentGenerator 发送：用上游图作为参考 + 用户 prompt 调图生图，结果回填到当前节点
@@ -758,8 +952,10 @@ watch(
 
     <CanvasNodeHoverToolbar :visible="showActions" :actions="hoverActions" />
 
-    <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，
-         自己糊一个只会少功能。
+    <!-- 裁剪对话框：纯前端 canvas 裁切，结果上传后落到新节点 -->
+    <ImageCropDialog v-model="cropVisible" :src="imageUrl" @confirm="handleCropConfirm" />
+
+    <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，         自己糊一个只会少功能。
          teleported 必须开：画布节点的祖先是 .vue-flow__viewport，它带 transform，
          而 position:fixed 遇上 transform 祖先会以该祖先为参照物 —— 不开 teleport
          的话查看器只有节点那么大，根本铺不满屏幕（Element 文档也点了这一条）。

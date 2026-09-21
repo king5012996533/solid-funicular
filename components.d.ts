@@ -80,6 +80,7 @@ declare module 'vue' {
     HomeFooter: typeof import('./src/components/home/components/HomeFooter.vue')['default']
     HomeHeader: typeof import('./src/components/home/components/HomeHeader.vue')['default']
     HomeSideMenuIcon: typeof import('./src/components/home/components/HomeSideMenuIcon.vue')['default']
+    ImageCropDialog: typeof import('./src/components/canvas/ImageCropDialog.vue')['default']
     ImageLoadingRecord: typeof import('./src/components/generate/common/ImageLoadingRecord.vue')['default']
     ImageModelSelector: typeof import('./src/components/prompt-editor/ImageModelSelector.vue')['default']
     ImagePreview: typeof import('./src/components/ImagePreview.vue')['default']

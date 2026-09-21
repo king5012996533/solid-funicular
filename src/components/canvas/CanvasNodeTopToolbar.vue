@@ -15,6 +15,14 @@
  */
 import type { Component } from 'vue'
 
+export interface NodeTopToolbarDropdownItem {
+  id: string
+  label: string
+  /** 副标题，用来把「这个选项到底做什么」说清楚 */
+  description?: string
+  onClick: () => void
+}
+
 export interface NodeTopToolbarItem {
   /** 'divider' 时只渲染竖线 */
   type?: 'item' | 'divider'
@@ -25,6 +33,11 @@ export interface NodeTopToolbarItem {
   iconOnly?: boolean
   /** true 时尾部加 ▾ 下拉箭头 */
   hasDropdown?: boolean
+  /**
+   * 点击展开的菜单项。给了它就渲染成真下拉（Element Plus el-dropdown，click 触发）；
+   * 只给 hasDropdown 而不给它是"有个箭头但点不出东西"，属于假入口。
+   */
+  dropdownItems?: NodeTopToolbarDropdownItem[]
   /** 自定义文字标记（如 "R"，代替 icon） */
   textMark?: string
   disabled?: boolean
@@ -47,6 +60,49 @@ defineProps<{
     >
       <template v-for="(item, idx) in items" :key="item.id || `divider-${idx}`">
         <div v-if="item.type === 'divider'" class="canvas-node-top-toolbar__divider" />
+        <!-- 有 dropdownItems 的走真下拉；没有的还是普通按钮 -->
+        <el-dropdown
+          v-else-if="item.dropdownItems && item.dropdownItems.length"
+          trigger="click"
+          placement="bottom"
+          :teleported="true"
+        >
+          <button
+            type="button"
+            class="canvas-node-top-toolbar__btn"
+            :class="{ 'is-icon-only': item.iconOnly, 'has-dropdown': true }"
+            :title="item.label"
+          >
+            <el-icon v-if="item.icon" class="canvas-node-top-toolbar__icon">
+              <component :is="item.icon" />
+            </el-icon>
+            <span v-else-if="item.textMark" class="canvas-node-top-toolbar__text-mark">{{ item.textMark }}</span>
+            <span v-if="!item.iconOnly && item.label" class="canvas-node-top-toolbar__label">{{ item.label }}</span>
+            <svg
+              class="canvas-node-top-toolbar__chevron"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+            >
+              <path d="M3 5l3 3 3-3" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="action in item.dropdownItems"
+                :key="action.id"
+                @click="action.onClick()"
+              >
+                <div class="canvas-node-top-toolbar__menu-item">
+                  <span class="canvas-node-top-toolbar__menu-label">{{ action.label }}</span>
+                  <span v-if="action.description" class="canvas-node-top-toolbar__menu-desc">{{ action.description }}</span>
+                </div>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <button
           v-else
           type="button"
@@ -162,6 +218,25 @@ defineProps<{
   height: 18px;
   background: var(--stroke-secondary);
   margin: 0 4px;
+}
+
+/* 下拉菜单项：一行标题 + 一行说明（说明用来说明这个选项到底做什么） */
+.canvas-node-top-toolbar__menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  max-width: 260px;
+}
+.canvas-node-top-toolbar__menu-label {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text-primary);
+}
+.canvas-node-top-toolbar__menu-desc {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--text-tertiary);
 }
 
 .canvas-node-top-toolbar-enter-active,
