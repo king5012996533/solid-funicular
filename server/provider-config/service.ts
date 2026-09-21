@@ -512,6 +512,24 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
       const imageModels: PublicModelCatalogItem[] = []
       const videoModels: PublicModelCatalogItem[] = []
 
+      /**
+       * 配了密钥的厂商 id。
+       *
+       * 为什么要这个：默认模型是「列表里的第一个」，而列表按 sort_order / createdAt 排，
+       * 跟"这个厂商能不能用"完全无关。本仓库就是典型 —— 火山方舟最早创建，
+       * 于是它的 Seedream 成了默认图片模型，可它根本没配密钥，
+       * 新建节点的默认模型一点「生成」必然失败。
+       * 默认值应当是"开箱能用"的，所以优先挑配了密钥的厂商。
+       */
+      const usableProviderIds = new Set(
+        providers
+          .filter(provider => String(provider.apiKeyEncrypted || '').trim())
+          .map(provider => provider.id),
+      )
+      const pickUsableModel = (items: PublicModelCatalogItem[]) => (
+        items.find(item => usableProviderIds.has(item.providerId)) || items[0]
+      )
+
       for (const provider of providers) {
         const supportedTypes = Array.isArray(provider.supportedTypesJson)
           ? provider.supportedTypesJson.map(item => String(item || '').trim()).filter(Boolean)
@@ -554,9 +572,9 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
       }
 
       const defaults = {
-        chat: chatModels.find(item => item.isDefault)?.selectionKey || chatModels[0]?.selectionKey || '',
-        image: imageModels[0]?.selectionKey || '',
-        video: videoModels[0]?.selectionKey || '',
+        chat: chatModels.find(item => item.isDefault)?.selectionKey || pickUsableModel(chatModels)?.selectionKey || '',
+        image: pickUsableModel(imageModels)?.selectionKey || '',
+        video: pickUsableModel(videoModels)?.selectionKey || '',
       }
 
       return {

@@ -357,6 +357,51 @@ export const pickValidChoice = (
   return fallback
 }
 
+/** 模板想要的构图意图：方图 / 竖版 / 横版。 */
+export type ImageAspectIntent = 'square' | 'portrait' | 'landscape'
+
+const ASPECT_INTENT_RATIO: Record<ImageAspectIntent, number> = {
+  square: 1,
+  portrait: 9 / 16,
+  landscape: 16 / 9,
+}
+
+/**
+ * 从模型支持的尺寸里挑最接近目标构图的那一档。
+ *
+ * 为什么需要它：模板要表达的是「这张图应该是竖版」这种意图，
+ * 而具体像素档是模型决定的 —— 写死 1440x2560 只对 Seedream 成立，
+ * 换个模型（GPT Image 2 只有 1024x1024 / 1536x1024 / 1024x1536）就透传非法值被上游拒掉。
+ * 所以意图保持不变，像素档跟着模型走。
+ *
+ * 用相对差而不是绝对差：1:1 与 9:16 的距离，不能因为数值大小不同而偏袒某一侧。
+ * 挑不到（模型没声明尺寸，或 key 不是 WxH）时返回空串，交给调用方兜底。
+ */
+export const pickSizeByAspect = (
+  choices: ParamChoice[],
+  intent: ImageAspectIntent,
+): string => {
+  const target = ASPECT_INTENT_RATIO[intent]
+  let bestKey = ''
+  let bestDelta = Number.POSITIVE_INFINITY
+
+  for (const choice of choices) {
+    const matched = /^(\d+)x(\d+)$/.exec(String(choice.key || '').trim())
+    if (!matched) continue
+    const width = Number(matched[1])
+    const height = Number(matched[2])
+    if (!width || !height) continue
+
+    const delta = Math.abs(width / height - target) / target
+    if (delta < bestDelta) {
+      bestDelta = delta
+      bestKey = choice.key
+    }
+  }
+
+  return bestKey
+}
+
 // ---------------------------------------------------------------------------
 // 图片参数解析
 // ---------------------------------------------------------------------------

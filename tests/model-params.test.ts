@@ -9,6 +9,7 @@
 import {
   describeAspectRatio,
   describeResolutionTier,
+  pickSizeByAspect,
   pickValidChoice,
   resolveImageParamSchema,
   resolveVideoParamSchema,
@@ -289,6 +290,35 @@ console.log('\n【14】数量上限：声明了才放开，没声明保守为 1'
     videoModel({ capabilityJson: { maxCount: 3 } })).maxCount, 3)
   check('视频：非法值 → 回落到 1', resolveVideoParamSchema(
     videoModel({ capabilityJson: { maxCount: 0 } })).maxCount, 1)
+}
+
+console.log('\n【15】按构图意图挑尺寸：模板要的是「竖版」，像素档由模型决定')
+{
+  const choices = (...keys: string[]) => keys.map(key => ({ key, label: key }))
+
+  // GPT Image 2 / gpt-image-2.5 的实测档位
+  const openai = choices('1024x1024', '1536x1024', '1024x1536')
+  check('方图 → 1024x1024', pickSizeByAspect(openai, 'square'), '1024x1024')
+  check('竖版 → 1024x1536', pickSizeByAspect(openai, 'portrait'), '1024x1536')
+  check('横版 → 1536x1024', pickSizeByAspect(openai, 'landscape'), '1536x1024')
+
+  // Seedream 的档位（原来模板写死的那套）
+  const seedream = choices('2048x2048', '1440x2560', '2560x1440', '4096x4096')
+  check('方图 → 2048x2048（不是 4096）', pickSizeByAspect(seedream, 'square'), '2048x2048')
+  check('竖版 → 1440x2560', pickSizeByAspect(seedream, 'portrait'), '1440x2560')
+  check('横版 → 2560x1440', pickSizeByAspect(seedream, 'landscape'), '2560x1440')
+
+  // 只有方图时，竖版也得挑一个"最不坏"的，不能返回空
+  check('只有方图档时竖版仍返回该档', pickSizeByAspect(choices('1024x1024'), 'portrait'), '1024x1024')
+
+  // 9:16 与 2:3 都算竖版，挑更接近 9:16 的那张
+  check('多个竖版档挑最接近 9:16 的', pickSizeByAspect(choices('1024x1024', '1024x1536', '832x1216'), 'portrait'), '1024x1536')
+
+  // 兜底：没有档位 / key 认不出来时返回空串，由调用方决定兜底值
+  check('空档位 → 空串', pickSizeByAspect([], 'square'), '')
+  check('认不出来的 key（auto）→ 空串', pickSizeByAspect(choices('auto'), 'square'), '')
+  // 比例写法（16x9）本身就是一个合法的比例声明，和 describeAspectRatio 的口径一致
+  check('比例写法也认：16x9 命中横版', pickSizeByAspect(choices('16x9'), 'landscape'), '16x9')
 }
 
 console.log(`\n${'─'.repeat(52)}`)

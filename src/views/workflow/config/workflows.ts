@@ -14,6 +14,13 @@ import type {
   WorkflowNodeType,
 } from '../composables/useWorkflowCanvas'
 import type { WorkflowCanvasPosition } from '../composables/workflow-orchestrator-types'
+import { getAllImageModels, getDefaultImageModelKey } from '@/config/models'
+import type { ImageModel } from '@/config/models'
+import {
+  pickSizeByAspect,
+  resolveImageParamSchema,
+  type ImageAspectIntent,
+} from '@/config/model-params'
 
 interface WorkflowTemplateNode {
   id: string
@@ -33,18 +40,43 @@ interface WorkflowTemplateDefinition {
   }
 }
 
-/** 模板默认使用的图片模型与尺寸；尺寸必须是该模型真实支持的档位 */
-const DEFAULT_IMAGE_MODEL_KEY = 'doubao-seedream-4-5-251128'
-const DEFAULT_SQUARE_SIZE = '2048x2048'
-const DEFAULT_PORTRAIT_SIZE = '1440x2560'
-const DEFAULT_LANDSCAPE_SIZE = '2560x1440'
+/**
+ * 模板里图片节点的模型与参数。
+ *
+ * 原先这里写死 `doubao-seedream-4-5-251128` + `2048x2048` 这类像素档 —— 那是原作者
+ * 环境里的模型。两个问题：换一个部署（比如只配了别的厂商）模板必然调不通；
+ * 而且 Seedream 的档位（2048x2048 / 1440x2560 / 2560x1440）别的模型根本不支持，
+ * 透传给上游会被直接拒掉。
+ *
+ * 现在改成：模型取「模型目录里的默认图片模型」，尺寸在该模型声明的档位里
+ * 挑最接近模板意图（方图 / 竖版 / 横版）的一档。意图保留，像素档跟着模型走。
+ *
+ * 兜底：模型目录为空时（例如单测里没有登录态）退回下面的常量，
+ * 保证模板依然自洽、可断言。
+ */
+const FALLBACK_IMAGE_MODEL_KEY = 'doubao-seedream-4-5-251128'
+const FALLBACK_ASPECT_SIZE: Record<ImageAspectIntent, string> = {
+  square: '2048x2048',
+  portrait: '1440x2560',
+  landscape: '2560x1440',
+}
 
 /** 图片生成节点的统一参数块 */
-const imageParams = (size: string = DEFAULT_SQUARE_SIZE) => ({
-  model: DEFAULT_IMAGE_MODEL_KEY,
-  size,
-  quality: 'standard',
-})
+const imageParams = (intent: ImageAspectIntent = 'square') => {
+  const modelKey = getDefaultImageModelKey() || FALLBACK_IMAGE_MODEL_KEY
+  // 用 getAllImageModels 而不是通用的 getModelByName：后者是三类模型的联合类型，
+  // 塞进 resolveImageParamSchema 得强制断言；这里只需要图片模型。
+  const model: ImageModel | null = getAllImageModels()
+    .find(item => item.key === modelKey || item.modelKey === modelKey) || null
+  const schema = resolveImageParamSchema(model, 'standard')
+
+  return {
+    model: modelKey,
+    // 模型声明了档位就按意图挑；没声明（目录为空）就用兜底像素档
+    size: pickSizeByAspect(schema.sizes, intent) || FALLBACK_ASPECT_SIZE[intent],
+    quality: schema.defaultQuality || 'standard',
+  }
+}
 
 // 多角度提示词模板
 export const MULTI_ANGLE_PROMPTS: Record<string, { label: string; english: string; prompt: (character: string) => string }> = {
@@ -235,7 +267,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       nodes.push({ id: frontPromptId, type: 'text', position: { x: startPosition.x + col, y: startPosition.y }, data: { content: '根据角色描述，生成角色的正面全身照，人物居中，白色简洁背景，高清写实风格，电影级画质', label: '正面全身提示词' } })
 
       const frontImgId = getId()
-      nodes.push({ id: frontImgId, type: 'image', position: { x: startPosition.x + col * 2, y: startPosition.y }, data: { url: '', label: '正面角色图（参考基准）', ...imageParams(DEFAULT_PORTRAIT_SIZE) } })
+      nodes.push({ id: frontImgId, type: 'image', position: { x: startPosition.x + col * 2, y: startPosition.y }, data: { url: '', label: '正面角色图（参考基准）', ...imageParams('portrait') } })
 
       // 第一阶段连线
       edges.push({ id: `e_${descId}_${frontImgId}`, source: descId, target: frontImgId, type: 'promptOrder', data: { promptOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
@@ -243,10 +275,10 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       edges.push({ id: `e_${frontPromptId}_${frontImgId}`, source: frontPromptId, target: frontImgId, type: 'promptOrder', data: { promptOrder: 2 }, sourceHandle: 'right', targetHandle: 'left' })
 
       // 第二阶段：基于正面图生成多角度
-      const variants = [
-        { label: '侧面半身提示词', content: '参考提供的角色正面图，保持人物外貌、服装完全一致，生成角色的侧面半身照，45度角侧脸，展示五官轮廓，白色简洁背景，高清写实风格', nodeLabel: '侧面半身图', size: DEFAULT_SQUARE_SIZE },
-        { label: '表情特写提示词', content: '参考提供的角色正面图，保持人物五官、发型完全一致，生成角色的面部特写，展示多种表情（微笑、严肃、惊讶、悲伤），四宫格布局，高清写实风格', nodeLabel: '表情特写图', size: DEFAULT_SQUARE_SIZE },
-        { label: '背面全身提示词', content: '参考提供的角色正面图，保持人物发型、服装、身材完全一致，生成角色的背面全身照，展示背影，白色简洁背景，高清写实风格', nodeLabel: '背面全身图', size: DEFAULT_PORTRAIT_SIZE }
+      const variants: Array<{ label: string; content: string; nodeLabel: string; size: ImageAspectIntent }> = [
+        { label: '侧面半身提示词', content: '参考提供的角色正面图，保持人物外貌、服装完全一致，生成角色的侧面半身照，45度角侧脸，展示五官轮廓，白色简洁背景，高清写实风格', nodeLabel: '侧面半身图', size: 'square' },
+        { label: '表情特写提示词', content: '参考提供的角色正面图，保持人物五官、发型完全一致，生成角色的面部特写，展示多种表情（微笑、严肃、惊讶、悲伤），四宫格布局，高清写实风格', nodeLabel: '表情特写图', size: 'square' },
+        { label: '背面全身提示词', content: '参考提供的角色正面图，保持人物发型、服装、身材完全一致，生成角色的背面全身照，展示背影，白色简洁背景，高清写实风格', nodeLabel: '背面全身图', size: 'portrait' }
       ]
 
       const vx = startPosition.x + col * 2 + 100
@@ -283,7 +315,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       nodes.push({ id: basePromptId, type: 'text', position: { x: startPosition.x + col, y: startPosition.y }, data: { content: '根据场景描述，生成白天正午时段的场景背景作为基准，阳光明媚，光线充足均匀，展示场景全貌和所有环境元素，纯背景无人物，电影级画质，宽屏构图', label: '基础场景提示词' } })
 
       const baseImgId = getId()
-      nodes.push({ id: baseImgId, type: 'image', position: { x: startPosition.x + col * 2, y: startPosition.y }, data: { url: '', label: '基础场景图（参考基准）', ...imageParams(DEFAULT_LANDSCAPE_SIZE) } })
+      nodes.push({ id: baseImgId, type: 'image', position: { x: startPosition.x + col * 2, y: startPosition.y }, data: { url: '', label: '基础场景图（参考基准）', ...imageParams('landscape') } })
 
       // 第一阶段连线
       edges.push({ id: `e_${sceneDescId}_${baseImgId}`, source: sceneDescId, target: baseImgId, type: 'promptOrder', data: { promptOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
@@ -302,7 +334,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
         const tId = getId()
         nodes.push({ id: tId, type: 'text', position: { x: vx, y: vy }, data: { content: v.content, label: v.label } })
         const gId = getId()
-        nodes.push({ id: gId, type: 'image', position: { x: vx + col, y: vy }, data: { url: '', label: v.nodeLabel, ...imageParams(DEFAULT_LANDSCAPE_SIZE) } })
+        nodes.push({ id: gId, type: 'image', position: { x: vx + col, y: vy }, data: { url: '', label: v.nodeLabel, ...imageParams('landscape') } })
         edges.push({ id: `e_${baseImgId}_${gId}`, source: baseImgId, target: gId, type: 'imageOrder', data: { imageOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
         edges.push({ id: `e_${tId}_${gId}`, source: tId, target: gId, type: 'promptOrder', data: { promptOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
       })
