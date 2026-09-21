@@ -30,7 +30,12 @@ const USER_ID = 'cmu9zppwt000196wpcxpcd4rk'
 
 const NODE_COUNT = Number(process.argv[2] || 1000)
 // 第三参数传 no-edges 可做对照组：用来判断瓶颈是否来自「每个节点都遍历全部边」
-const SKIP_EDGES = process.argv[3] === 'no-edges'
+// 对照组开关（可任意顺序组合）：
+//   no-edges  → 不生成边，用来隔离「边组件的渲染成本」
+//   collapsed → 节点全部折叠，用来隔离「节点卡片内容的渲染成本」
+const FLAGS = process.argv.slice(3)
+const SKIP_EDGES = FLAGS.includes('no-edges')
+const COLLAPSED = FLAGS.includes('collapsed')
 const COLS = 20
 /** 夹具实际会生成的边数（每行首除外，各连一条）*/
 const EDGE_TOTAL = SKIP_EDGES ? 0 : Math.max(0, NODE_COUNT - Math.ceil(NODE_COUNT / COLS))
@@ -49,9 +54,15 @@ const buildFixture = (count) => {
       id,
       type: isText ? 'text' : 'image',
       position: { x: (i % COLS) * 420 + 100, y: Math.floor(i / COLS) * 360 + 100 },
-      data: isText
-        ? { label: `文本 ${i}`, content: `第 ${i} 段内容，用于压测的占位文本。`, createdAt: now, updatedAt: now }
-        : { label: `图片 ${i}`, url: '', prompt: '', createdAt: now, updatedAt: now },
+      data: {
+        ...(isText
+          ? { label: `文本 ${i}`, content: `第 ${i} 段内容，用于压测的占位文本。` }
+          : { label: `图片 ${i}`, url: '', prompt: '' }),
+        // 折叠态用来做对照：卡片内容几乎全不渲染
+        ...(COLLAPSED ? { collapsed: true } : {}),
+        createdAt: now,
+        updatedAt: now,
+      },
     })
 
     // 每条边把第 i 个连到第 i+1 个（隔列时跳过，避免大量交叉线）
@@ -95,7 +106,7 @@ const removeFixture = async (connection, workflowId) => {
 }
 
 const main = async () => {
-  console.log(`\n【画布性能压测】${NODE_COUNT} 个节点 / ${NODE_COUNT - Math.ceil(NODE_COUNT / COLS)} 条边\n`)
+
 
   const connection = await mariadb.createConnection(DB_URL)
   const { nodes, edges } = buildFixture(NODE_COUNT)

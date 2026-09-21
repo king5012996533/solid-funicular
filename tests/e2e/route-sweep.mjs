@@ -32,6 +32,8 @@ const ROUTES = [
 
 let passed = 0
 let failed = 0
+/** 第三方资源失败汇总：不计入失败，但要在结尾报出来 */
+const thirdPartyIssues = []
 const check = (label, ok, detail = '') => {
   if (ok) {
     passed++
@@ -44,6 +46,26 @@ const check = (label, ok, detail = '') => {
 
 /** 这些 401 是未登录时的正常响应，不算回归 */
 const IGNORABLE = [/401/, /Unauthorized/, /当前未登录/]
+
+/**
+ * 把「我们自己的报错」与「第三方资源的报错」分开。
+ *
+ * 为什么需要这个：首页/生成页引用了大量**热链的第三方素材**
+ * （qwe-oss 的个人 OSS bucket、字节的 byteimg 与 vlabstatic），
+ * 依赖代理或外网解析。代理一开、或对方 bucket 一关，这些图就全裂，
+ * 于是巡检在每个路由上都会因为 ERR_NAME_NOT_RESOLVED 判失败 ——
+ * 但那是环境与对方服务的问题，不是我们代码的回归。
+ *
+ * 判据：报错文本里出现 ERR_NAME_NOT_RESOLVED / ERR_CONNECTION / ERR_INTERNET
+ * 且 URL 不是我们自己的 origin。这类只统计、不计入失败 —— **但不隐藏**，
+ * 会在结果里单独报出来（它们本身是真实的产品风险，见清单 §5）。
+ */
+const isThirdPartyResourceError = (text) => {
+  const isNetworkFailure = /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_INTERNET_DISCONNECTED|ERR_TIMED_OUT/.test(text)
+  if (!isNetworkFailure) return false
+  // 报错文本里带我们自己的地址就不算第三方
+  return !/localhost:5011|127\.0\.0\.1:5011|localhost:5409/.test(text)
+}
 
 const main = async () => {
   const browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true })
@@ -73,8 +95,14 @@ const main = async () => {
         check(`渲染了 ${selector}`, found > 0, `找不到 ${selector}`)
       }
 
-      const realErrors = errors.filter(text => !IGNORABLE.some(re => re.test(text)))
-      check('没有 console error', realErrors.length === 0, realErrors.slice(0, 4).join('\n     '))
+      const notIgnorable = errors.filter(text => !IGNORABLE.some(re => re.test(text)))
+      const thirdParty = notIgnorable.filter(isThirdPartyResourceError)
+      const realErrors = notIgnorable.filter(text => !isThirdPartyResourceError(text))
+      check('没有 console error（不含第三方资源）', realErrors.length === 0, realErrors.slice(0, 4).join('\n     '))
+      if (thirdParty.length) {
+        thirdPartyIssues.push(`${route.name}: ${thirdParty.length} 项`)
+        console.log(`     ⚠️ 第三方热链资源失败 ${thirdParty.length} 项（不计入失败，但是真实风险）`)
+      }
 
       // 记录了页面实际尺寸，避免"没报错但整页塌成 0 高"
       const size = await page.evaluate(() => ({
@@ -91,6 +119,9 @@ const main = async () => {
 
   await browser.close()
   console.log(`\n${'─'.repeat(52)}`)
+  if (thirdPartyIssues.length) {
+    console.log(`  第三方热链资源失败（不计入失败）：${thirdPartyIssues.join('，')}`)
+  }
   console.log(`  通过 ${passed} / 失败 ${failed}`)
   process.exit(failed ? 1 : 0)
 }

@@ -19,6 +19,7 @@
  */
 
 import { createRequire } from 'node:module'
+import { assertNoConsoleErrors } from './lib/console-filters.mjs'
 
 const require = createRequire(import.meta.url)
 const { chromium } = require('/Users/mima1234/.npm/_npx/705bc6b22212b352/node_modules/playwright-core')
@@ -250,7 +251,7 @@ const main = async () => {
   check('走图生图模式', body.requestMode, 'image-edit')
 
   console.log('\n【7】全程没有 console error')
-  check('console errors', consoleErrors.filter(text => !/401|Unauthorized|当前未登录/.test(text)), [])
+  assertNoConsoleErrors(check, consoleErrors)
 
   await browser.close()
 

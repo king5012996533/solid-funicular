@@ -12,6 +12,7 @@
  */
 
 import { createRequire } from 'node:module'
+import { assertNoConsoleErrors } from './lib/console-filters.mjs'
 
 const require = createRequire(import.meta.url)
 const { chromium } = require('/Users/mima1234/.npm/_npx/705bc6b22212b352/node_modules/playwright-core')
@@ -205,8 +206,8 @@ const main = async () => {
     check('没有多出边', after.edgeCount, before.edgeCount)
   }
 
-  console.log('\n【6】全程没有 console error')
-  check('console errors', consoleErrors, [])
+  console.log('\n【7】全程没有 console error')
+  assertNoConsoleErrors(check, consoleErrors)
 
   await browser.close()
 

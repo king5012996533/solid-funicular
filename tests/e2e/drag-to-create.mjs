@@ -12,6 +12,7 @@
  */
 
 import { createRequire } from 'node:module'
+import { assertNoConsoleErrors } from './lib/console-filters.mjs'
 import { execFileSync } from 'node:child_process'
 
 const require = createRequire(import.meta.url)
@@ -184,8 +185,8 @@ const main = async () => {
     check('候选是上游提示词/素材来源', after.menuItems.sort(), ['图片生成', '文本节点', 'LLM 文本生成', '素材'].sort())
   }
 
-  console.log('\n【6】全程没有 console error')
-  check('console errors', consoleErrors, [])
+  console.log('\n【7】全程没有 console error')
+  assertNoConsoleErrors(check, consoleErrors)
 
   await browser.close()
 
