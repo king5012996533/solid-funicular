@@ -7,7 +7,22 @@ const DEFAULT_CACHE_TTL_SECONDS = 60
 const DEFAULT_TASK_RUNTIME_TTL_SECONDS = 30 * 60
 const DEFAULT_TASK_SNAPSHOT_TTL_SECONDS = 30 * 60
 const DEFAULT_TASK_ABORT_TTL_SECONDS = 5 * 60
-const DEFAULT_TASK_LOCK_TTL_MS = 30_000
+/**
+ * 执行锁 TTL。续期间隔由它推导（`ttl / 3`，见 task-runtime-governor），所以调它等于同时调两件事。
+ *
+ * 为什么是 5 分钟而不是 30 秒：
+ *   续期靠 setInterval 触发，而它**在进程被冻结时不会跑**。笔记本进入 Deep Idle
+ *   （合盖/息屏）时进程会被挂起，Redis 的 TTL 却按真实时间流逝 —— 醒来后第一次续期
+ *   发现锁键已经没了，返回 ownership_lost，而 ownership_lost 是**立即中断**任务。
+ *   2026-09-21 实测到两次：两个任务分别在运行 780 秒 / 940 秒后被中断，
+ *   失败时间 00:50:55 与 01:04:33 与系统日志里的 DarkWake 事件（00:50:45 / 01:04:33）**逐秒对上**。
+ *   而图生图单张实测要 54~334 秒，30 秒的 TTL 完全不够扛一次息屏。
+ *
+ * 代价：worker 真的死掉时，别的 worker 要多等一个 TTL 才能接手。这个应用的任务本来就是
+ * 分钟级、由用户手动触发，多等 5 分钟可以接受，比"生成到一半被判死"好得多。
+ * 注意这只是缓解：如果机器睡过去十几分钟，锁照样会过期 —— 开发机上跑长任务建议配 caffeinate。
+ */
+const DEFAULT_TASK_LOCK_TTL_MS = 300_000
 const DEFAULT_TASK_IDEMPOTENCY_TTL_SECONDS = 10 * 60
 const DEFAULT_TASK_CONCURRENCY_TTL_SECONDS = 30 * 60
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60

@@ -10,7 +10,7 @@
  *   也就是这个库长期出不了图的直接原因。
  */
 
-import { normalizeInteger } from '../server/redis/config'
+import { REDIS_CONFIG, normalizeInteger } from '../server/redis/config'
 
 let passed = 0
 let failed = 0
@@ -62,8 +62,15 @@ console.log('\n【5】关键回归：执行锁 TTL 不能再变成 1 毫秒')
 {
   // .env.development 里 REDIS_TASK_LOCK_TTL_MS 是注释掉的 → 传空字符串
   const lockTtl = normalizeInteger('', 30_000)
-  check('默认锁 TTL 是 30 秒而不是 1 毫秒', lockTtl, 30_000)
+  check('空字符串回落默认而不是 1', lockTtl, 30_000)
   check('锁 TTL 必须远大于续期间隔 5 秒', lockTtl > 5_000, true)
+
+  // 这里断言**真实配置值**而不是函数入参 —— 上面那条只能测函数，
+  // 常量本身被改小（比如又改回 30 秒）它抓不到。
+  // 之所以要求 ≥ 5 分钟：续期在进程被冻结（笔记本息屏/Deep Idle）时不跑，
+  // 而 Redis 的 TTL 按真实时间流逝，锁一过期续期就返回 ownership_lost 并**立即中断**任务。
+  // 实测图生图单张要 54~334 秒，30 秒的 TTL 扛不住一次息屏。
+  check('真实配置的任务锁 TTL ≥ 5 分钟（扛得住一次息屏）', REDIS_CONFIG.taskLockTtlMs >= 300_000, true)
 }
 
 console.log(`\n${'─'.repeat(52)}`)
