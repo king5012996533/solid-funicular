@@ -27,6 +27,40 @@ const APP_URL = process.env.APP_URL || 'http://localhost:5011'
 const SESSION_TOKEN = process.env.SESSION_TOKEN || ''
 const CHROME_PATH = '/Users/mima1234/.local/lib/chrome-for-testing/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
 
+/**
+ * 提示词输入框的形态在本轮从 textarea 换成了 contenteditable（内联 chip）。
+ * 下面两个读取器把两种形态归一，脚本因此不依赖具体实现 ——
+ * 选择器写成并集，实现换成哪一种都还能跑。
+ */
+const PROMPT_CONTROL = '.image-node-prompt-panel textarea.prompt-textarea, .image-node-prompt-panel .inline-mention-input'
+
+/** 读出输入框里的纯文本（contenteditable 下把 chip 还原成它的 token） */
+const readPromptText = (locator) => locator.evaluate((el) => {
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return el.value
+  return Array.from(el.childNodes)
+    .map((node) => (node.nodeType === Node.TEXT_NODE
+      ? node.nodeValue
+      : (node.getAttribute?.('data-mention-token') ?? node.textContent ?? '')))
+    .join('')
+})
+
+/**
+ * 光标是否停在内容末尾。
+ * 不换算成数值偏移 —— contenteditable 里 chip 是原子节点，
+ * DOM 偏移与纯文本偏移差一位，换算容易写错且难读。
+ * 「光标之后没有内容」这个等价条件更稳。
+ */
+const isCaretAtEnd = (locator) => locator.evaluate((el) => {
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount) return false
+  const range = sel.getRangeAt(0)
+  if (!el.contains(range.endContainer)) return false
+  const probe = document.createRange()
+  probe.selectNodeContents(el)
+  probe.setStart(range.endContainer, range.endOffset)
+  return probe.toString().length === 0
+})
+
 /** 1×1 透明 PNG：只在存储里造一个真实可访问的图片资产 */
 const PROBE_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -138,7 +172,7 @@ const main = async () => {
   // 回到消费方：点它卡片下沿选中，浮层重新出现
   await page.mouse.click(targetCardBox.x + targetCardBox.width / 2, targetCardBox.y + targetCardBox.height - 30)
   await page.waitForTimeout(600)
-  const textarea = page.locator('.image-node-prompt-panel textarea.prompt-textarea')
+  const textarea = page.locator(PROMPT_CONTROL)
   await textarea.waitFor({ state: 'visible', timeout: 10000 })
   check('消费方重新选中', await panel.count(), 1)
   check('未敲 @ 时面板不出现', await page.locator('.mention-picker').count(), 0)
@@ -172,15 +206,10 @@ const main = async () => {
   await pickerRows.nth(1).click()
   await page.waitForTimeout(300)
 
-  check('输入框里是 @图片2（不是 @@图片2）', await textarea.inputValue(), '@图片2 ')
+  check('输入框里是 @图片2（不是 @@图片2）', await readPromptText(textarea), '@图片2 ')
   check('面板已自动关闭', await page.locator('.mention-picker').count(), 0)
-  const caretState = await page.evaluate(() => {
-    const el = document.activeElement
-    if (!(el instanceof HTMLTextAreaElement)) return { focused: false, caret: -1 }
-    return { focused: el.classList.contains('prompt-textarea'), caret: el.selectionStart }
-  })
-  check('焦点回到输入框', caretState.focused, true)
-  check('光标落在 token 之后', caretState.caret, 5)
+  check('焦点回到输入框', await textarea.evaluate((el) => el.contains(document.activeElement)), true)
+  check('光标落在 token 之后（其后已无内容）', await isCaretAtEnd(textarea), true)
 
   console.log('\n【5】「已引用」行只露出被引用的那张')
   check('已引用行有 1 张缩略图', await referredItems.count(), 1)
@@ -192,7 +221,7 @@ const main = async () => {
   await referredItems.first().locator('.remove-button.generator-reference-clear-btn').click()
   await page.waitForTimeout(250)
   // token 后那个空格是插入时补的分隔符，不属于 token 本身，所以比对 trim 后的结果
-  check('输入框里的 token 被删掉', (await textarea.inputValue()).trim(), '')
+  check('输入框里的 token 被删掉', (await readPromptText(textarea)).trim(), '')
   check('已引用行消失', await referredItems.count(), 0)
 
   console.log('\n【6】提交 → 载荷里 prompt 已解析、referenceImages 是显式引用（覆盖自动注入）')
@@ -201,7 +230,7 @@ const main = async () => {
   await page.waitForTimeout(300)
   await pickerRows.nth(1).click()
   await page.waitForTimeout(300)
-  check('重新引用后 token 回到输入框', await textarea.inputValue(), '@图片2 ')
+  check('重新引用后 token 回到输入框', await readPromptText(textarea), '@图片2 ')
 
   const requestPromise = page.waitForRequest(
     (request) => request.method() === 'POST' && request.url().includes('/api/generation-tasks'),

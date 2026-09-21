@@ -134,13 +134,32 @@
 - **涉及**：`index.vue`、`workflow.css`
 - **验收**：浏览器实测每个按钮都有行为
 
-### F8. @ 引用升级为内联 chip `前端`
+### F8. @ 引用升级为内联 chip `前端` ✅
 - **依据**：`[实测]` LibTV 的 @ 是内联 chip（带缩略图），不是纯文本
 - **现状**：我们已完成 token + 解析层（`reference-resolver.ts`），**数据模型可直接复用**
 - **做法**：把 `<textarea>` 换成 `contenteditable`，token 渲染成 chip；**必须处理中文 IME**（`compositionstart/end`）
 - **涉及**：`ContentGenerator.vue`、`MentionPicker.vue`
 - **风险**：这是本清单里前端风险最高的一项（输入法、粘贴、Enter 发送、光标位置、placeholder 全部要重做）
 - **验收**：浏览器实测中文输入法组字不打断、chip 可增删、提交载荷与现在一致
+- **✅ 已完成**（2026-09-21）。新增 `InlineMentionInput.vue`：受控的 contenteditable，
+  **纯文本仍是唯一真相**，DOM 只是它的投影 —— 输入时把 DOM 序列化回 `@图片1`
+  emit 出去，所以 `resolve-reference` 那层一行没动。已插 token 渲染成
+  `contenteditable=false` 的 chip。仅在画布节点那两类 composer 启用；
+  其余 13 个调用方仍是原生 textarea，行为不变。
+- **IME 的三条硬约束**：① composition 期间不读也不写 DOM；
+  ② `compositionend` 后补一次序列化（部分输入法最后那次 `input` 仍带 isComposing）；
+  ③ 重渲染后按**纯文本偏移**还原光标（chip 是原子节点，按 DOM 偏移会偏一位）。
+- **IME 验证到什么程度**：用 CDP `Input.imeSetComposition` 走浏览器真实合成管线
+  （不是合成 JS 事件），确认组字期间 chip 未被重建、上屏后文本正确、
+  组字中的 Enter 被当成上屏。**没验证**：真实输入法的候选窗/翻页/选词路径、
+  Safari 与 Firefox 的 IME、组字起点紧贴 chip 的边界 —— headless + CDP 不是真正的输入法。
+- **用户可察觉的行为差异**（相对旧 textarea）：chip 是整体、Backspace 一次删掉整个引用；
+  手敲的 token 要等一个分隔符才收成 chip（为了 `@图片1` 能续着敲成 `@图片12`）；
+  粘贴一律按纯文本；Cmd+Z 走浏览器原生 contenteditable 撤销栈，粒度比 textarea 粗；
+  输入框自动增高（96 → 上限 40vh）。
+- 顺带修了一处**只有跑起来才发现**的问题：chip 是 `document.createElement` 建的，
+  拿不到 Vue 给模板节点附加的 scope 属性，所以 chip 的样式必须写成非 scoped，
+  否则 chip 完全没有样式（实测当时是白字透明底）。
 
 ### F9. 画布性能压测 `前端` ✅
 - **依据**：`[公告]` v1.5「优化大量节点的画布（数千节点）卡顿体验问题」「修复画布偶尔丢失节点的问题」

@@ -23,6 +23,9 @@ import {
   type PromptPreset,
 } from '@/config/prompt-presets'
 import MentionPicker from './MentionPicker.vue'
+// 内联 chip 输入框（F8）：只在「@ 引用被启用」的场景替换 textarea，
+// 其余调用方（首页/生成页等）继续用原生 textarea，行为逐字节不变
+import InlineMentionInput from './InlineMentionInput.vue'
 // 引用解析是纯逻辑（工作包 A 拥有实现），composer 只调用冻结接口
 import {
   REFERENCE_TOKEN_PATTERN,
@@ -448,13 +451,14 @@ const toggleStylePreset = (preset: PromptPreset) => {
 
 /** 从 chip 打开 @ 素材引用面板：锚点取提示词输入框，和敲 @ 的效果一致 */
 const openMentionFromChip = () => {
-  const el = document.querySelector('.prompt-textarea') as HTMLElement | null
+  const el = inlineMentionRef.value?.getElement()
+    ?? (document.querySelector('.prompt-textarea') as HTMLElement | null)
   if (el) {
     const rect = el.getBoundingClientRect()
     mentionAnchor.value = { x: rect.left, y: rect.top }
   }
   mentionCaret.value = inputValue.value.length
-  mentionTarget.value = 'textarea'
+  mentionTarget.value = useInlineMentionInput.value ? 'inline' : 'textarea'
   stylePanelOpen.value = false
   mentionVisible.value = true
 }
@@ -463,11 +467,22 @@ const mentionVisible = ref(false)
 const mentionAnchor = ref({ x: 0, y: 0 })
 /** 敲下 @ 那一刻的光标位置：插入 token 必须回到这里，否则会插到句子末尾 */
 const mentionCaret = ref(0)
-/** 触发 @ 的控件（展开态是 textarea，折叠态是单行 input），选中后要把焦点还回去 */
-const mentionTarget = ref<'textarea' | 'input'>('textarea')
+/** 触发 @ 的控件（展开态是 textarea，折叠态是单行 input，画布节点是内联 chip 输入框），
+ *  选中后要把焦点还回去 */
+const mentionTarget = ref<'textarea' | 'input' | 'inline'>('textarea')
+const inlineMentionRef = ref<InstanceType<typeof InlineMentionInput> | null>(null)
 
 // 只有图片 / 视频的提示词里才谈得上「引用上游素材」；其余类型保持原样
 const supportsReferenceMention = computed(() => currentType.value === 'image' || currentType.value === 'video')
+
+/**
+ * 是否改用内联 chip 输入框。
+ * 判据与「@ 是否接管输入」完全一致（`referenceableAssets !== undefined`）：
+ * 只有画布节点会传这个 prop，所以另外 13 个调用方拿到的仍是原来的 textarea。
+ */
+const useInlineMentionInput = computed(
+  () => supportsReferenceMention.value && props.referenceableAssets !== undefined,
+)
 
 const closeMention = () => {
   mentionVisible.value = false
@@ -512,6 +527,34 @@ const handlePromptInput = (e: Event, target: 'textarea' | 'input') => {
 const handleTextareaInput = (e: Event) => handlePromptInput(e, 'textarea')
 const handlePromptInputEvent = (e: Event) => handlePromptInput(e, 'input')
 
+/**
+ * 内联 chip 输入框的内容变化。
+ *
+ * 与 textarea 分支共用同一套「是不是刚敲下 @」判据（shouldOpenMention），
+ * 差别只在于光标位置由组件按**纯文本偏移**报上来，而不是读 selectionStart ——
+ * chip 是原子节点，DOM 偏移与纯文本偏移对不上。
+ */
+const handleInlineMentionInput = (payload: { value: string; caret: number }) => {
+  inputValue.value = payload.value
+  if (!supportsReferenceMention.value || props.referenceableAssets === undefined) return
+
+  const el = inlineMentionRef.value?.getElement()
+  if (!el) return
+  if (!shouldOpenMention(payload.value, payload.caret)) return
+
+  const rect = el.getBoundingClientRect()
+  mentionAnchor.value = { x: rect.left, y: rect.top }
+  mentionCaret.value = payload.caret
+  mentionTarget.value = 'inline'
+  mentionVisible.value = true
+}
+
+/** 内联输入框的回车：@ 面板开着时把它让给面板（面板自己处理 ↑↓/Enter） */
+const handleInlineMentionSubmit = () => {
+  if (mentionVisible.value) return
+  handleSubmit()
+}
+
 const handleMentionSelect = (asset: ReferenceableAsset) => {
   const triggerCaret = mentionCaret.value
   // 敲下的那个 @ 只是「触发符」：insertReferenceToken 自己会补 @，
@@ -522,8 +565,15 @@ const handleMentionSelect = (asset: ReferenceableAsset) => {
     : inputValue.value
   const inserted = insertReferenceToken(basePrompt, hasTriggerChar ? triggerCaret - 1 : triggerCaret, asset.token)
 
+  const inline = mentionTarget.value === 'inline'
   inputValue.value = inserted.prompt
   closeMention()
+
+  if (inline) {
+    // 内联 chip 输入框：立刻按新文本重建，token 当场变成 chip，光标回到插入点之后
+    inlineMentionRef.value?.setValueAndCaret(inserted.prompt, inserted.caret)
+    return
+  }
 
   // 面板（Teleport 到 body）抢走了焦点，关掉后要把焦点与光标还给原来的控件
   nextTick(() => {
@@ -1595,7 +1645,21 @@ onUnmounted(() => {
           <div :class="['prompt-container', 'prompt-editor-container-HRhsP7', { 'collapsed-L4sRxQ': isCollapsed && !isSidebar }]"
                :style="`--content-generator-prompt-control-height:${promptControlHeight};--content-generator-prompt-control-line-height:24px`">
             <div :class="['prompt-editor-aDwTfA', { 'collapsed-L4sRxQ': isCollapsed && !isSidebar }]">
+              <!-- 只有「@ 引用被启用」的画布节点才换成内联 chip 输入框；
+                   其余调用方（首页 / 生成页 / 详情页等）继续走下面的原生 textarea -->
+              <InlineMentionInput
+                  v-if="useInlineMentionInput"
+                  ref="inlineMentionRef"
+                  v-model="inputValue"
+                  class="prompt-textarea"
+                  :placeholder="placeholder"
+                  :single-line="isCollapsed"
+                  :assets="referenceAssets"
+                  aria-label="提示词"
+                  @input="handleInlineMentionInput"
+                  @submit="handleInlineMentionSubmit" />
               <textarea
+                  v-else
                   ref="promptTextareaRef"
                   v-model="inputValue"
                   :class="['lv-textarea', 'textarea-rfj34A', 'prompt-textarea', { 'collapsed-l8bAEB': isCollapsed, 'collapse-transition-start': isCollapsed }]"
