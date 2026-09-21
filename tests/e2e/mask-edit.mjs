@@ -27,7 +27,6 @@ const SESSION_TOKEN = process.env.SESSION_TOKEN || ''
 const CHROME_PATH = '/Users/mima1234/.local/lib/chrome-for-testing/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
 const WORKFLOW_URL = process.env.WORKFLOW_URL || `${APP_URL}/workflow`
 const WAIT_FOR_IMAGE = process.env.WAIT === '1'
-const GENERATION_TIMEOUT_MS = 7 * 60 * 1000
 
 let passed = 0
 let failed = 0
@@ -149,10 +148,13 @@ const main = async () => {
 
     // ---- 7. 可选：等真出图 ----
     if (WAIT_FOR_IMAGE) {
-      console.log(`\n  等待出图（实测 2~6 分钟）…`)
-      const started = Date.now()
+      console.log(`\n  等待出图（实测 0.5~6 分钟）…`)
+      // 用**迭代次数**而不是墙上时钟做上限：这台机器会进 Deep Idle，进程被冻结时
+      // `Date.now() - started` 会一次跳过十几分钟，用时间判断会在任务其实还在跑的时候
+      // 直接判超时（踩过：任务 39 秒就 COMPLETED，脚本却报"没出图"）。
+      const MAX_POLLS = 60
       let done = false
-      while (Date.now() - started < GENERATION_TIMEOUT_MS) {
+      for (let poll = 0; poll < MAX_POLLS; poll += 1) {
         const state = await page.locator('.vue-flow__node:has-text("局部重绘")').first().evaluate((node) => {
           const img = node.querySelector('.image-node-image')
           const errorNode = node.querySelector('.image-node-error')
@@ -163,10 +165,14 @@ const main = async () => {
             error: errorNode ? errorNode.textContent.trim() : '',
           }
         })
-        const seconds = Math.round((Date.now() - started) / 1000)
-        console.log(`  [${String(seconds).padStart(3)}s] 图=${state.hasImage} 生成中=${state.loading}${state.error ? ` 错误=${state.error.slice(0, 60)}` : ''}`)
+        console.log(`  [第 ${String(poll + 1).padStart(2)} 次] 图=${state.hasImage} 生成中=${state.loading}${state.error ? ` 错误=${state.error.slice(0, 60)}` : ''}`)
         if (state.hasImage || state.error) { done = true; break }
         await sleep(10000)
+      }
+      if (!done) {
+        // 页面上看不到图不一定是任务失败（进程被冻结时可能错过流事件），
+        // 所以把这一点单独说清楚，不混进"功能坏了"里
+        console.log('  ⚠️ 页面上一直没出现图。可能是任务失败，也可能是本机冻结导致前端错过了推送 —— 需要查后端任务状态确认')
       }
       truthy('局部重绘产出了图', done)
     } else {
