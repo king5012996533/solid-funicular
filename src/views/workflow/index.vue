@@ -55,6 +55,7 @@ import {
   clearCanvas,
 } from './composables/useWorkflowCanvas'
 import { useCanvasAlignmentGuides } from './composables/useCanvasAlignmentGuides'
+import { computeCanvasLayout } from './config/canvas-layout'
 import {
   NODE_TYPE_PRESENTATION,
   getNodeTypePresentation,
@@ -449,6 +450,8 @@ const tools = [
   { id: 'text', name: '文本', icon: 'M4 6h16M4 12h8m-8 6h16', action: () => addNewNode('text') },
   { id: 'image', name: '文生图', icon: 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z', action: () => addNewNode('image') },
   { id: 'video', name: '视频生成', icon: 'M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z', action: () => addNewNode('video') },
+  // 素材库：直接建一个素材节点（对齐 LibTV 底部工具条的「素材库」）
+  { id: 'asset', name: '素材库', icon: 'M4 8a1.5 1.5 0 0 1 1.5-1.5h3.3a1.5 1.5 0 0 1 1.2.6l1 1.4h7.5A1.5 1.5 0 0 1 20 10v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z', action: () => addNewNode('asset') },
 ]
 
 // 添加新节点
@@ -854,6 +857,79 @@ const flushAutosave = async () => {
   await autosaveInFlight.value
 }
 
+/**
+ * 整理画布（对齐 LibTV 的「整理画布」，Option+Shift+F）
+ *
+ * 布局计算全在 config/canvas-layout.ts（纯函数、有单测）。
+ * 这里只负责把结果写回节点位置 —— 一次性写完并只记一条历史，
+ * 而不是逐个节点改（逐个改会往撤销栈里塞 N 条记录，撤销一次只回退一个节点）。
+ */
+const autoLayoutCanvas = () => {
+  if (!nodes.value.length) return
+  // dimensions 是 Vue Flow 在运行时量完才补上的字段，不在我们的节点类型声明里，
+  // 所以这里窄化读一次 —— 拿不到时交给布局函数用兜底尺寸
+  const measured = nodes.value as unknown as Array<{
+    id: string
+    position: { x: number; y: number }
+    dimensions?: { width: number; height: number }
+  }>
+
+  const { positions } = computeCanvasLayout(
+    measured.map(node => ({
+      id: node.id,
+      position: node.position,
+      width: node.dimensions?.width,
+      height: node.dimensions?.height,
+    })),
+    edges.value.map(edge => ({ source: edge.source, target: edge.target })),
+  )
+  if (!positions.size) return
+
+  nodes.value = nodes.value.map(node => {
+    const next = positions.get(node.id)
+    return next ? { ...node, position: next } : node
+  })
+
+  setTimeout(() => {
+    updateNodeInternals(nodes.value.map(node => node.id))
+    void fitView({ padding: 0.2 })
+  }, 50)
+}
+
+/** 快捷键面板：内容是我们**实际注册**的快捷键，不是抄来的清单 */
+const showShortcutPanel = ref(false)
+
+const shortcutGroups = [
+  {
+    title: '画布',
+    items: [
+      { keys: ['Space', '拖拽'], desc: '临时平移画布' },
+      { keys: ['双击空白'], desc: '弹出节点类型菜单' },
+      { keys: ['⌥ ⇧ F'], desc: '整理画布' },
+    ],
+  },
+  {
+    title: '节点',
+    items: [
+      { keys: ['从 ⊕ 拖出'], desc: '连线；落在空白处弹候选节点' },
+      { keys: ['双击标题'], desc: '重命名节点' },
+      { keys: ['Delete'], desc: '删除选中节点' },
+      { keys: ['⌘ C'], desc: '复制选中节点' },
+      { keys: ['⌘ V'], desc: '粘贴节点' },
+      { keys: ['⌘ A'], desc: '全选节点' },
+    ],
+  },
+  {
+    title: '编辑',
+    items: [
+      { keys: ['⌘ Z'], desc: '撤销' },
+      { keys: ['⌘ ⇧ Z'], desc: '重做' },
+      { keys: ['Esc'], desc: '取消当前连线 / 关闭浮层' },
+      { keys: ['⌘ N'], desc: '新建工作流' },
+    ],
+  },
+]
+
 // 键盘快捷键（统一走 useShortcut 注册，自动管理生命周期 + 输入框焦点屏蔽）
 useShortcut(
   'Escape',
@@ -870,6 +946,8 @@ useShortcut(['CmdOrCtrl+Shift+Z', 'CmdOrCtrl+Y'], () => redo())
 useShortcut('CmdOrCtrl+N', () => {
   void handleCreateWorkflow()
 })
+// Option+Shift+F —— 与 LibTV 同一个组合键，便于两边来回切时形成肌肉记忆
+useShortcut('Alt+Shift+F', () => autoLayoutCanvas())
 
 // 空格临时平移：按住 Space 时禁用节点拖拽，左键也加入 panOnDrag
 const isSpacePressed = ref(false)
@@ -1368,8 +1446,54 @@ watch(currentCanvasSnapshot, () => {
                 <path d="M17 14l4-4-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </button>
+
+            <div class="wf-divider"></div>
+
+            <!-- 整理画布：按流向分层重排（Option+Shift+F），与 LibTV 同一个组合键 -->
+            <button
+              class="wf-btn wf-btn-icon"
+              :disabled="!nodes.length"
+              @click="autoLayoutCanvas"
+              title="整理画布（⌥⇧F）"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M4 6h6M4 12h6M4 18h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M14 9h6M14 15h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M10 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+              </svg>
+            </button>
+
+            <!-- 快捷键面板：列的是我们实际注册的快捷键 -->
+            <button
+              class="wf-btn wf-btn-icon"
+              :class="{ active: showShortcutPanel }"
+              @click="showShortcutPanel = !showShortcutPanel"
+              title="快捷键"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <rect x="2.5" y="6" width="19" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+                <path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M8 14h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </button>
           </div>
         </nav>
+
+        <!-- 快捷键面板 -->
+        <aside v-if="showShortcutPanel" class="workflow-shortcut-panel">
+          <div class="workflow-shortcut-head">
+            <span>快捷键</span>
+            <button type="button" class="workflow-shortcut-close" @click="showShortcutPanel = false">✕</button>
+          </div>
+          <div v-for="group in shortcutGroups" :key="group.title" class="workflow-shortcut-group">
+            <div class="workflow-shortcut-group-title">{{ group.title }}</div>
+            <div v-for="item in group.items" :key="item.desc" class="workflow-shortcut-row">
+              <span class="workflow-shortcut-keys">
+                <kbd v-for="key in item.keys" :key="key">{{ key }}</kbd>
+              </span>
+              <span class="workflow-shortcut-desc">{{ item.desc }}</span>
+            </div>
+          </div>
+        </aside>
 
         <div v-if="showNodeMenu" class="wf-node-menu">
           <button
@@ -1578,4 +1702,86 @@ watch(currentCanvasSnapshot, () => {
 @import './styles/workflow.css';
 /* 画布外观对齐 LibTV（实测色值）。放在 workflow.css 之后，才能覆盖其中的默认值 */
 @import './styles/libtv-tokens.css';
+
+/* ===== 快捷键面板（F7）===== */
+.workflow-shortcut-panel {
+  position: absolute;
+  top: 64px;
+  left: 72px;
+  z-index: 6;
+  width: 288px;
+  padding: 12px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 12px;
+  background: var(--canvas-float-block-default);
+  backdrop-filter: blur(var(--canvas-float-backdrop-blur, 16px));
+}
+
+.workflow-shortcut-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.workflow-shortcut-close {
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workflow-shortcut-close:hover {
+  color: var(--text-primary);
+}
+
+.workflow-shortcut-group + .workflow-shortcut-group {
+  margin-top: 12px;
+}
+
+.workflow-shortcut-group-title {
+  margin-bottom: 6px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.workflow-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 26px;
+}
+
+.workflow-shortcut-keys {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.workflow-shortcut-keys kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 5px;
+  background: var(--bg-block-secondary-default);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.workflow-shortcut-desc {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: right;
+}
 </style>
