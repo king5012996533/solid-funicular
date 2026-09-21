@@ -185,7 +185,10 @@
 
   const emit = defineEmits<FormEmits>()
 
-  const modelValue = defineModel<Record<string, any>>({ default: {} })
+  // 对象类型的 default 必须给工厂函数：直接写 `{ default: {} }` 会选不中
+  // defineModel 的重载，modelValue 会被推断成 unknown，
+  // 连带下面 `modelValue[item.key]` 与被重置逻辑一起报错（共 3 处）。
+  const modelValue = defineModel<Record<string, any>>({ default: () => ({}) })
 
   const rootProps = ['label', 'labelWidth', 'key', 'type', 'hidden', 'span', 'slots']
 
