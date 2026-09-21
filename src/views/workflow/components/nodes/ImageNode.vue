@@ -264,6 +264,11 @@ const hoverActions = computed<NodeToolbarAction[]>(() => {
     { id: 'duplicate', label: '复制', icon: CopyDocument, onClick: handleDuplicate },
   ]
   if (imageUrl.value) {
+    // 替换 = 换素材但**保住接线**：只把 url 写到本节点，节点 id / 位置 / 上下游边
+    // 全部不变。所以它不能和"往画布拖一张本地图"混为一谈 —— 后者会新建节点，
+    // 下游那几条引用（图生图的参考图、视频的首帧等）都得手动重连。
+    // 放在悬停工具栏而不是压在图上：图本身才是主角，别拿按钮盖住画面。
+    list.push({ id: 'replace', label: '替换', icon: UploadIcon, onClick: triggerUpload })
     list.push({ id: 'download', label: '下载', icon: Download, onClick: handleDownload })
   }
   list.push({ id: 'delete', label: '删除', icon: Delete, danger: true, onClick: handleDelete })
@@ -708,15 +713,6 @@ watch(
           @pointerdown="handleImagePointerDown"
           @click="handleImageClick"
         />
-        <button
-          class="image-node-replace-btn nodrag nopan"
-          title="替换图片"
-          @mousedown.stop
-          @click.stop="triggerUpload"
-        >
-          <span class="image-node-replace-icon" aria-hidden="true">↑</span>
-          <span>替换</span>
-        </button>
         <span v-if="isBatchGroupVisible" class="image-node-batch-count" :title="`批量组 ${batchChildCount} 张，双击展开/折叠`">
           {{ batchChildCount }}
         </span>
@@ -1159,36 +1155,6 @@ watch(
   background: var(--brand-main-default);
   color: #fff;
   border-color: var(--brand-main-default);
-}
-
-/* 替换按钮（有图态右上角） */
-.image-node-replace-btn {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 10;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  background: var(--canvas-float-block-default, rgba(30, 30, 30, 0.9));
-  border: 1px solid var(--stroke-secondary);
-  border-radius: 8px;
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
-}
-.image-node-replace-btn:hover {
-  background: var(--canvas-float-block-hover, var(--bg-block-primary-hover, rgba(50, 50, 50, 0.95)));
-  border-color: var(--brand-main-default);
-  color: var(--brand-main-default);
-}
-.image-node-replace-icon {
-  font-size: 14px;
-  line-height: 1;
 }
 
 /* 左右 Handle 隐藏（用 .image-node-add-btn 替代） */
