@@ -7,10 +7,10 @@
 @import '@vue-flow/node-resizer/dist/style.css';
 
 /* canana 视图样式：复用 RightPanel 等组件需要的内部样式 */
-@import '../../canana/styles/canvas.css';
-@import '../../canana/styles/sidebar-empty-state.css';
-@import '../../canana/styles/empty-state.css';
-@import '../../canana/styles/index.css';
+@import './canvas-shell/canvas.css';
+@import './canvas-shell/sidebar-empty-state.css';
+@import './canvas-shell/empty-state.css';
+@import './canvas-shell/index.css';
 
 /* NodeResizer 视觉覆盖：用 lv-theme 变量统一画风 */
 .workflow-canvas .vue-flow__resize-control.handle {
