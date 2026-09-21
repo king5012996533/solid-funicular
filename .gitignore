@@ -34,3 +34,6 @@ package-lock.json
 .env
 .env.development
 .env.production
+
+# 运行时用户上传目录（UPLOADS_DIR），不属于源码
+uploads

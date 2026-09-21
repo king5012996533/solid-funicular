@@ -49,6 +49,7 @@ import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
 import { describeAspectRatio, describeResolutionTier, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import { createGenerationTask, subscribeGenerationTaskEvents, resolveGenerationTaskModel } from '@/api/generation-tasks'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 
@@ -273,6 +274,15 @@ const upstreamReferenceUrls = computed<string[]>(() => {
 })
 
 /**
+ * 可引用资产清单，喂给 ContentGenerator 的 @ 面板。
+ *
+ * 必须是 computed 而不是快照：token 里的序号（@图片1）是按上游连线顺序算出来的，
+ * 连线一变序号的含义就变，面板必须跟着画布图实时重算。
+ * 空数组也要给 —— 面板靠它显示「暂无可引用资产，请连入后操作」。
+ */
+const referenceableAssets = computed(() => collectReferenceableAssets(props.id))
+
+/**
  * 上游文本 / LLM 节点 → 本节点的提示词。
  *
  * 以前这一步是「配置节点」干的活：配置节点把上游文本收集起来当 prompt。
@@ -393,7 +403,14 @@ const taskStreamController = ref<AbortController | null>(null)
 const handlePromptSend = async (
   message: string,
   _type?: string,
-  options?: { modelKey?: string; ratio?: string; resolution?: string; count?: number; referenceImages?: string[] },
+  options?: {
+    modelKey?: string
+    ratio?: string
+    resolution?: string
+    count?: number
+    referenceImages?: string[]
+    unresolvedReferences?: string[]
+  },
 ) => {
   // 上游文本节点连过来的提示词 + 节点内输入，合并后提交
   const prompt = composeFinalPrompt(message)
@@ -401,8 +418,19 @@ const handlePromptSend = async (
     if (!prompt) ElMessage.info('请先写提示词，或从上游接一个文本节点')
     return
   }
-  // 优先用 ContentGenerator 自带的参考图选项（用户在生成器内单独添加的）
-  // 没有时落到上游连线的图
+  // 写错的 token（序号越界 / 资产已失效）不阻塞提交，但要说清楚哪几处没生效，
+  // 否则用户以为引用了实际没有，属于静默失败
+  const unresolvedRefs = Array.isArray(options?.unresolvedReferences)
+    ? options.unresolvedReferences.filter(Boolean)
+    : []
+  if (unresolvedRefs.length) {
+    ElMessage.warning(`有 ${unresolvedRefs.length} 处引用已失效：${unresolvedRefs.join('、')}`)
+  }
+  // 参考图来源优先级（显式引用必须赢）：
+  //   · 用户在提示词里敲了 @ 引用 → composer 已把解析出的媒体按出现顺序放进
+  //     options.referenceImages，这里原样使用，绝不能用「上游图片全量注入」覆盖回去，
+  //     否则用户挑出来的那张会被整条上游覆盖，显式引用等于失效；
+  //   · 一个 @ 都没敲（或解析结果为空）→ 保持原来的全自动注入行为，向后兼容。
   const rawRefImages = Array.isArray(options?.referenceImages) && options.referenceImages.length
     ? options.referenceImages
     : upstreamReferenceUrls.value
@@ -659,6 +687,7 @@ watch(
         :hide-type-selector="true"
         :verbose-toolbar="true"
         :external-reference-images="upstreamReferenceUrls"
+        :referenceable-assets="referenceableAssets"
         :initial-params="appliedParams"
         placeholder-override="描述你想生成的图片内容，按 Enter 生成"
         popup-placement="top"

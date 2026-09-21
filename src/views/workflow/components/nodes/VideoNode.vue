@@ -38,6 +38,7 @@ import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type VideoModel } from '@/config/models'
 import { describeAspectRatio, pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { collectReferenceableAssets } from '../../composables/reference-resolver'
 
 const props = defineProps<{
   id: string
@@ -85,6 +86,14 @@ const upstreamFrameUrls = computed<string[]>(() => {
 })
 
 const composeFinalPrompt = (inline: string) => composePrompt(upstreamPromptText.value, inline)
+
+/**
+ * 可引用资产清单，喂给 ContentGenerator 的 @ 面板。
+ *
+ * 必须是 computed：token 里的序号（@图片1）由上游连线顺序决定，连线一变序号含义就变，
+ * 面板要跟着画布图实时重算。空数组也要给，面板靠它显示「暂无可引用资产，请连入后操作」。
+ */
+const referenceableAssets = computed(() => collectReferenceableAssets(props.id))
 
 // === 参数：与 ImageNode 同一套做法，节点 data 是参数的持久化处 ===
 //
@@ -246,19 +255,35 @@ onMounted(() => {
  * 没有 video 策略（见 server/generation-tasks/strategy.ts）。
  * 所以这里如实告知，而不是伪造一个成功回调。
  */
-const handlePromptSend = (text: string, _type: string, options?: GeneratorParamsSnapshot) => {
+const handlePromptSend = (
+  text: string,
+  _type: string,
+  options?: GeneratorParamsSnapshot & { referenceImages?: string[]; unresolvedReferences?: string[] },
+) => {
   const prompt = composeFinalPrompt(text)
   if (!prompt) {
     ElMessage.info('请先写提示词，或从上游接一个文本节点')
     return
   }
+  // 写错的 token（序号越界 / 资产已失效）不阻塞提交，但要报清楚哪几处没生效，
+  // 否则用户以为引用了实际没有，属于静默失败
+  const unresolvedRefs = Array.isArray(options?.unresolvedReferences)
+    ? options.unresolvedReferences.filter(Boolean)
+    : []
+  if (unresolvedRefs.length) {
+    ElMessage.warning(`有 ${unresolvedRefs.length} 处引用已失效：${unresolvedRefs.join('、')}`)
+  }
   const params = options || appliedParams.value
+  // 显式引用（@）优先：composer 解析出的媒体才是本次真正要提交的参考画面，
+  // 上游连线只是「一个 @ 都没敲」时的自动注入，两者不能混着报数
+  const explicitRefs = Array.isArray(options?.referenceImages) ? options.referenceImages.filter(Boolean) : []
+  const frames = explicitRefs.length ? explicitRefs : upstreamFrameUrls.value
   const summary = [
     params.modelKey ? `模型 ${getModelByName(params.modelKey)?.label || params.modelKey}` : '',
     params.ratio ? `比例 ${describeAspectRatio(params.ratio)}` : '',
     params.duration ? `${params.duration} 秒` : '',
     params.resolution ? `分辨率 ${params.resolution}` : '',
-    upstreamFrameUrls.value.length ? `首帧 ${upstreamFrameUrls.value.length} 张` : '',
+    frames.length ? `首帧 ${frames.length} 张` : '',
   ].filter(Boolean).join(' · ')
 
   ElMessage.warning(
@@ -370,6 +395,7 @@ const handlePromptSend = (text: string, _type: string, options?: GeneratorParams
         :hide-type-selector="true"
         :verbose-toolbar="true"
         :external-reference-images="upstreamFrameUrls"
+        :referenceable-assets="referenceableAssets"
         :initial-params="appliedParams"
         placeholder-override="描述你想生成的视频画面，按 Enter 发送"
         popup-placement="top"

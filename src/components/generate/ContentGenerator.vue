@@ -10,6 +10,14 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 import { TypeSelector, type CreationType } from './selectors'
 import { AgentToolbar, ImageToolbar, VideoToolbar, DigitalHumanToolbar } from './toolbars'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
+import MentionPicker from './MentionPicker.vue'
+// 引用解析是纯逻辑（工作包 A 拥有实现），composer 只调用冻结接口
+import {
+  REFERENCE_TOKEN_PATTERN,
+  insertReferenceToken,
+  resolvePromptReferences,
+  type ReferenceableAsset,
+} from '@/views/workflow/composables/reference-resolver'
 
 // 弹出方向类型
 type Placement = 'top' | 'bottom' | 'auto'
@@ -60,6 +68,17 @@ interface Props {
    * 工具栏是参数的编辑处，两边改动都会同步，值相同则不触发。
    */
   initialParams?: GeneratorParamsSnapshot
+  /**
+   * 可被 @ 引用的上游资产（工作流节点注入）。
+   *
+   * 刻意不给默认值、用 undefined 区分两种「空」：
+   *   undefined → 调用方根本没有画布上下文（首页/生成页等 13 个调用方），
+   *               @ 完全不接管输入，行为与改动前一致；
+   *   []        → 在画布节点里但当前没有可引用的上游，
+   *               这时要弹面板并显示「暂无可引用资产，请连入后操作」（对齐 LibTV），
+   *               而不是让用户敲了 @ 之后毫无反应、以为功能坏了。
+   */
+  referenceableAssets?: ReferenceableAsset[]
 }
 
 /** 当前生效的生成参数快照（供工作流节点落库到节点 data） */
@@ -85,6 +104,8 @@ interface GeneratorSendOptions {
   count?: number
   /** Agent 模式下当前模型支持的扩展能力开关（联网搜索 / 深度思考） */
   capabilityFlags?: ModelCapabilityFlags
+  /** 解析失败的引用 token 原文（资产已失效或序号不存在），由调用方决定是否提示 */
+  unresolvedReferences?: string[]
 }
 
 interface GeneratorDraftPayload {
@@ -155,6 +176,8 @@ const inputValue = ref('')
 const imageReferenceImages = ref<string[]>([])
 const videoFirstFrameImage = ref('')
 const videoLastFrameImage = ref('')
+const promptTextareaRef = ref<HTMLTextAreaElement | null>(null)
+const promptInputRef = ref<HTMLInputElement | null>(null)
 const imageReferenceInputRef = ref<HTMLInputElement | null>(null)
 const videoFirstFrameInputRef = ref<HTMLInputElement | null>(null)
 const videoLastFrameInputRef = ref<HTMLInputElement | null>(null)
@@ -359,8 +382,150 @@ const handleInput = (e: Event) => {
   inputValue.value = target.value
 }
 
+// ========== 素材引用（@ 上游） ==========
+// token 是纯文本 `@图片1`，这里只负责「触发面板 / 插入 token / 解析成载荷」，
+// 解析规则全部来自工作包 A 的冻结接口，composer 不自己实现语义。
+
+const mentionVisible = ref(false)
+const mentionAnchor = ref({ x: 0, y: 0 })
+/** 敲下 @ 那一刻的光标位置：插入 token 必须回到这里，否则会插到句子末尾 */
+const mentionCaret = ref(0)
+/** 触发 @ 的控件（展开态是 textarea，折叠态是单行 input），选中后要把焦点还回去 */
+const mentionTarget = ref<'textarea' | 'input'>('textarea')
+
+// 只有图片 / 视频的提示词里才谈得上「引用上游素材」；其余类型保持原样
+const supportsReferenceMention = computed(() => currentType.value === 'image' || currentType.value === 'video')
+
+const closeMention = () => {
+  mentionVisible.value = false
+}
+
+const getMentionTargetElement = (): HTMLTextAreaElement | HTMLInputElement | null =>
+  mentionTarget.value === 'input' ? promptInputRef.value : promptTextareaRef.value
+
+/**
+ * 判定是否该弹面板：光标前刚敲下的字符是 `@`，且不在某个 token 中间。
+ * 之所以看「光标后一位」：用户把 @ 插到已有 token 前面编辑时不该再弹一次。
+ */
+const shouldOpenMention = (text: string, caret: number) => {
+  if (caret <= 0) return false
+  if (text.charAt(caret - 1) !== '@') return false
+  // 光标后紧跟字母 / 数字 / 汉字 → 正处于 token 内部，不打断编辑
+  if (/^[\p{L}\p{N}]/u.test(text.slice(caret))) return false
+  return true
+}
+
+const handlePromptInput = (e: Event, target: 'textarea' | 'input') => {
+  handleInput(e)
+
+  // 区分两种「空」：prop 没传 = 非画布上下文，完全不接管 @
+  // （其余 13 个调用方都属此类，输入体验与改动前逐字节一致）；
+  // prop 传了但是空数组 = 画布节点里暂时没上游可引用，仍要弹面板给空态。
+  if (!supportsReferenceMention.value || props.referenceableAssets === undefined) return
+  // 中文输入法组字过程中的 @ 不是用户想引用
+  if ((e as InputEvent).isComposing) return
+
+  const el = e.target as HTMLTextAreaElement | HTMLInputElement
+  const caret = el.selectionStart ?? el.value.length
+  if (!shouldOpenMention(el.value, caret)) return
+
+  const rect = el.getBoundingClientRect()
+  mentionAnchor.value = { x: rect.left, y: rect.top }
+  mentionCaret.value = caret
+  mentionTarget.value = target
+  mentionVisible.value = true
+}
+
+const handleTextareaInput = (e: Event) => handlePromptInput(e, 'textarea')
+const handlePromptInputEvent = (e: Event) => handlePromptInput(e, 'input')
+
+const handleMentionSelect = (asset: ReferenceableAsset) => {
+  const triggerCaret = mentionCaret.value
+  // 敲下的那个 @ 只是「触发符」：insertReferenceToken 自己会补 @，
+  // 直接插会得到 @@图片1，所以先把触发符吃掉再插。
+  const hasTriggerChar = inputValue.value.charAt(triggerCaret - 1) === '@'
+  const basePrompt = hasTriggerChar
+    ? inputValue.value.slice(0, triggerCaret - 1) + inputValue.value.slice(triggerCaret)
+    : inputValue.value
+  const inserted = insertReferenceToken(basePrompt, hasTriggerChar ? triggerCaret - 1 : triggerCaret, asset.token)
+
+  inputValue.value = inserted.prompt
+  closeMention()
+
+  // 面板（Teleport 到 body）抢走了焦点，关掉后要把焦点与光标还给原来的控件
+  nextTick(() => {
+    const el = getMentionTargetElement()
+    el?.focus()
+    el?.setSelectionRange(inserted.caret, inserted.caret)
+  })
+}
+
+/**
+ * 归一化后的可引用资产列表。
+ * prop 是可选的（undefined = 非画布上下文），但下面所有消费点都只想处理数组，
+ * 所以在这里收一次口，避免每处都写 `?? []` 或者踩 undefined。
+ */
+const referenceAssets = computed<ReferenceableAsset[]>(() => props.referenceableAssets ?? [])
+
+// 解析结果同时喂给「已引用」行与提交载荷，避免两处各算一次产生分歧
+const resolvedReferences = computed(() =>
+  resolvePromptReferences(inputValue.value, referenceAssets.value),
+)
+
+const hasReferenceTokens = computed(() => {
+  const resolved = resolvedReferences.value
+  return resolved.media.length > 0 || resolved.texts.length > 0
+})
+
+/** 「已引用」行只展示媒体（图片 / 视频）—— 文本引用读不出缩略图，语义也不一样 */
+const referencedMediaItems = computed(() => {
+  const resolved = resolvedReferences.value
+  if (!resolved.media.length) return [] as Array<{ url: string; asset: ReferenceableAsset }>
+
+  // media 里是 url，反查资产才能知道它对应的 token 文案
+  const assetByValue = new Map<string, ReferenceableAsset>()
+  for (const asset of referenceAssets.value) {
+    if (asset.kind !== 'image' && asset.kind !== 'video') continue
+    if (!asset.value) continue
+    if (!assetByValue.has(asset.value)) assetByValue.set(asset.value, asset)
+  }
+
+  return resolved.media.flatMap((url) => {
+    const asset = assetByValue.get(url)
+    return asset ? [{ url, asset }] : []
+  })
+})
+
+/**
+ * 移除引用 = 从文本里删掉该资产的 token。
+ * 逐 token 匹配后整段比较，而不是直接 replace 子串：
+ * `@图片1` 是 `@图片10` 的前缀，子串替换会误伤。
+ */
+const removeMentionedReference = (item: { url: string; asset: ReferenceableAsset }) => {
+  const token = `@${item.asset.token}`
+  const pattern = new RegExp(REFERENCE_TOKEN_PATTERN.source, 'g')
+  inputValue.value = inputValue.value.replace(pattern, (match) => (match === token ? '' : match))
+}
+
+watch(
+  () => props.referenceableAssets,
+  (assets) => {
+    // 属性被整个撤掉（= 离开画布上下文）时收掉面板；
+    // 传了空数组则保留面板，让用户可以继续看到「暂无可引用资产」的空态
+    if (assets === undefined) closeMention()
+  },
+)
+
+// 切换创作类型时旧的引用上下文已失效，先收掉面板
+watch(currentType, () => closeMention())
+
 // 处理键盘事件（回车发送）
 const handleKeydown = (e: KeyboardEvent) => {
+  // @ 面板打开时 Enter 归面板（选中当前项），否则会把半截提示词直接发出去
+  if (mentionVisible.value && e.key === 'Enter') {
+    e.preventDefault()
+    return
+  }
   // Enter 发送，Shift+Enter 换行
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -370,8 +535,15 @@ const handleKeydown = (e: KeyboardEvent) => {
 
 // 提交消息
 const handleSubmit = () => {
-  const message = inputValue.value.trim()
+  const resolved = resolvedReferences.value
+  // 没有引用任何 token 时直接用原始输入，保证既有调用方行为逐字节不变
+  const message = (hasReferenceTokens.value ? resolved.text : inputValue.value).trim()
   if (!message) return
+
+  // 引用失效（序号不存在 / 资产已废弃）不阻塞提交，但要把原文带出去让调用方提示
+  const unresolvedOptions = resolved.unresolved.length
+    ? { unresolvedReferences: [...resolved.unresolved] }
+    : {}
 
   // 未登录时直接弹出登录框，并保留当前输入内容。
   if (!authStore.isLoggedIn.value) {
@@ -388,8 +560,10 @@ const handleSubmit = () => {
       modelKey: toolbar?.currentModelVersion || '',
       ratio: toolbar?.currentSize || '',
       resolution: sizeConfig?.quality || '',
-      referenceImages: [...imageReferenceImages.value],
+      // 显式引用覆盖自动注入：只要有 token，参考图就完全按解析结果来
+      referenceImages: hasReferenceTokens.value ? [...resolved.media] : [...imageReferenceImages.value],
       count: toolbar?.currentCount || 1,
+      ...unresolvedOptions,
     }
     emit('send', message, currentType.value, sendOptions)
   } else if (currentType.value === 'video' && videoToolbarRef.value) {
@@ -397,12 +571,15 @@ const handleSubmit = () => {
     const sizeConfig = toolbar.getCurrentSizeConfig()
     emit('send', message, currentType.value, {
       model: toolbar.getCurrentModelLabel(),
-      // 首帧 / 尾帧按位置映射进 referenceImages，与 §3.4 约定的 payload 保持一致
-      referenceImages: [videoFirstFrameImage.value, videoLastFrameImage.value].filter(Boolean),
+      // 无引用时首帧 / 尾帧按位置映射进 referenceImages；有引用时以解析结果为准
+      referenceImages: hasReferenceTokens.value
+        ? [...resolved.media]
+        : [videoFirstFrameImage.value, videoLastFrameImage.value].filter(Boolean),
       ratio: toolbar.currentSize,
       resolution: sizeConfig.quality,
       duration: toolbar.currentDuration,
-      feature: toolbar.currentFeature
+      feature: toolbar.currentFeature,
+      ...unresolvedOptions,
     })
   } else if (currentType.value === 'agent') {
     const toolbar = agentToolbarExpandRef.value || agentToolbarRef.value
@@ -410,8 +587,9 @@ const handleSubmit = () => {
       model: toolbar?.currentModelLabel || '',
       modelKey: toolbar?.currentModel || '',
       skill: toolbar?.currentSkill || 'general',
-      referenceImages: [...imageReferenceImages.value],
+      referenceImages: hasReferenceTokens.value ? [...resolved.media] : [...imageReferenceImages.value],
       capabilityFlags: toolbar?.currentCapabilityFlags || {},
+      ...unresolvedOptions,
     })
   } else {
     emit('send', message, currentType.value)
@@ -419,6 +597,7 @@ const handleSubmit = () => {
 
   // 清空输入
   inputValue.value = ''
+  closeMention()
 }
 
 // 是否禁用提交按钮
@@ -1240,21 +1419,46 @@ onUnmounted(() => {
                :style="`--content-generator-prompt-control-height:${promptControlHeight};--content-generator-prompt-control-line-height:24px`">
             <div :class="['prompt-editor-aDwTfA', { 'collapsed-L4sRxQ': isCollapsed && !isSidebar }]">
               <textarea
+                  ref="promptTextareaRef"
                   v-model="inputValue"
                   :class="['lv-textarea', 'textarea-rfj34A', 'prompt-textarea', { 'collapsed-l8bAEB': isCollapsed, 'collapse-transition-start': isCollapsed }]"
                   :placeholder="placeholder"
                   translate="no"
-                  @input="handleInput"
+                  @input="handleTextareaInput"
                   @keydown="handleKeydown"></textarea>
             </div>
             <div class="prompt-textarea-sizer prompt-editor-sizer-S4F9P4">
               <input
+                  ref="promptInputRef"
                   v-model="inputValue"
                   :class="['lv-input', 'lv-input-size-default', 'input-JjM14b', 'prompt-input', { 'collapsed-l8bAEB': isCollapsed, 'collapse-transition-start': isCollapsed }]"
                   :placeholder="placeholder"
                   translate="no"
-                  @input="handleInput"
+                  @input="handlePromptInputEvent"
                   @keydown="handleKeydown">
+            </div>
+          </div>
+
+          <!-- 已引用：@ 引用的媒体缩略图，点叉号即从文本里删掉对应 token -->
+          <div v-if="referencedMediaItems.length" class="mentioned-references">
+            <span class="mentioned-references__label">已引用</span>
+            <div class="mentioned-references__list">
+              <div
+                v-for="item in referencedMediaItems"
+                :key="item.url"
+                class="mentioned-reference-item"
+                :title="item.asset.token"
+              >
+                <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
+                <span class="mentioned-reference-badge">{{ item.asset.kindLabel }}</span>
+                <div class="remove-button-container">
+                  <button type="button" class="remove-button generator-reference-clear-btn" @click.stop="removeMentionedReference(item)">
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M19.579 6.119a1.2 1.2 0 0 0-1.697-1.698L12 10.303 6.12 4.422a1.2 1.2 0 1 0-1.697 1.697L10.303 12l-5.881 5.882a1.2 1.2 0 0 0 1.697 1.697L12 13.698l5.882 5.882a1.2 1.2 0 1 0 1.697-1.697L13.697 12l5.882-5.882Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1485,6 +1689,15 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 素材引用面板：锚在输入框左上角，由组件自己决定向上弹出 -->
+    <MentionPicker
+      :visible="mentionVisible"
+      :assets="referenceAssets"
+      :anchor="mentionAnchor"
+      @select="handleMentionSelect"
+      @close="closeMention"
+    />
   </div>
 </template>
 
@@ -2130,6 +2343,66 @@ onUnmounted(() => {
 
 .dimension-layout-FUl4Nj .remove-button-container:active .remove-button.generator-reference-clear-btn {
   background: var(--component-reference-remove-pressed, rgba(15, 23, 42, 0.98));
+}
+
+/* ========== 已引用（@ 上游） ==========
+   缩略图行放在输入框下方：token 是纯文本，看不出引的是哪张图，
+   这一行负责把实际资产露出来，并给出「删掉这个引用」的入口。 */
+
+.dimension-layout-FUl4Nj .mentioned-references {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  min-height: 40px;
+}
+
+.dimension-layout-FUl4Nj .mentioned-references__label {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.dimension-layout-FUl4Nj .mentioned-references__list {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dimension-layout-FUl4Nj .mentioned-reference-item {
+  background: var(--bg-block-primary-default);
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 8px;
+  height: 40px;
+  overflow: hidden;
+  position: relative;
+  width: 40px;
+}
+
+.dimension-layout-FUl4Nj .mentioned-reference-badge {
+  background: var(--canvas-float-block-default, var(--bg-block-primary-default));
+  border-radius: 4px;
+  bottom: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  left: 2px;
+  line-height: 14px;
+  padding: 0 4px;
+  pointer-events: none;
+  position: absolute;
+}
+
+/* 叉号平时藏起来，hover / 键盘聚焦时才浮现，与参考图缩略图一致 */
+.dimension-layout-FUl4Nj .mentioned-reference-item:hover .remove-button-container,
+.dimension-layout-FUl4Nj .mentioned-reference-item:focus-within .remove-button-container {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dimension-layout-FUl4Nj .mentioned-reference-item .remove-button-container {
+  transform: none;
 }
 
 /* ========== 参数页脚（图片 / 视频工具栏共用） ==========

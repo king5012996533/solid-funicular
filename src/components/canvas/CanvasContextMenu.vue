@@ -2,7 +2,12 @@
 /**
  * 画布右键上下文菜单
  *
- * 使用 Teleport 到 body，自带边界检测（超出视口时贴边）+ 点击外部/Esc 关闭。
+ * 使用 Teleport：进入画布上下文（存在 .workflow-container）时挂到画布容器上，
+ * 以继承画布那套配色 token；否则退回 body。
+ * 不固定挂 body 的原因：--canvas-float-block-default 等 token 定义在 .workflow-container 上，
+ * 挂 body 会取到 styles.css 的全局旧值 —— 那套值不透明度只有 72%（画布内 95%），
+ * 半透明 + backdrop blur 会让底下的节点内容透上来，菜单看着发脏。
+ * 自带边界检测（超出视口时贴边）+ 点击外部/Esc 关闭。
  * 视觉走 lv-theme 毛玻璃风：`--canvas-float-block-default` + backdrop-filter
  * + `--shadow-generator-float-block`。
  *
@@ -14,7 +19,7 @@
  *   @close="ctxMenu.visible = false"
  * />
  */
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
 
 const props = defineProps<{
@@ -22,6 +27,17 @@ const props = defineProps<{
   position: ContextMenuPosition
   items: ContextMenuItem[]
 }>()
+
+/**
+ * Teleport 目标（见文件头说明）。用字符串而非元素引用：
+ * .workflow-container 是页面级常驻节点，组件挂载时它已经在 DOM 里。
+ */
+const teleportTarget = ref<string>('body')
+onMounted(() => {
+  if (document.querySelector('.workflow-container')) {
+    teleportTarget.value = '.workflow-container'
+  }
+})
 
 const emit = defineEmits<{
   (event: 'close'): void
@@ -90,7 +106,7 @@ const handleClick = (item: ContextMenuItem) => {
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport :to="teleportTarget">
     <Transition name="canvas-ctx-menu">
       <div
         v-if="visible"

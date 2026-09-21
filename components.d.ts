@@ -86,6 +86,7 @@ declare module 'vue' {
     LeftToolbar: typeof import('./src/components/canana/LeftToolbar.vue')['default']
     LoginModal: typeof import('./src/components/LoginModal.vue')['default']
     MarketingModal: typeof import('./src/components/MarketingModal.vue')['default']
+    MentionPicker: typeof import('./src/components/generate/MentionPicker.vue')['default']
     MenuIconButton: typeof import('./src/components/home/components/MenuIconButton.vue')['default']
     MenuItem: typeof import('./src/components/home/components/MenuItem.vue')['default']
     ModelCapabilityEditor: typeof import('./src/components/admin/common/ModelCapabilityEditor.vue')['default']
