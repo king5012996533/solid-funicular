@@ -228,9 +228,6 @@ const handleDuplicate = () => {
   if (newId) setTimeout(() => updateNodeInternals([newId]), 50)
 }
 
-const handleAllReference = () => ElMessage.info('「全能参考」接入中，敬请期待')
-const handleFirstLastFrame = () => ElMessage.info('「首尾帧生视频」接入中，敬请期待')
-
 const hoverActions = computed<NodeToolbarAction[]>(() => {
   const list: NodeToolbarAction[] = [
     { id: 'duplicate', label: '复制', icon: CopyDocument, onClick: handleDuplicate },
@@ -242,10 +239,31 @@ const hoverActions = computed<NodeToolbarAction[]>(() => {
   return list
 })
 
-const emptyMenuItems = [
-  { id: 'all-ref', label: '全能参考', icon: Aim, onClick: handleAllReference },
-  { id: 'first-last', label: '首尾帧生视频', icon: Film, onClick: handleFirstLastFrame },
-]
+/**
+ * 空态的能力项 = **本节点能做什么**，取自模型声明的生成方式（文生视频 / 图生视频 / 首尾帧）。
+ *
+ * 为什么是这样：LibTV 的视频节点「尝试」列的就是生成方式
+ * （`5分钟超长视频 / 首尾帧生成视频 / 首帧生成视频`），语义是「这个节点的操作模式」。
+ * 我们原来这里放的是「全能参考 / 首尾帧生视频」，两项都只弹「接入中」——
+ * 点了没反应，属于假入口，已删除。
+ *
+ * 点击效果是真实的：把 feature 写进节点 data，经 initialParams 同步给
+ * composer 的工具栏，最终作为参数发给上游。
+ */
+const emptyMenuItems = computed(() => {
+  const iconByFeature: Record<string, typeof VideoCamera> = {
+    'text-to-video': VideoCamera,
+    'image-to-video': Aim,
+    'first-last-frame': Film,
+  }
+  return resolvedSchema.value.features.map((feature) => ({
+    id: feature.key,
+    label: feature.label,
+    icon: iconByFeature[feature.key] || VideoCamera,
+    active: resolvedFeature.value === feature.key,
+    onClick: () => updateNode(props.id, { feature: feature.key }),
+  }))
+})
 
 // 选中态下方浮层：用 ContentGenerator（与 /generate 同款），锁定 video 类型
 onMounted(() => {
@@ -329,13 +347,15 @@ const handlePromptSend = (
       <!-- 空态：按类型声明需要什么输入（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="video-node-empty">
         <div class="video-node-empty-hint">{{ inputState.emptyLabel }}</div>
-        <div class="video-node-empty-title">尝试：</div>
-        <div class="video-node-empty-menu">
+        <div v-if="emptyMenuItems.length" class="video-node-empty-title">生成方式：</div>
+        <div v-if="emptyMenuItems.length" class="video-node-empty-menu">
+          <!-- 当前生效的那一种高亮：这几个是互斥的模式选择，不是并列的快捷键 -->
           <button
             v-for="item in emptyMenuItems"
             :key="item.id"
             type="button"
             class="video-node-empty-item nodrag nopan"
+            :class="{ 'is-active': item.active }"
             @click.stop="item.onClick"
           >
             <el-icon class="video-node-empty-item-icon">
@@ -566,6 +586,14 @@ const handlePromptSend = (
 .video-node-empty-item:hover {
   background: var(--bg-block-secondary-hover);
   color: var(--text-primary);
+}
+/* 当前生效的生成方式：用底色与文字色区分，和「可选但未生效」区分开 */
+.video-node-empty-item.is-active {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+.video-node-empty-item.is-active .video-node-empty-item-icon {
+  color: var(--brand-main-default);
 }
 .video-node-empty-item-icon {
   font-size: 16px;

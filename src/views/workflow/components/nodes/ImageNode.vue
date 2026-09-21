@@ -213,9 +213,6 @@ const handleImageToVideo = (role: 'first_frame_image' | 'input_reference' = 'inp
   })
   setTimeout(() => updateNodeInternals([newId]), 50)
 }
-const handleChangeBackground = () => {
-  ElMessage.info('图片换背景接入中，敬请期待')
-}
 
 const hoverActions = computed<NodeToolbarAction[]>(() => {
   const list: NodeToolbarAction[] = [
@@ -228,11 +225,22 @@ const hoverActions = computed<NodeToolbarAction[]>(() => {
   return list
 })
 
-const emptyMenuItems = [
-  { id: 'i2i', label: '图生图', icon: Picture, onClick: handleImageToImage },
-  { id: 'i2v', label: '图生视频', icon: VideoCamera, onClick: () => handleImageToVideo('input_reference') },
-  { id: 'bg', label: '图片换背景', icon: Sunny, onClick: handleChangeBackground },
-  { id: 'first-frame', label: '首帧图生视频', icon: PictureFilled, onClick: () => handleImageToVideo('first_frame_image') },
+/**
+ * 空态里的动作 = **创建下游节点**，不是本节点的能力。
+ *
+ * 改之前这里叫「尝试：」，混了四件事：图生图 / 图生视频 / 图片换背景 / 首帧图生视频。
+ * 实际情况是三项都在建下游节点（另有 ⊕ 手柄那条路径）、「图片换背景」只弹
+ * 「接入中」——4 项里没有一项是"本节点能做什么"。LibTV 的「尝试」放的是
+ * 本节点的操作模式（图片节点给图生图/图片高清），语义完全不同。
+ *
+ * 我们图片节点目前**没有**可供选择的模式（图生图/文生图是由有没有上游参考图
+ * 自动决定的，不用户选），所以这里不再摆「尝试」，只留一个标注清楚的分组。
+ * 用户要的"本节点能出什么"由输入声明 + 上传按钮 + 下方 composer 承担。
+ */
+const downstreamItems = [
+  { id: 'i2i', label: '再生成一张（图片）', icon: Picture, onClick: handleImageToImage },
+  { id: 'i2v', label: '生成视频（当参考帧）', icon: VideoCamera, onClick: () => handleImageToVideo('input_reference') },
+  { id: 'first-frame', label: '生成视频（当首帧）', icon: PictureFilled, onClick: () => handleImageToVideo('first_frame_image') },
 ]
 
 // 选中态下方浮层：用 ContentGenerator（与 /generate 同款），锁定 image 类型
@@ -579,10 +587,10 @@ watch(
            文案来自 node-input-rules（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="image-node-empty">
         <div class="image-node-empty-hint">{{ inputState.emptyLabel }}</div>
-        <div class="image-node-empty-title">尝试：</div>
+        <div class="image-node-empty-title">生成下游节点：</div>
         <div class="image-node-empty-menu">
           <button
-            v-for="item in emptyMenuItems"
+            v-for="item in downstreamItems"
             :key="item.id"
             type="button"
             class="image-node-empty-item nodrag nopan"
