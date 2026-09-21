@@ -49,9 +49,11 @@ const NETWORK_ERROR_RETRY_DELAYS = [1500, 4000]
 // 它只是**上限**、不是延迟：上游快的时候照样很快返回，不会让用户多等。
 // 上限仍是 600s，避免一个挂死的请求占着执行锁太久。
 // 上游超时：上游快的时候照样很快返回，这只是一个上限。
-// 实测这台中转站同一档参数（gpt-image-2 / 1024x1024）耗时 54 / 89 / 258 / 265 秒，
-// 跨度接近 5 倍 —— 300 秒只剩 35 秒余量，再慢一点就会把成功请求判成超时。
-const UPSTREAM_FETCH_TIMEOUT_BASE_MS = 420_000
+// 实测这台中转站同一档参数（gpt-image-2 / 1024x1024）耗时
+// **54 / 89 / 258 / 265 / 334 秒**，跨度 6 倍以上 —— 300 秒时最慢那次（334 秒）
+// 会直接被判成超时，而我们这边是"等满上限才失败"，用户白等 5 分钟还拿不到图。
+// 上限取 480 秒（约为实测最慢的 1.4 倍），MAX 仍是 600 秒。
+const UPSTREAM_FETCH_TIMEOUT_BASE_MS = 480_000
 const UPSTREAM_FETCH_TIMEOUT_PER_IMAGE_MS = 90_000
 const UPSTREAM_FETCH_TIMEOUT_MAX_MS = 600_000
 

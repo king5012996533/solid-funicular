@@ -404,7 +404,7 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
 |---|---|---|
 | 站外链接的字节 CDN 素材 | **待清**（方案 A 已定：只修坏的） | 热链不算再分发，不是法律急事；但 `homeDiscoverContent.json` 41 处指向个人 OSS bucket，有失效风险 |
 | 9 个「接入中」占位按钮（全景图 / HD 增强 / 编辑元素 / 角度 / 打光 / 裁剪） | **已接线**（除「编辑元素」） | 实测这些大多是"固定指令 + 图生图"，不需要新后端：裁剪纯前端，角度/打光/HD 增强/全景图 走已验证的 image-edit 管线。**编辑元素（局部重绘）做不了** —— 见下一行 |
-| 「编辑元素」局部重绘（涂抹蒙版） | **不做**（本上游不支持） | 2026-09-21 实测：同一个请求、同一张图、同一句提示词，**不带 mask 返回 200（265 秒出图），带 mask 返回 400，13 秒就失败** —— 200 与 400 的差别只有 mask 这一个变量。所以不是我们的表单构造问题，是上游不收这个参数。**复用配方**（换到支持蒙版的厂商时照做即可）：`src/shared/upstream-request-normalizer.ts` 的 `buildImageEditRequestFormData` 增加 `mask` 入参并按 `formData.append('mask', blob, 'mask.png')` 追加（务必校验 `blob.type === 'image/png'`，jpg 没有 alpha，上游只会回一句看不懂的错）；`RequestImageEditInput` 与 `image-task-executor` 各透传一层；再配一个涂抹蒙版的画布 UI。每层都很浅，加起来半天以内 |
+| 「编辑元素」局部重绘（涂抹蒙版） | **待定**（不是"不支持"，见下） | 2026-09-21 实测记录，**先纠正一个误判**：第一次带 `mask` 的请求 13 秒返回 400，我据此判断"上游不收这个参数"——错了。**重试同一个带 mask 的请求返回 200、334 秒出图**；同图同提示词不带 mask 的对照是 200、265 秒。所以那句 400 是中转站的偶发失败（不带 mask 的请求也出现过同样一句），**不能作为"不支持蒙版"的证据**。目前只能确认「参数被接受」，**还没验证蒙版是否真的生效**（透明区外是否原样保留）—— 要验证只需再发一次带 mask 的请求、把 b64 存下来，对比圆外区域与输入图是否一致。**复用配方**（确认可用后照做）：`src/shared/upstream-request-normalizer.ts` 的 `buildImageEditRequestFormData` 增加 `mask` 入参并 `formData.append('mask', blob, 'mask.png')`（务必校验 `blob.type === 'image/png'`，jpg 没有 alpha）；`RequestImageEditInput` 与 `image-task-executor` 各透传一层；再配一个涂抹蒙版 UI。各层都很浅 |
 | 无后端支撑的纯展示项 | **不做** | 宁缺勿假：摆一个点了没反应的入口，比不摆更差 |
 | 重复的 `canvas.css` 导入 | 低优先 | `workflow.css` 与 `canvas-shell/index.css` 都引了 `canvas.css`，重复但无害 |
 
