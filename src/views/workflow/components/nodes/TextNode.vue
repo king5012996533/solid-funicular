@@ -32,6 +32,7 @@ import ContentGenerator from '@/components/generate/ContentGenerator.vue'
 import type { CreationType } from '@/components/generate/selectors'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
+import { useNodeInputState } from '../../composables/node-input-requirements'
 import {
   updateNode,
   removeNode,
@@ -73,6 +74,8 @@ const chatModelOptions = computed(() => getAllChatModels().map((m) => ({ label: 
 
 /** 空态判断：内容为空且用户未主动切到编辑态 */
 const isEmpty = computed(() => !forceEditMode.value && !content.value.trim())
+// 输入需求状态：文本节点不消费上游，文案由声明表给
+const inputState = useNodeInputState(() => props.id)
 
 watch(
   chatModelOptions,
@@ -330,8 +333,10 @@ watch(content, async () => {
         </div>
       </Transition>
 
-      <!-- 空态：尝试菜单 -->
+      <!-- 空态：先声明本节点要什么输入，再列能力项
+           （文本节点不消费上游，所以文案是「直接输入或上传解析」） -->
       <div v-if="isEmpty" class="text-node-empty">
+        <div class="text-node-empty-hint">{{ inputState.emptyLabel }}</div>
         <div class="text-node-empty-title">尝试：</div>
         <div class="text-node-empty-menu">
           <button
@@ -529,6 +534,14 @@ watch(content, async () => {
   justify-content: center;
   padding: 20px;
   text-align: left;
+}
+/* 输入需求声明（对齐 LibTV：节点自己说清要什么） */
+.text-node-empty-hint {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 18px;
+  margin-left: 10px;
+  margin-bottom: 16px;
 }
 .text-node-empty-title {
   color: var(--text-tertiary);

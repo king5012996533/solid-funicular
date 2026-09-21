@@ -38,6 +38,7 @@ import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type VideoModel } from '@/config/models'
 import { describeAspectRatio, pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { useNodeInputState } from '../../composables/node-input-requirements'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 
 const props = defineProps<{
@@ -63,8 +64,6 @@ watch(
     if (error !== undefined) errorMsg.value = error
   },
 )
-
-const hasUpstream = computed(() => edges.value.some((e) => e.target === props.id))
 
 /**
  * 上游素材 → 本节点的输入。
@@ -180,7 +179,13 @@ const paramChips = computed(() => {
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
 const showVideo = computed(() => !isLoading.value && !errorMsg.value && !!videoUrl.value)
-const showReady = computed(() => !showLoading.value && !showError.value && !showVideo.value && hasUpstream.value)
+const inputState = useNodeInputState(() => props.id)
+
+// ready 的判定改成「上游真的产出了内容」而不是「有一条边」：
+// 连了一个还没出图的节点不算已连接，否则界面会说谎
+const showReady = computed(() => (
+  !showLoading.value && !showError.value && !showVideo.value && inputState.value.satisfied.length > 0
+))
 const showEmpty = computed(() => !showLoading.value && !showError.value && !showVideo.value && !showReady.value)
 
 const triggerUpload = () => fileInputRef.value?.click()
@@ -321,8 +326,9 @@ const handlePromptSend = (
 
     <div class="video-node-card" :class="{ 'is-selected': isSelected }">
 
-      <!-- 空态：尝试菜单 -->
+      <!-- 空态：按类型声明需要什么输入（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="video-node-empty">
+        <div class="video-node-empty-hint">{{ inputState.emptyLabel }}</div>
         <div class="video-node-empty-title">尝试：</div>
         <div class="video-node-empty-menu">
           <button
@@ -352,7 +358,7 @@ const handlePromptSend = (
             <path d="M10 9l5 3-5 3V9z" fill="currentColor" />
           </svg>
         </div>
-        <div class="video-node-ready-text">已连接参考素材</div>
+        <div class="video-node-ready-text">{{ inputState.connectedLabel }}</div>
         <div class="video-node-ready-hint">选中节点后在下方写提示词并生成</div>
       </div>
 
@@ -519,6 +525,14 @@ const handlePromptSend = (
   flex: 1 1 0;
   justify-content: center;
   padding: 20px;
+}
+/* 输入需求声明：告诉用户该去连什么才能开始 */
+.video-node-empty-hint {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 0 8px;
+  margin-bottom: 16px;
 }
 .video-node-empty-title {
   color: var(--text-tertiary);

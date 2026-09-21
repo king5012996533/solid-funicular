@@ -49,6 +49,7 @@ import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
 import { describeAspectRatio, describeResolutionTier, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { useNodeInputState } from '../../composables/node-input-requirements'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import { createGenerationTask, subscribeGenerationTaskEvents, resolveGenerationTaskModel } from '@/api/generation-tasks'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
@@ -78,13 +79,20 @@ watch(
 )
 
 // 上游连线检测：当 target=本节点 的边存在时，节点处于"已连接参考图片"状态
-const hasUpstream = computed(() => edges.value.some((e) => e.target === props.id))
+/**
+ * 上游输入状态（对齐 LibTV：节点自己说清「已有什么、还缺什么」）。
+ * 判定标准是上游**真的产出了内容**，不是「有一条边」——
+ * 连了一个还没出图的节点不算已连接，否则界面会说谎。
+ */
+const inputState = useNodeInputState(() => props.id)
 
-// 4 类状态优先级：加载 > 错误 > 有图 > ready-state（无图但有上游）> 空态菜单
+// 4 类状态优先级：加载 > 错误 > 有图 > ready-state（有真实上游内容）> 空态菜单
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
 const showImage = computed(() => !isLoading.value && !errorMsg.value && !!imageUrl.value)
-const showReady = computed(() => !showLoading.value && !showError.value && !showImage.value && hasUpstream.value)
+const showReady = computed(() => (
+  !showLoading.value && !showError.value && !showImage.value && inputState.value.satisfied.length > 0
+))
 const showEmpty = computed(() => !showLoading.value && !showError.value && !showImage.value && !showReady.value)
 
 const triggerUpload = () => fileInputRef.value?.click()
@@ -567,8 +575,10 @@ watch(
     <!-- 节点本体 -->
     <div class="image-node-card" :class="{ 'is-selected': isSelected }">
 
-      <!-- 空态：尝试菜单 -->
+      <!-- 空态：按类型声明需要什么输入 + 能力项。
+           文案来自 node-input-rules（对齐 LibTV：节点自己说清要连什么） -->
       <div v-if="showEmpty" class="image-node-empty">
+        <div class="image-node-empty-hint">{{ inputState.emptyLabel }}</div>
         <div class="image-node-empty-title">尝试：</div>
         <div class="image-node-empty-menu">
           <button
@@ -590,7 +600,8 @@ watch(
         </button>
       </div>
 
-      <!-- ready-state：有上游连线但本节点没有图 -->
+      <!-- ready-state：上游真的产出了内容。
+           文案按实际输入拼（已连接提示词 / 已连接参考图 / 两者），不再写死一句 -->
       <div v-else-if="showReady" class="image-node-ready">
         <div class="image-node-ready-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -599,7 +610,7 @@ watch(
             <path d="M3 15L7 11L10 14L15 9L21 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </div>
-        <div class="image-node-ready-text">已连接参考图片</div>
+        <div class="image-node-ready-text">{{ inputState.connectedLabel }}</div>
         <div class="image-node-ready-hint">选中节点后在下方配置并生成</div>
       </div>
 
@@ -828,6 +839,14 @@ watch(
   /* 与下面图标列共用一条左边界 */
   padding: 0 8px;
   margin-bottom: 12px;
+}
+/* 输入需求声明：告诉用户该去连什么才能开始（对齐 LibTV 的空态写法） */
+.image-node-empty-hint {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 18px;
+  padding: 0 8px;
+  margin-bottom: 16px;
 }
 .image-node-empty-menu {
   display: flex;
