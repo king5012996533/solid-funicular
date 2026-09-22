@@ -1,0 +1,24 @@
+{
+  // 单独检查 server/ 的类型。
+  //
+  // 为什么需要这个文件：主 tsconfig.json 的 include 只覆盖 `src/**` 与 `src-cutia/**`,
+  // **服务端代码从来没有被 type-check 过** —— `npm run type-check` 全绿不代表 server/ 是对的。
+  // 这不是猜测：给后台接口去掉明文密钥时，我在 model-service.ts 删了一个 import，
+  // 而该文件后面还有两处调用它（425/536 行），`npm run type-check` 一点没报，
+  // 直到运行时接口 500 报 "getAdminProviderDetail is not defined" 才发现。
+  //
+  // 用法：npm run type-check:server
+  //
+  // 当前状态：**存量 88 个错误**，所以它没有被接进 `npm test`（接了就等于把门永远关着）。
+  // 全部清掉之后再把它并进 test 更合理。想推进的话按文件分批看：
+  //   npx tsc -p tsconfig.server.json 2>&1 | grep -E "error TS" | sed 's/(.*//' | sort | uniq -c | sort -rn
+  "extends": "./tsconfig.json",
+  "include": [
+    "server/**/*.ts"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false
+  }
+}

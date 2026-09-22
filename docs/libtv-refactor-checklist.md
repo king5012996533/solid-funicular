@@ -303,6 +303,22 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
 分组的令牌。分组是绑在令牌上的，不是绑在账号上的，所以改 Token 即可，不用改代码。
 拿到新 Key 后只需在后台「厂商配置」里新增一个厂商，B1/B3 就能接。
 
+**新增对话厂商：通义千问 MaaS**（2026-09-22，用户提供）
+`https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1`（OpenAI 兼容）。
+这是本项目**第一个可用的对话模型** —— 之前 ggwk1 那把 Key 的分组里只有图像模型，
+所以文本 / LLM 节点 / Agent / 研究搜索（`grok2api` 策略需要 modelKey）全都是死的。
+
+- 已登记：厂商 `qwen-maas`，模型 `qwen3.8-flash`（`category=CHAT`，provider 的
+  `defaultChatModel` 指向它 → 目录 `defaults.chat` 自动指向它）。
+- 实测：`/models` 列出 **15 个模型**（对话：qwen3.8-flash/max、glm-5.2/5.3、
+  deepseek-v4-pro 等；图片：`wan2.7-image` / `-pro`；语音：`qwen-audio-3.0-tts-plus` /
+  `-realtime-plus`）。**只登记了用户点名的 qwen3.8-flash**，其余待确认后再接 ——
+  图片与语音那两个对电商出图 / 漫剧配音有用，值得后面用上。
+- 端到端实测（`tests/e2e/submit-chat.mjs`）：目录解析出 providerId → 建任务 →
+  3 秒完成 → 模型回「链路正常」。浏览器里 LLM 节点的模型下拉默认即 `Qwen3.8 Flash`。
+- 注意它是**思考型模型**（usage 里有 `reasoning_tokens`，简单问答也先推理），
+  所以首字延迟比普通模型高。
+
 **占位模型已从下拉里清掉**（2026-09-22）：`doubao-seedream-4-5-251128`（Seedream 4.5）
 与 `nano-banana-pro`（Nano Banana Pro）这两个没有密钥的模型**已禁用**（不是删除 ——
 标签与能力声明都留着，将来给这两个厂商配上密钥，在后台一键启用即可）。

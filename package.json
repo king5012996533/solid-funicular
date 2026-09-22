@@ -29,6 +29,7 @@
     "test:scripts": "node scripts/tests/run-all.mjs",
     "test:unit": "node scripts/tests/run-unit.mjs",
     "test": "npm run type-check && npm run test:unit && npm run test:scripts",
+    "type-check:server": "tsc -p tsconfig.server.json",
     "test:scripts:research": "tsx scripts/tests/test-research-task.mjs",
     "analyze": "ANALYZE=1 vite build",
     "class-suffix:scan": "python3 scripts/class_suffix_cleanup.py --write-report",
