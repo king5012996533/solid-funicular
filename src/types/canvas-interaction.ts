@@ -200,8 +200,9 @@ export interface NodeSizeConstraint {
 
 export const NODE_SIZE_DEFAULTS: Record<WorkflowNodeType, NodeSizeConstraint> = {
   text: { minWidth: 220, minHeight: 120 },
-  image: { minWidth: 220, minHeight: 160 },
-  video: { minWidth: 240, minHeight: 160, keepRatio: true, aspectRatio: 16 / 9 },
+  image: { minWidth: 280, minHeight: 180 },
+  video: { minWidth: 480, minHeight: 270, keepRatio: true, aspectRatio: 16 / 9 },
+
   llmConfig: { minWidth: 320, minHeight: 220 },
   script: { minWidth: 360, minHeight: 260 },
   asset: { minWidth: 260, minHeight: 200 },

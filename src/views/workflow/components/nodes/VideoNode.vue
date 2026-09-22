@@ -543,8 +543,8 @@ const handlePromptSend = (
   position: relative;
   width: 100%;
   height: 100%;
-  min-width: 380px;
-  min-height: 280px;
+  min-width: 480px;
+  min-height: 270px;
   background: var(--canvas-node-bg);
   border: 1px solid var(--canvas-node-border);
   /* LibTV 实测 12px */

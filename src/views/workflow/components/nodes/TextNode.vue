@@ -487,8 +487,8 @@ watch(content, async () => {
   position: relative;
   width: 100%;
   height: 100%;
-  min-width: 300px;
-  min-height: 200px;
+  min-width: 220px;
+  min-height: 120px;
   background: var(--canvas-node-bg);
   /* 常驻 1px 描边（LibTV 同款）：未选中几乎看不见，选中只换颜色，
      节点尺寸不会因为选中而跳动 */
