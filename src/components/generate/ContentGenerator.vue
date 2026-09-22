@@ -2028,6 +2028,11 @@ onUnmounted(() => {
                 @clear-first-frame="clearVideoFirstFrame"
                 @last-frame-change="handleVideoLastFrameChange"
                 @clear-last-frame="clearVideoLastFrame"
+                :auto-validate-references="autoValidateReferences"
+                :auto-link-enabled="autoLinkEnabled"
+                :auto-linked-count="autoLinkedCount"
+                @update:auto-validate-references="autoValidateReferences = $event"
+                @update:auto-link-enabled="autoLinkEnabled = $event"
               />
 
             </template>
@@ -2087,53 +2092,6 @@ onUnmounted(() => {
         </div>
 
       </div>
-        <!-- 提交选项：单独占一行。
-             原先它俩挤在上一行（工具栏 + 高级设置 + 收费 + 提交）里，那行是 `overflow: hidden`，
-             空间不够时右边的元素**直接被裁掉** —— 实测：可用 520px、内容 692px，
-             「智能引用 AutoLink」整块落在可视区之外（用户报的「选项被遮挡」就是这个）。
-             开关是提交级选项，放在底行下面单独一行既有位置，也不用点开高级设置才能看见。 -->
-        <div v-if="showAdvancedParams" class="generator-submit-options">
-              <!-- 自动校验素材（对齐 LibTV 的节点开关）：提交前查格式与可访问性。
-                   只做这一个开关 —— 联网搜索 / 智能引用 AutoLink 需要后端能力，不摆。 -->
-              <button
-                v-if="showAdvancedParams"
-                type="button"
-                class="generator-switch"
-                :class="{ 'is-on': autoValidateReferences }"
-                role="switch"
-                :aria-checked="autoValidateReferences"
-                :title="autoValidateReferences
-                  ? '提交前会校验参考素材的格式与可访问性，不通过则拦下'
-                  : '已关闭：不校验参考素材，直接提交'"
-                @click.stop="autoValidateReferences = !autoValidateReferences"
-              >
-                <span class="generator-switch__track" aria-hidden="true">
-                  <span class="generator-switch__thumb" />
-                </span>
-                <span class="generator-switch__label">自动校验素材</span>
-              </button>
-              <!-- 智能引用 AutoLink（对齐 LibTV）：上游连入但没被 @ 的素材自动进本次提交。
-                  右边如实显示会带几个 —— 不让用户在看不见的情况下被塞素材。 -->
-              <button
-                type="button"
-                class="generator-switch"
-                :class="{ 'is-on': autoLinkEnabled }"
-                role="switch"
-                :aria-checked="autoLinkEnabled"
-                :title="autoLinkEnabled
-                  ? '上游连入、而你没 @ 的素材会自动引用进本次提交；关掉后只提交你显式 @ 的素材'
-                  : '已关闭：只提交你在提示词里显式 @ 的素材'"
-                @click.stop="autoLinkEnabled = !autoLinkEnabled"
-              >
-                <span class="generator-switch__track" aria-hidden="true">
-                  <span class="generator-switch__thumb" />
-                </span>
-                <span class="generator-switch__label">智能引用 AutoLink</span>
-                <span v-if="autoLinkEnabled && autoLinkedCount" class="generator-switch__hint">
-                  自动引用 {{ autoLinkedCount }} 个
-                </span>
-              </button>
-        </div>
     </div>
 
     <!-- 素材引用面板：锚在输入框左上角，由组件自己决定向上弹出 -->
@@ -3092,16 +3050,6 @@ onUnmounted(() => {
 /* ===== 节点开关（F4）===== */
 /* 提交选项行：两个开关单独占一行（不再挤在底行里被裁）。
    右对齐，与右下角的提交按钮同一条视线；上面一条细线把它和参数行分开。 */
-.generator-submit-options {
-  /* 它是底行之外的独立一行（曾误放进底行内，把设置区挤成 0 宽 —— 实测参数芯片与「高级设置」被裁） */
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  padding: 2px 8px 4px;
-  border-top: 1px solid var(--stroke-secondary);
-}
-
 /* 标签不换行：否则空间紧张时「自动校验素材」会被压进 28px 宽、折成「自动/校验/素材」三行
    （用户实测报上来的排版问题）。开关行宁可整体右移，也不该把词拆开。 */
 .generator-switch__label {

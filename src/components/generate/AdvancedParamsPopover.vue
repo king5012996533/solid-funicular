@@ -23,12 +23,21 @@ const props = withDefaults(defineProps<{
   /** 参考图数量上限 */
   referenceLimit?: number
   placement?: Placement
+  /** 提交前校验参考素材（开关，原来是放在页脚那一行里的） */
+  autoValidateReferences?: boolean
+  /** 智能引用 AutoLink：上游连入而没被 @ 的素材自动进本次提交 */
+  autoLinkEnabled?: boolean
+  /** 本次会自动引用几个（用来在触发器上点一个小圆点，不占宽度） */
+  autoLinkedCount?: number
 }>(), {
   referenceImages: () => [],
   firstFrame: '',
   lastFrame: '',
   referenceLimit: 9,
   placement: 'auto',
+  autoValidateReferences: true,
+  autoLinkEnabled: true,
+  autoLinkedCount: 0,
 })
 
 const emit = defineEmits<{
@@ -39,6 +48,8 @@ const emit = defineEmits<{
   clearFirstFrame: []
   lastFrameChange: [event: Event]
   clearLastFrame: []
+  'update:autoValidateReferences': [value: boolean]
+  'update:autoLinkEnabled': [value: boolean]
 }>()
 
 const isOpen = ref(false)
@@ -48,6 +59,12 @@ const showReferences = computed(() => props.mode === 'image' || props.mode === '
 const showFrames = computed(() => props.mode === 'video')
 const hasContent = computed(() => showReferences.value || showFrames.value)
 const canAddReference = computed(() => props.referenceImages.length < props.referenceLimit)
+const triggerTitle = computed(() => {
+  if (props.autoLinkEnabled && props.autoLinkedCount) {
+    return `高级设置 · 智能引用会带上 ${props.autoLinkedCount} 个上游素材`
+  }
+  return '高级设置'
+})
 
 const toggle = (e: Event) => {
   e.stopPropagation()
@@ -62,10 +79,13 @@ const toggle = (e: Event) => {
       type="button"
       class="advanced-params-trigger"
       :aria-expanded="isOpen"
-      title="高级设置"
+      :title="triggerTitle"
       @click.stop="toggle"
     >
       <span>高级设置</span>
+      <!-- 智能引用开着且真有素材会被自动带上时点一个小圆点：
+           这条信息原先占着一整行的地方，现在压缩成 6px，不占宽度 -->
+      <span v-if="autoLinkEnabled && autoLinkedCount" class="advanced-params-dot" aria-hidden="true" />
       <svg class="advanced-params-chevron" width="1em" height="1em" viewBox="0 0 24 24"
            preserveAspectRatio="xMidYMid meet" fill="none" aria-hidden="true">
         <path data-follow-fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"
@@ -164,6 +184,58 @@ const toggle = (e: Event) => {
             </div>
           </div>
         </template>
+
+        <!-- 提交开关：与上面的次要参数同属「高级设置」。
+             它们原先挤在页脚那一行里 —— 那一行是 `flex: 1 1; overflow: hidden`，
+             两个开关要 269px 而整行只剩 128px，右边的直接被裁（实测溢出 172px）。
+             LibTV 的开关本来也不在页脚，而在输入框下方的整行区域里。 -->
+        <div class="generator-param-row advanced-params-switch-row">
+          <div class="generator-param-row-label"
+               title="提交前会校验参考素材的格式与可访问性，不通过则拦下">
+            自动校验素材
+          </div>
+          <button
+            type="button"
+            class="generator-switch is-track-only"
+            :class="{ 'is-on': autoValidateReferences }"
+            role="switch"
+            :aria-checked="autoValidateReferences"
+            :title="autoValidateReferences
+              ? '提交前会校验参考素材的格式与可访问性，不通过则拦下'
+              : '已关闭：不校验参考素材，直接提交'"
+            @click.stop="emit('update:autoValidateReferences', !autoValidateReferences)"
+          >
+            <span class="generator-switch__track" aria-hidden="true">
+              <span class="generator-switch__thumb" />
+            </span>
+          </button>
+        </div>
+
+        <div class="generator-param-row advanced-params-switch-row">
+          <div class="generator-param-row-label"
+               title="上游连入、而你没 @ 的素材会自动引用进本次提交；关掉后只提交你显式 @ 的素材">
+            智能引用 AutoLink
+          </div>
+          <button
+            type="button"
+            class="generator-switch is-track-only"
+            :class="{ 'is-on': autoLinkEnabled }"
+            role="switch"
+            :aria-checked="autoLinkEnabled"
+            :title="autoLinkEnabled
+              ? '上游连入、而你没 @ 的素材会自动引用进本次提交；关掉后只提交你显式 @ 的素材'
+              : '已关闭：只提交你在提示词里显式 @ 的素材'"
+            @click.stop="emit('update:autoLinkEnabled', !autoLinkEnabled)"
+          >
+            <span class="generator-switch__track" aria-hidden="true">
+              <span class="generator-switch__thumb" />
+            </span>
+          </button>
+        </div>
+        <!-- 开着且有素材时把「会带几个」写清楚，别让用户在看不见的情况下被塞素材 -->
+        <div v-if="autoLinkEnabled && autoLinkedCount" class="advanced-params-switch-hint">
+          本次会自动引用 {{ autoLinkedCount }} 个上游素材（在「已引用」里以「自动」标出）
+        </div>
       </div>
     </SelectPopup>
   </div>
@@ -172,6 +244,43 @@ const toggle = (e: Event) => {
 <style>
 .advanced-params {
   display: contents;
+}
+
+/* 触发器上的小圆点：AutoLink 开着且有素材会被自动带上时才出现 */
+.advanced-params-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-main-default);
+  flex-shrink: 0;
+}
+
+/* 开关行：标签在左、开关在右（与上面的次要参数同一套排版语言） */
+.advanced-params-switch-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.advanced-params-switch-row .generator-switch__track {
+  flex-shrink: 0;
+}
+
+.generator-switch.is-track-only {
+  height: auto;
+  padding: 0;
+}
+
+.generator-switch.is-track-only:hover {
+  background: transparent;
+}
+
+.advanced-params-switch-hint {
+  margin-top: -4px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .advanced-params-trigger {
