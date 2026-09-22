@@ -19,6 +19,7 @@ import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { updateNode, removeNode, duplicateNode, type WorkflowAssetNodeData } from '../../composables/useWorkflowCanvas'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { listAssetItems, type PersistedAssetItem } from '@/api/asset-items'
+import { CANVAS_TOOL_NODE_SIZE, cardSizeStyle } from '../../config/node-size'
 
 const props = defineProps<{
   id: string
@@ -97,7 +98,12 @@ const handleFileChange = async (event: Event) => {
   try {
     const { uploadStorageFile } = await import('@/api/storage')
     const uploaded = await uploadStorageFile(file, 'asset')
-    const url = String((uploaded as { fileUrl?: string })?.fileUrl || '')
+    /**
+     * 读 `publicUrl` —— 上传接口返回的就是这个字段（`UploadedStorageFile`），**没有 `fileUrl`**。
+     * 这里早先写的是 `fileUrl`，于是每次上传都拿到 undefined、抛「上传未返回地址」，
+     * 表现就是「画布本地上传 100% 失败」（用户报的问题，浏览器控制台有原文）。
+     */
+    const url = String(uploaded?.publicUrl || '').trim()
     if (!url) throw new Error('上传未返回地址')
     updateNode(props.id, { url, name: file.name, assetType: 'image' } as Partial<WorkflowAssetNodeData>)
   } catch (error) {
@@ -161,7 +167,11 @@ onMounted(() => {
       <span v-else>{{ data?.label || '素材' }}</span>
     </div>
 
-    <div class="asset-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }">
+    <div
+      class="asset-node-card"
+      :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }"
+      :style="cardSizeStyle(CANVAS_TOOL_NODE_SIZE)"
+    >
       <!-- 折叠态：显示素材名，光看标题认不出是哪一个 -->
       <div v-if="collapsed" class="node-collapsed-summary">
         <span class="node-collapsed-summary__text">{{ assetName || '未选择素材' }}</span>
@@ -200,44 +210,44 @@ onMounted(() => {
       </template>
 
       <!-- 素材选择面板：复用节点内的浮层形态，避免再引入一层全局弹窗 -->
-      <div v-if="pickerOpen" class="asset-node-picker nodrag nopan" @mousedown.stop @click.stop>
-        <div class="asset-node-picker-head">
-          <span>素材库</span>
-          <button type="button" class="asset-node-picker-close" @click.stop="pickerOpen = false">✕</button>
-        </div>
-        <input
-          v-model="keyword"
-          class="asset-node-picker-search"
-          type="text"
-          placeholder="搜索素材名"
-          @mousedown.stop
-        >
-        <div class="asset-node-picker-body">
-          <div v-if="loading" class="asset-node-picker-state">加载中…</div>
-          <template v-else-if="filteredAssets.length">
-            <button
-              v-for="item in filteredAssets"
-              :key="item.id"
-              type="button"
-              class="asset-node-picker-item"
-              :title="item.title"
-              @click.stop="pickAsset(item)"
-            >
-              <img :src="item.thumbnailUrl || item.previewUrl || item.fileUrl" :alt="item.title" draggable="false">
-            </button>
-          </template>
-          <div v-else class="asset-node-picker-state">素材库还是空的</div>
-        </div>
-        <button v-if="assetUrl" type="button" class="asset-node-picker-clear" @click.stop="clearAsset">
-          清除选择
-        </button>
-      </div>
     </div>
 
     <CanvasNodeHoverToolbar :visible="showActions" :actions="hoverActions" />
 
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
+      <div v-if="pickerOpen" class="asset-node-picker nodrag nopan" @mousedown.stop @click.stop>
+        <div class="asset-node-picker-head">
+      <span>素材库</span>
+      <button type="button" class="asset-node-picker-close" @click.stop="pickerOpen = false">✕</button>
+        </div>
+        <input
+      v-model="keyword"
+      class="asset-node-picker-search"
+      type="text"
+      placeholder="搜索素材名"
+      @mousedown.stop
+        >
+        <div class="asset-node-picker-body">
+      <div v-if="loading" class="asset-node-picker-state">加载中…</div>
+      <template v-else-if="filteredAssets.length">
+        <button
+          v-for="item in filteredAssets"
+          :key="item.id"
+          type="button"
+          class="asset-node-picker-item"
+          :title="item.title"
+          @click.stop="pickAsset(item)"
+        >
+          <img :src="item.thumbnailUrl || item.previewUrl || item.fileUrl" :alt="item.title" draggable="false">
+        </button>
+      </template>
+      <div v-else class="asset-node-picker-state">素材库还是空的</div>
+        </div>
+        <button v-if="assetUrl" type="button" class="asset-node-picker-clear" @click.stop="clearAsset">
+      清除选择
+        </button>
+      </div>
   </div>
 </template>
 
@@ -290,10 +300,9 @@ onMounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: 100%;
-  min-width: 260px;
-  min-height: 200px;
+  /* 尺寸由 config/node-size.ts 统一给并**内联固定**（工具类 350×350）。
+     这里必须固定而不是 min-*：卡片只写 min-height 时，选中素材后图片的自然高度
+     会把整个节点撑到图片尺寸（实测一张 1200×800 的图直接把节点撑成 1202×839）。 */
   overflow: hidden;
   border: 1px solid var(--canvas-node-border);
   border-radius: 12px;
@@ -395,12 +404,19 @@ onMounted(() => {
 
 /* 素材选择面板 */
 .asset-node-picker {
+  /**
+   * 选择器**不再局限在节点内部**（早先 inset:8px + 卡片 overflow:hidden，
+   * 结果可视区只有 103px，25 张素材要在一个小窗口里滚 9 行）。
+   * 现在允许超出节点边界：宽度取 min(420px, 72vw)，高度 min(400px, 60vh)。
+   */
   position: absolute;
-  top: 8px;
-  left: 8px;
-  right: 8px;
-  bottom: 8px;
-  z-index: 5;
+  top: 12px;
+  left: 12px;
+  right: auto;
+  bottom: auto;
+  width: min(420px, 72vw);
+  height: min(400px, 60vh);
+  z-index: 20;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -442,7 +458,7 @@ onMounted(() => {
 .asset-node-picker-body {
   display: grid;
   flex: 1;
-  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
   gap: 6px;
   margin: 8px 10px;
   overflow-y: auto;
