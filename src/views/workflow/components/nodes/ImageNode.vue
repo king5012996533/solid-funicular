@@ -5,7 +5,7 @@
  * 形态对齐 LibTV 实测（2026-09-22）：
  *   - 卡片尺寸**跟「比例」参数走**：横版 622×350、竖版 350×622（见 config/node-size.ts）
  *   - 图上不摆任何控件：没有标题、参数行、工具条（标题在卡外，由 Vue Flow 的标签层负责）
- *   - 「AI生成」角标与卡片右上角的更多菜单都不在这里 —— 那是后续单独开工的项
+ *   - 「AI生成」角标（LibTV 卡片左上角那个）只在**生成产物**上显示，上传的图不显示
  *   - 4 类状态：空态「尝试」列表 / 加载 / 错误 / 有图
  *   - 有图时双击放大预览；删除走 Delete 键与右键菜单
  *   - 选中后卡片下方浮出输入框（ContentGenerator，与 /generate 同款）
@@ -65,6 +65,13 @@ watch(
     if (error !== undefined) errorMsg.value = error
   },
 )
+
+/**
+ * 「AI生成」角标：只在**生成产物**上出现（对齐 LibTV）。
+ * 判据用节点 data 里的 `executed` —— 上传（图生图）与裁剪都不置它，
+ * 所以用户自己传进去的图不会被标成 AI 生成。
+ */
+const isGenerated = computed(() => props.data?.executed === true)
 
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
@@ -561,6 +568,9 @@ watch(
       <div v-else-if="showError" class="image-node-error" role="alert">{{ errorMsg }}</div>
       <img v-else-if="showImage" :src="imageUrl" alt="生成图片" class="image-node-image" @dblclick.stop="openImagePreview()" />
 
+      <!-- 角标盖在图上，不吃鼠标事件（不挡双击预览与拖拽） -->
+      <span v-if="showImage && isGenerated" class="image-node-ai-badge">AI生成</span>
+
       <!-- 空态：照抄 LibTV 的「尝试」写法（空图片节点上就是这两项）。
            两项都必须有真实行为 —— 图生图落到本节点上传，图片高清走已验证的 image-edit 管线。 -->
       <div v-else-if="showEmpty" class="image-node-empty">
@@ -645,6 +655,21 @@ watch(
 .image-node-empty-item:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
 .image-node-empty-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; color: var(--text-tertiary); font-size: 16px; }
 .image-node-empty-item:hover .image-node-empty-item-icon { color: var(--text-primary); }
+
+.image-node-ai-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
+}
 
 /* 工具栏锚点撑满卡片（提供 bottom:100% / left:50% 的参照），真正的盒子是里面那层 */
 .image-node-toolbar-anchor { position: absolute; inset: 0; z-index: 20; pointer-events: none; }

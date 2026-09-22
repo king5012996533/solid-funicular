@@ -30,6 +30,26 @@ const handleReset = () => {
   fitView({ duration: 200 })
 }
 
+/**
+ * 缩放档位菜单（对齐 LibTV：点百分比弹出「放大 / 缩小 / 适合屏幕 / 各档位」）。
+ *
+ * 只放**滑杆量程内**的档位（我们的滑杆是 5–500，LibTV 是 5–800，所以他们最后一档是 800%）。
+ * 菜单文案不写快捷键提示 —— 我们没注册 ⌘0 这类快捷键，写了就是假提示。
+ */
+const ZOOM_PRESETS = [50, 100, 200]
+
+const handleZoomIn = () => zoomTo(Math.min(5, viewport.value.zoom * 1.25), { duration: 150 })
+const handleZoomOut = () => zoomTo(Math.max(0.05, viewport.value.zoom / 1.25), { duration: 150 })
+const handleZoomTo = (percent: number) => zoomTo(percent / 100, { duration: 150 })
+
+const handleZoomCommand = (command: string | number | object) => {
+  const key = String(command)
+  if (key === 'in') return handleZoomIn()
+  if (key === 'out') return handleZoomOut()
+  if (key === 'fit') return handleReset()
+  if (key.startsWith('to:')) return handleZoomTo(Number(key.slice(3)))
+}
+
 const appearanceOpen = ref(false)
 </script>
 
@@ -55,7 +75,25 @@ const appearanceOpen = ref(false)
       class="canvas-zoom-controls__slider"
       @input="handleSliderInput"
     />
-    <span class="canvas-zoom-controls__percent">{{ zoomPercent }}%</span>
+    <el-dropdown trigger="click" placement="top" @command="handleZoomCommand">
+      <button type="button" class="canvas-zoom-controls__percent" title="缩放选项">
+        {{ zoomPercent }}%
+      </button>
+      <template #dropdown>
+        <el-dropdown-menu>
+          <el-dropdown-item command="in">放大</el-dropdown-item>
+          <el-dropdown-item command="out">缩小</el-dropdown-item>
+          <el-dropdown-item command="fit" divided>适合屏幕</el-dropdown-item>
+          <el-dropdown-item
+            v-for="preset in ZOOM_PRESETS"
+            :key="preset"
+            :command="`to:${preset}`"
+          >
+            缩放至 {{ preset }}%
+          </el-dropdown-item>
+        </el-dropdown-menu>
+      </template>
+    </el-dropdown>
 
     <!-- 分隔线 -->
     <span class="canvas-zoom-controls__divider" aria-hidden="true" />
@@ -179,12 +217,24 @@ const appearanceOpen = ref(false)
   cursor: pointer;
 }
 
+/* 百分比现在是菜单触发器：外观保持原样，只补可点性 */
 .canvas-zoom-controls__percent {
   min-width: 38px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.canvas-zoom-controls__percent:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
 }
 
 .canvas-zoom-controls__appearance {

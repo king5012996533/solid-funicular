@@ -905,6 +905,34 @@ const flushAutosave = async () => {
  * 这里只负责把结果写回节点位置 —— 一次性写完并只记一条历史，
  * 而不是逐个节点改（逐个改会往撤销栈里塞 N 条记录，撤销一次只回退一个节点）。
  */
+/**
+ * 整理画布后的「还原 / 保留」确认（对齐 LibTV）。
+ *
+ * 位置变更本身已经作为**一条**历史记录进了撤销栈（Cmd+Z 也能退回去），
+ * 但那要求用户知道有撤销；LibTV 的做法是直接把「要不要保留」摆出来问一次。
+ * 快照只存 id + position：尺寸是算出来的，不该跟着回滚。
+ */
+const layoutSnapshot = ref<Array<{ id: string; position: { x: number; y: number } }> | null>(null)
+
+const keepLayout = () => {
+  layoutSnapshot.value = null
+}
+
+const revertLayout = () => {
+  const snapshot = layoutSnapshot.value
+  if (!snapshot) return
+  const byId = new Map(snapshot.map(item => [item.id, item.position]))
+  nodes.value = nodes.value.map(node => {
+    const position = byId.get(node.id)
+    return position ? { ...node, position: { ...position } } : node
+  })
+  layoutSnapshot.value = null
+  setTimeout(() => {
+    updateNodeInternals(nodes.value.map(node => node.id))
+    void fitView({ padding: 0.2 })
+  }, 50)
+}
+
 const autoLayoutCanvas = () => {
   if (!nodes.value.length) return
   // dimensions 是 Vue Flow 在运行时量完才补上的字段，不在我们的节点类型声明里，
@@ -926,10 +954,15 @@ const autoLayoutCanvas = () => {
   )
   if (!positions.size) return
 
+  // 先把「整理前」的位置记下来，整理完用它撑起确认条
+  const before = nodes.value.map(node => ({ id: node.id, position: { ...node.position } }))
+
   nodes.value = nodes.value.map(node => {
     const next = positions.get(node.id)
     return next ? { ...node, position: next } : node
   })
+
+  layoutSnapshot.value = before
 
   setTimeout(() => {
     updateNodeInternals(nodes.value.map(node => node.id))
@@ -1431,6 +1464,15 @@ watch(canvasSnapshot, () => {
                 <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               </svg>
             </button>
+          </div>
+        </Transition>
+
+        <!-- 整理画布后的确认条：问一次「保留还是还原」，而不是默默改掉用户摆好的位置 -->
+        <Transition name="wf-quick-link-banner">
+          <div v-if="layoutSnapshot" class="wf-layout-confirm" role="status" aria-live="polite">
+            <span class="wf-layout-confirm__text">是否保留此次整理结果？</span>
+            <button class="wf-layout-confirm__btn" type="button" @click="revertLayout">还原</button>
+            <button class="wf-layout-confirm__btn is-primary" type="button" @click="keepLayout">保留</button>
           </div>
         </Transition>
 

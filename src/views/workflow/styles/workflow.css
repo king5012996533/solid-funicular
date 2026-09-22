@@ -1556,3 +1556,63 @@ html[data-theme='light'] .wf-quick-link-banner__close {
 .vue-flow__node .is-collapsed {
   min-height: 0;
 }
+
+/* ===== 整理画布后的确认条（对齐 LibTV 的「还原 / 保留」）===== */
+.wf-layout-confirm {
+  position: absolute;
+  bottom: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 12px;
+  background: var(--canvas-float-block-default, rgba(13, 27, 60, 0.92));
+  border: 1px solid var(--stroke-secondary, rgba(255, 255, 255, 0.12));
+  box-shadow: var(--shadow-generator-float-block, 0 8px 28px rgba(0, 0, 0, 0.32));
+  color: var(--text-primary, #e0f5ff);
+  font-size: 13px;
+  line-height: 1;
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+
+.wf-layout-confirm__text {
+  white-space: nowrap;
+}
+
+.wf-layout-confirm__btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--stroke-secondary, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, rgba(224, 245, 255, 0.72));
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.wf-layout-confirm__btn:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+
+.wf-layout-confirm__btn.is-primary {
+  border-color: transparent;
+  background: var(--brand-main-default, #3b82f6);
+  color: #fff;
+}
+
+.wf-layout-confirm__btn.is-primary:hover {
+  filter: brightness(1.08);
+  color: #fff;
+}
+
+html[data-theme='light'] .wf-layout-confirm,
+body[lv-theme='light'] .wf-layout-confirm {
+  background: var(--canvas-float-block-default, rgba(255, 255, 255, 0.96));
+  color: var(--text-primary, #0f1419);
+}

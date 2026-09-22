@@ -41,6 +41,7 @@ import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
+import { parseAspectRatio } from '@/config/model-params'
 import { useComposerPanel } from '../../composables/useComposerPanel'
 
 const props = defineProps<{
@@ -132,6 +133,26 @@ const resolvedResolution = computed(() => {
 
 /** 卡片尺寸跟着「比例」参数走（对齐 LibTV 实测，见 config/node-size.ts） */
 const cardSize = computed(() => resolveGenerationCardSize(resolvedRatio.value))
+
+/**
+ * 标题右侧的输出尺寸（LibTV 的「1280 × 720」）。
+ *
+ * **这是推导值，不是上游回传**：我们的生成记录只存请求的分辨率档（'720p'），
+ * 没有产物真实像素；而 LibTV 那组数字正好等于「分辨率档当短边、长边按比例算」
+ * （16:9 + 720P → 1280×720），所以按同一条规则推导。
+ * 认不出分辨率档（如 '2K' 这种非数字档）时返回空字符串 —— 不显示，而不是瞎猜。
+ */
+const outputResolutionLabel = computed(() => {
+  const tier = Number(String(resolvedResolution.value || '').replace(/[^0-9]/g, ''))
+  if (!Number.isFinite(tier) || tier <= 0) return ''
+  const aspect = parseAspectRatio(resolvedRatio.value)
+  if (aspect === null) return ''
+  const short = tier
+  const long = Math.round(aspect >= 1 ? short * aspect : short / aspect)
+  const width = aspect >= 1 ? long : short
+  const height = aspect >= 1 ? short : long
+  return `${width} × ${height}`
+})
 
 /** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
 const { style: composerStyle } = useComposerPanel()
@@ -353,6 +374,7 @@ const handlePromptSend = (
         @click.stop
       />
       <span v-else>{{ data?.label || 'Video' }}</span>
+      <span v-if="outputResolutionLabel" class="video-node-title-resolution">{{ outputResolutionLabel }}</span>
     </div>
 
     <!-- 参数 chip：模型 · 比例 · 时长 · 分辨率，由工具栏写入节点 data -->
@@ -506,6 +528,15 @@ const handlePromptSend = (
 .video-node-param-chip:first-child {
   color: var(--text-secondary, rgba(224, 245, 255, 0.72));
   font-weight: 500;
+}
+
+.video-node-title-resolution {
+  /* 贴到标题行最右（对齐 LibTV：名字在左、输出尺寸在右） */
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .video-node-title {
