@@ -1054,15 +1054,21 @@ watch(
     <!-- 局部重绘：涂抹要改的区域 + 写一句改动要求，蒙版随请求一起给上游 -->
     <ImageMaskBrushDialog v-model="maskVisible" :src="imageUrl" @confirm="handleMaskConfirm" />
 
-    <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，         自己糊一个只会少功能。
+    <!-- 点图放大：用 Element Plus 的查看器，自带缩放/旋转/切图/键盘 Esc，
+         自己糊一个只会少功能。
          teleported 必须开：画布节点的祖先是 .vue-flow__viewport，它带 transform，
          而 position:fixed 遇上 transform 祖先会以该祖先为参照物 —— 不开 teleport
          的话查看器只有节点那么大，根本铺不满屏幕（Element 文档也点了这一条）。
+         scale 给 0.86：查看器内部是 `max-height:100%` 再叠 transform，也就是
+         **默认顶到视口上下边、一点边距都没有** —— 从节点里的 420px 一步跳到贴满屏幕，
+         观感就是"图炸开了"（用户原话「爆出屏幕」）。缩 14% 留出呼吸空间；
+         它按视口比例缩，小窗口同样成立。
          z-index 要高过画布内的悬浮层，否则会被工具栏压住。 -->
     <el-image-viewer
       v-if="previewVisible"
       :url-list="[previewTarget]"
       :z-index="4000"
+      :scale="0.86"
       teleported
       hide-on-click-modal
       @close="previewVisible = false"
