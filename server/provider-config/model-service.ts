@@ -1,6 +1,7 @@
 import type { ModelCategory } from '@prisma/client'
 import { prisma } from '../db/prisma'
 import { getOrSetJsonCache, invalidateRedisCaches, redisKeys } from '../redis'
+import { decryptProviderApiKey } from './crypto'
 import { ensureProviderSeedData, getAdminProviderDetail } from './service'
 
 export interface ProviderModelPayload {
@@ -121,9 +122,18 @@ const assertProviderExists = async (providerId: string) => {
 }
 
 const getProviderRuntimeConnection = async (providerId: string) => {
-  const provider = await getAdminProviderDetail(providerId)
+  // 这里**直接从库里取明文密钥**，不走 getAdminProviderDetail ——
+  // 那个 DTO 是给管理端看的，已经刻意不返回明文（否则任何拿到管理员会话的人
+  // 都能从接口读到密钥）。服务端自己调上游的这一层仍然需要明文，所以单独读一次。
+  // 曾经这里图省事复用了 getAdminProviderDetail().apiKey，去掉明文后
+  // 连通性测试与模型发现立刻报「当前厂商未配置 API Key」—— 属于拆东墙没补西墙。
+  const provider = await prisma.aiProvider.findUnique({ where: { id: providerId } })
+  if (!provider) {
+    throw new Error('厂商不存在')
+  }
+
   const baseUrl = String(provider.baseUrl || '').trim().replace(/\/+$/, '')
-  const apiKey = String(provider.apiKey || '').trim()
+  const apiKey = decryptProviderApiKey(provider.apiKeyEncrypted).trim()
   if (!baseUrl) {
     throw new Error('当前厂商未配置基础地址')
   }

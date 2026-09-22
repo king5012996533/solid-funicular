@@ -184,7 +184,16 @@
 
           <div class="admin-form__field admin-form__field--full">
             <label class="admin-form__label" for="provider-api-key">绑定密钥</label>
-            <input id="provider-api-key" v-model.trim="providerForm.apiKey" class="admin-input" type="password" placeholder="选择或填写密钥配置">
+            <input
+              id="provider-api-key"
+              v-model.trim="providerForm.apiKey"
+              class="admin-input"
+              type="password"
+              :placeholder="providerApiKeyHint ? '留空表示不修改已配置的密钥' : '填写密钥配置'"
+            >
+            <p v-if="providerApiKeyHint" class="admin-form__hint">
+              当前已配置：<code>{{ providerApiKeyHint }}</code>（出于安全只显示首尾几位；要更换就填新密钥，不填则保持原样）
+            </p>
           </div>
 
           <div class="admin-form__field admin-form__field--full">
@@ -644,6 +653,9 @@ const { pagination: modelPagination, sliceItems: sliceModelItems, resetPage: res
   initialPageSize: 10,
 })
 
+/** 已配置密钥的掩码，只用于显示（不参与提交） */
+const providerApiKeyHint = ref('')
+
 const providerForm = reactive<AdminProviderPayload>({
   code: '',
   name: '',
@@ -744,6 +756,7 @@ const resetProviderForm = () => {
   providerForm.iconUrl = ''
   providerForm.baseUrl = ''
   providerForm.apiKey = ''
+  providerApiKeyHint.value = ''
   providerForm.chatEndpoint = '/chat/completions'
   providerForm.imageEndpoint = '/images/generations'
   providerForm.imageEditEndpoint = '/images/edits'
@@ -761,7 +774,11 @@ const applyProviderForm = (provider: AdminProviderDetail) => {
   providerForm.description = provider.description || ''
   providerForm.iconUrl = provider.iconUrl || ''
   providerForm.baseUrl = provider.baseUrl
-  providerForm.apiKey = provider.apiKey || ''
+  // 服务端不再返回明文密钥，这里**刻意留空**：
+  // 留空 = 保存时不修改密钥（服务端据 apiKey 为空来保留原值）。
+  // 想换密钥就直接把新密钥填进来。
+  providerForm.apiKey = ''
+  providerApiKeyHint.value = provider.apiKeyHint || ''
   providerForm.chatEndpoint = provider.chatEndpoint
   providerForm.imageEndpoint = provider.imageEndpoint
   providerForm.imageEditEndpoint = provider.imageEditEndpoint

@@ -25,7 +25,11 @@ export interface AdminProviderItem {
 }
 
 export interface AdminProviderDetail extends AdminProviderItem {
-  apiKey: string
+  /**
+   * 服务端**不再返回明文密钥**，只给 AdminProviderItem.apiKeyHint（形如 `sk-R...Lvqs`）。
+   * 编辑时把密钥栏留空即表示"不修改"（服务端据此保留原密钥）。
+   */
+  apiKey?: string
 }
 
 export interface AdminProviderPayload {

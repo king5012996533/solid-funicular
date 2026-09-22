@@ -342,7 +342,11 @@ export const getAdminProviderDetail = async (id: string) => {
 
   return {
     ...buildProviderListItem(provider),
-    apiKey: decryptProviderApiKey(provider.apiKeyEncrypted),
+    // 这里**刻意不返回明文 apiKey**（apiKeyHint 已由 buildProviderListItem 带上）。
+    // 管理端没有"看明文"的真实需求，而返回它意味着：任何拿到管理员会话的人
+    // 都能直接从接口读到密钥明文，日志/抓包/前端 devtools 里都会留一份。
+    // 编辑表单改为留空 = 不修改（见 updateAdminProvider 的同名注释）。
+    // 真正需要明文的只有服务端自己调上游那一处（resolveProviderRuntimeConfig）。
   }
 }
 
@@ -421,8 +425,17 @@ export const updateAdminProvider = async (id: string, payload: AdminProviderPayl
       description: normalizedPayload.description || null,
       iconUrl: normalizedPayload.iconUrl || null,
       baseUrl: normalizedPayload.baseUrl,
-      apiKeyEncrypted: encryptProviderApiKey(normalizedPayload.apiKey),
-      apiKeyHint: maskApiKey(normalizedPayload.apiKey),
+      // 只有明确带了非空 apiKey 才覆盖密钥；留空 = **不修改**。
+      // 原实现是无条件覆盖：`normalizeProviderPayload` 把没填的 key 归一成空串，
+      // 于是"编辑厂商时没动密钥那一栏"会直接 encrypt('') 把密钥抹掉。
+      // 以前看不出来，是因为管理端表单拿接口返回的明文 key 回填了 —— 填个空字段
+      // 等于把原值又写回去。一旦管理端不再回填明文密钥，这个语义就是数据丢失。
+      ...(normalizedPayload.apiKey
+        ? {
+            apiKeyEncrypted: encryptProviderApiKey(normalizedPayload.apiKey),
+            apiKeyHint: maskApiKey(normalizedPayload.apiKey),
+          }
+        : {}),
       chatEndpoint: normalizedPayload.chatEndpoint,
       imageEndpoint: normalizedPayload.imageEndpoint,
       imageEditEndpoint: normalizedPayload.imageEditEndpoint,
