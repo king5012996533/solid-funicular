@@ -30,6 +30,7 @@ import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canv
 import ContentGenerator from '@/components/generate/ContentGenerator.vue'
 import type { CreationType } from '@/components/generate/selectors'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
+import { CANVAS_TOOL_NODE_SIZE, cardSizeStyle } from '../../config/node-size'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
@@ -331,7 +332,7 @@ watch(content, async () => {
     </div>
 
     <!-- 节点本体 -->
-    <div class="text-node-card" :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing, 'is-collapsed': collapsed }">
+    <div class="text-node-card" :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing, 'is-collapsed': collapsed }" :style="cardSizeStyle(CANVAS_TOOL_NODE_SIZE)">
 
       <!-- 折叠态：显示正文开头，光看标题认不出哪段文本 -->
       <div v-if="collapsed" class="node-collapsed-summary">
@@ -478,10 +479,8 @@ watch(content, async () => {
 
 .text-node-card {
   position: relative;
-  width: 100%;
-  height: 100%;
-  min-width: 220px;
-  min-height: 120px;
+  /* 尺寸由 config/node-size.ts 提供（工具类固定 350×350），这里不再写死 min-width */
+  box-sizing: border-box;
   background: var(--canvas-node-bg);
   /* 常驻 1px 描边（LibTV 同款）：未选中几乎看不见，选中只换颜色，
      节点尺寸不会因为选中而跳动 */

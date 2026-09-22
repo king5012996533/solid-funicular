@@ -40,6 +40,7 @@ import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
+import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
 
 const props = defineProps<{
   id: string
@@ -127,6 +128,9 @@ const resolvedResolution = computed(() => {
   const choices = resolvedSchema.value.resolutions
   return pickValidChoice(choices, props.data?.resolution, resolvedSchema.value.defaultResolution)
 })
+
+/** 卡片尺寸跟着「比例」参数走（对齐 LibTV 实测，见 config/node-size.ts） */
+const cardSize = computed(() => resolveGenerationCardSize(resolvedRatio.value))
 
 const appliedParams = computed<GeneratorParamsSnapshot>(() => ({
   modelKey: resolvedModelKey.value,
@@ -355,7 +359,7 @@ const handlePromptSend = (
       </span>
     </div>
 
-    <div class="video-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }">
+    <div class="video-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }" :style="cardSizeStyle(cardSize)">
 
       <div v-if="collapsed" class="node-collapsed-summary">
         <span class="node-collapsed-summary__text">
@@ -541,10 +545,7 @@ const handlePromptSend = (
 
 .video-node-card {
   position: relative;
-  width: 100%;
-  height: 100%;
-  min-width: 480px;
-  min-height: 270px;
+  /* 宽高由 config/node-size.ts 算出后内联绑定（跟比例走），这里不再写死 min-width/min-height */
   background: var(--canvas-node-bg);
   border: 1px solid var(--canvas-node-border);
   /* LibTV 实测 12px */

@@ -1,26 +1,33 @@
 <script setup lang="ts">
 /**
- * 图片节点（RunningHUB 风样板）
+ * 图片节点
  *
- * 视觉对照 HTML 抽出的真实样式：
- *   - 卡片 380×280, border-radius 16
- *   - 标题外置（absolute bottom:100%）
- *   - 4 类状态：空态菜单 / ready-state（有上游连线）/ 加载 / 有图
- *   - 选中态：青绿描边 + 流光边框 + 模糊光晕
- *   - 节点外左右 -56px "+" 按钮
- *   - 选中后下方浮出 CanvasPromptInput（图片模型 + 尺寸/质量/价格 chip）
- *   - 保留批量生图组叠卡能力
+ * 形态对齐 LibTV 实测（2026-09-22）：
+ *   - 卡片尺寸**跟「比例」参数走**：横版 622×350、竖版 350×622（见 config/node-size.ts）
+ *   - 图上不摆任何控件：没有标题、参数行、工具条（标题在卡外，由 Vue Flow 的标签层负责）
+ *   - 「AI生成」角标与卡片右上角的更多菜单都不在这里 —— 那是后续单独开工的项
+ *   - 4 类状态：空态「尝试」列表 / 加载 / 错误 / 有图
+ *   - 有图时双击放大预览；删除走 Delete 键与右键菜单
+ *   - 选中后卡片下方浮出输入框（ContentGenerator，与 /generate 同款）
  */
 import { computed, onMounted, ref, watch } from 'vue'
+import { useVueFlow } from '@vue-flow/core'
 import { ElMessage } from 'element-plus'
+import { MagicStick, Picture } from '@element-plus/icons-vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import {
   updateNode,
+  addNode,
+  addEdge,
+  nodes,
   type WorkflowImageNodeData,
 } from '../../composables/useWorkflowCanvas'
+import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
-import { pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
+import { pickSizeByAspect, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
+import { ENHANCE_PRESET, type ImageEditPreset } from '../../config/image-edit-presets'
+import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -34,9 +41,11 @@ const props = defineProps<{
   selected?: boolean
 }>()
 const isSelected = computed(() => props.selected || props.data?.selected)
+const { updateNodeInternals } = useVueFlow()
 const imageUrl = ref(props.data?.url || '')
 const isLoading = ref(!!props.data?.loading)
 const errorMsg = ref(props.data?.error || '')
+const fileInputRef = ref<HTMLInputElement | null>(null)
 
 watch(
   [() => props.data?.url, () => props.data?.loading, () => props.data?.error],
@@ -50,6 +59,144 @@ watch(
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
 const showImage = computed(() => !isLoading.value && !errorMsg.value && !!imageUrl.value)
+/** 空态：既没在跑、也没报错、也还没图 —— 才摆「尝试」两项能力 */
+const showEmpty = computed(() => !showLoading.value && !showError.value && !showImage.value)
+
+/**
+ * 卡片尺寸跟着「比例」参数走（对齐 LibTV 实测，见 config/node-size.ts）：
+ * 横版 622×350、竖版 350×622、方版 350×350。图用 object-cover 填满这张框。
+ */
+const cardSize = computed(() => resolveGenerationCardSize(appliedParams.value.ratio))
+
+const triggerUpload = () => fileInputRef.value?.click()
+const handleFileChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    isLoading.value = true
+    updateNode(props.id, { loading: true, error: '' })
+    const uploaded = await uploadStorageFile(file, 'asset')
+    if (!uploaded) throw new Error('upload returned empty')
+    imageUrl.value = uploaded.publicUrl
+    updateNode(props.id, { url: uploaded.publicUrl, loading: false, error: '' })
+  } catch (err) {
+    ElMessage.error('图片上传失败')
+    updateNode(props.id, { loading: false, error: '上传失败' })
+    // eslint-disable-next-line no-console
+    console.error('[ImageNode] upload failed', err)
+  } finally {
+    isLoading.value = false
+    input.value = ''
+  }
+}
+
+/**
+ * 「图片高清」：拿本节点这张图 + 一句固定指令走图生图（image-edit），结果落到**新节点**。
+ *
+ * 与 LibTV 空图片节点上的「尝试：图片高清」同名同义。两条刻意的决定沿用旧版：
+ *  1. 结果不覆盖原图 —— 高清重绘是可以对比、可以回退的操作，覆盖掉就找不回来了；
+ *  2. 提示词与尺寸都来自预设（config/image-edit-presets），档位只从模型声明的列表里取，
+ *     模型不认的值绝不会透传上去。
+ */
+const runImageEditJob = async (preset: ImageEditPreset) => {
+  const sourceUrl = String(imageUrl.value || '').trim()
+  if (!sourceUrl) {
+    ElMessage.info('这个节点还没有图，先上传一张')
+    return
+  }
+  if (isGenerating.value) return
+
+  const sourceNode = nodes.value.find((n) => n.id === props.id)
+  if (!sourceNode) return
+
+  isGenerating.value = true
+  taskStreamController.value?.abort()
+
+  // 先建结果节点：用户点下去立刻能看到「活干起来了」，而不是等几秒才出现
+  const targetId = addNode('image', { x: sourceNode.position.x + 640, y: sourceNode.position.y }, {
+    label: preset.label,
+    loading: true,
+    prompt: preset.prompt,
+  })
+  addEdge({
+    source: props.id,
+    target: targetId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+    type: 'imageOrder',
+    data: { imageOrder: 1 },
+  })
+
+  try {
+    const fallbackKey = String(props.data?.model || '').trim()
+    const { providerId, modelKey } = resolveGenerationTaskModel({
+      modelKey: fallbackKey,
+      fallbackModelKey: fallbackKey,
+      category: 'IMAGE',
+      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+    })
+
+    const model = getModelByName(modelKey) as ImageModel | null
+    const schema = resolveImageParamSchema(model, String(props.data?.quality || 'standard'))
+    const size = preset.sizeIntent
+      ? (pickSizeByAspect(schema.sizes, preset.sizeIntent) || schema.defaultSize)
+      : schema.defaultSize
+
+    const requestBody: Record<string, unknown> = {
+      model: modelKey,
+      prompt: preset.prompt,
+      n: 1,
+      providerId,
+    }
+    if (size) requestBody.size = size
+
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'image',
+      requestMode: 'image-edit',
+      prompt: preset.prompt,
+      modelKey,
+      resolution: String(props.data?.quality || '').trim() || undefined,
+      referenceImages: [sourceUrl],
+      requestBody: appendImageReferencesToRequestBody(requestBody, [sourceUrl]),
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('图片任务创建失败')
+
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'snapshot' || event.type === 'completed') {
+          const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+          if (urls.length) {
+            updateNode(targetId, { url: urls[0], loading: false, error: '', executed: true, taskRecordId: taskId })
+            isGenerating.value = false
+          }
+        }
+        if (event.type === 'failed') {
+          updateNode(targetId, { loading: false, error: String(event.message || event.record?.error || '高清处理失败') })
+          isGenerating.value = false
+        }
+        if (event.type === 'stopped') {
+          updateNode(targetId, { loading: false, error: '任务已停止' })
+          isGenerating.value = false
+        }
+      },
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '高清处理失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+    isGenerating.value = false
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
+
+const handleEnhance = () => runImageEditJob(ENHANCE_PRESET)
 
 const previewVisible = ref(false)
 const previewTarget = ref('')
@@ -323,12 +470,36 @@ watch(
 
 <template>
   <div class="image-node-wrapper">
-    <div class="image-node-card" :class="{ 'is-selected': isSelected }">
+    <div class="image-node-card" :class="{ 'is-selected': isSelected }" :style="cardSizeStyle(cardSize)">
       <div v-if="showLoading" class="image-node-loading" aria-label="图片生成中">
         <div class="image-node-spinner" />
       </div>
       <div v-else-if="showError" class="image-node-error" role="alert">{{ errorMsg }}</div>
       <img v-else-if="showImage" :src="imageUrl" alt="生成图片" class="image-node-image" @dblclick.stop="openImagePreview()" />
+
+      <!-- 空态：照抄 LibTV 的「尝试」写法（空图片节点上就是这两项）。
+           两项都必须有真实行为 —— 图生图落到本节点上传，图片高清走已验证的 image-edit 管线。 -->
+      <div v-else-if="showEmpty" class="image-node-empty">
+        <div class="image-node-empty-title">尝试：</div>
+        <div class="image-node-empty-menu">
+          <button type="button" class="image-node-empty-item nodrag nopan" @click.stop="triggerUpload">
+            <el-icon class="image-node-empty-item-icon"><Picture /></el-icon>
+            <span>图生图</span>
+          </button>
+          <button type="button" class="image-node-empty-item nodrag nopan" @click.stop="handleEnhance">
+            <el-icon class="image-node-empty-item-icon"><MagicStick /></el-icon>
+            <span>图片高清</span>
+          </button>
+        </div>
+      </div>
+
+      <input
+        ref="fileInputRef"
+        type="file"
+        accept="image/*"
+        style="display: none"
+        @change="handleFileChange"
+      />
     </div>
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
@@ -344,7 +515,7 @@ watch(
         :external-reference-images="upstreamReferenceUrls"
         :referenceable-assets="referenceableAssets"
         :initial-params="appliedParams"
-        placeholder-override="描述你想生成的图片内容，按 Enter 生成"
+        placeholder-override="可直接文字生图，或上传图片输入文字指令对图片进行编辑，如：将背景改为雪夜"
         popup-placement="top"
         @params-change="handleParamsChange"
         @send="handlePromptSend"
@@ -355,12 +526,25 @@ watch(
 
 <style scoped>
 .image-node-wrapper { position: relative; width: 100%; height: 100%; }
-.image-node-card { position: relative; width: 100%; height: 100%; min-width: 280px; min-height: 180px; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
+/* 尺寸由 config/node-size.ts 算出后内联绑定（跟比例走），这里不再写死 min-width/min-height */
+.image-node-card { position: relative; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
 .image-node-card.is-selected { border-color: var(--canvas-node-border-selected); }
 .image-node-loading, .image-node-error { display: grid; place-items: center; width: 100%; height: 100%; }
 .image-node-error { padding: 12px; color: #ef4444; font-size: 12px; line-height: 18px; text-align: center; box-sizing: border-box; }
 .image-node-spinner { width: 18px; height: 18px; border: 2px solid var(--stroke-secondary); border-top-color: var(--brand-main-default); border-radius: 50%; animation: image-node-spin 0.8s linear infinite; }
 @keyframes image-node-spin { to { transform: rotate(360deg); } }
-.image-node-image { display: block; width: 100%; height: 100%; object-fit: contain; }
-.image-node-prompt-panel { position: absolute; top: calc(100% + 18px); left: 50%; width: 420px; transform: translateX(-50%); z-index: 10; }
+/* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，
+   而不是让卡片变形（空节点也一样是 622×350 的固定框） */
+.image-node-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+/* 空态「尝试」列表：与 LibTV 一致的分组标题 + 竖排列 */
+.image-node-empty { display: flex; flex-direction: column; justify-content: center; height: 100%; padding: 20px; box-sizing: border-box; }
+.image-node-empty-title { padding: 0 8px; margin-bottom: 12px; color: var(--text-tertiary); font-size: 13px; line-height: 18px; }
+.image-node-empty-menu { display: flex; flex-direction: column; gap: 2px; }
+.image-node-empty-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); font-size: 13px; text-align: left; cursor: pointer; transition: background-color 0.15s ease, color 0.15s ease; }
+.image-node-empty-item:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
+.image-node-empty-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; color: var(--text-tertiary); font-size: 16px; }
+.image-node-empty-item:hover .image-node-empty-item-icon { color: var(--text-primary); }
+
+.image-node-prompt-panel { position: absolute; top: calc(100% + 18px); left: 50%; transform: translateX(-50%); z-index: 10; }
 </style>
