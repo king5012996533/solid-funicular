@@ -30,7 +30,7 @@
         </header>
 
         <main class="common-image-preview__stage">
-          <img v-if="resolvedSrc" :src="resolvedSrc" :alt="title || '图片预览'">
+          <img v-if="resolvedSrc" :src="resolvedSrc" referrerpolicy="no-referrer" :alt="title || '图片预览'">
           <div v-else class="common-image-preview__empty">暂无可预览图片</div>
         </main>
 
@@ -76,6 +76,13 @@ const emit = defineEmits<{
   close: []
 }>()
 
+/**
+ * 预览的往往是第三方图（OSS 等）：`referrerpolicy="no-referrer"` 是必需的 ——
+ * 实测那批阿里云 OSS 图带 Referer 就 403（返回 XML），Chrome 随后用 ORB 拦掉，用户看到裂图。
+ *
+ * 注：这段说明故意留在脚本里。同样的文字写在模板里那个位置会让 vue-tsc 解析不出 SFC 绑定，
+ * 报一连串「Property 'resolvedSrc' does not exist」（实测过一次）。
+ */
 const resolvedSrc = computed(() => buildAssetUrl(props.src || ''))
 const metaItems = computed(() => props.meta.filter(item => item.label && String(item.value || '').trim()))
 

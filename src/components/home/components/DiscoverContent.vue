@@ -34,14 +34,22 @@
               >
                 <div class="container-bG3PQ9">
                   <div style="transition:opacity 300ms;opacity:1">
+                    <!-- referrerpolicy="no-referrer" 是这类第三方图能不能显示的关键：
+                         实测那批 OSS 图带 Referer 就 403（返回 XML），Chrome 再用 ORB 拦掉 → 裂图；
+                         不带 Referer 一律 200。 -->
                     <img
+                      v-if="item.image && !failedCovers.has(`hero:${index}`)"
                       data-apm-action="feed-item-video"
                       fetchpriority="high"
                       loading="lazy"
+                      referrerpolicy="no-referrer"
                       class="image-dDSP59 discover-masonry-cover"
                       :src="item.image"
                       :alt="item.title"
+                      @error="markCoverFailed(`hero:${index}`)"
                     >
+                    <!-- 取不到图时给一块中性的底，而不是让浏览器画「裂图」图标 -->
+                    <div v-else class="discover-masonry-cover discover-cover-fallback" aria-hidden="true" />
                   </div>
                 </div>
                 <div class="gradient"></div>
@@ -115,17 +123,20 @@
             <div class="container-bG3PQ9">
               <div style="transition:opacity 300ms;opacity:1">
                 <img
+                  v-if="item.src && !failedCovers.has(`feed:${index}`)"
                   data-apm-action="feed-item-image"
                   elementtiming
                   :fetchpriority="index < 4 ? 'high' : 'low'"
                   loading="lazy"
+                  referrerpolicy="no-referrer"
                   class="cover-W9HnBB discover-masonry-cover"
                   ccfmp-element="true"
                   :src="item.src"
                   :alt="item.alt"
                   @load="onFeedImgLoad($event, index)"
-                  @error="onFeedImgError(index)"
+                  @error="onFeedImgError(index, `feed:${index}`)"
                 >
+                <div v-else class="cover-W9HnBB discover-masonry-cover discover-cover-fallback" aria-hidden="true" />
               </div>
             </div>
             <!-- 鼠标移入时显示的作品信息层 -->
@@ -133,13 +144,19 @@
               <div class="tail discover-feed-overlay-tail">
                 <div class="author-g6lhbl concealable-card-element discover-feed-author">
                   <div class="dreamina-component-avatar-container avatar-LRSR55 discover-feed-avatar-shell">
+                    <!-- 空地址就不要再渲染 <img> 了：src="" 会让浏览器画一个 16×16 的裂图图标
+                         （实测首页 36 个作者头像全是这样） -->
                     <img
+                      v-if="item.user.avatarSrc && !failedAvatars.has(item.user.id || item.id)"
                       :src="item.user.avatarSrc"
+                      referrerpolicy="no-referrer"
                       class="dreamina-component-avatar discover-feed-avatar"
 
                       draggable="false"
                       :alt="item.user.name"
+                      @error="markAvatarFailed(item.user.id || item.id)"
                     >
+                    <span v-else class="dreamina-component-avatar discover-feed-avatar discover-feed-avatar--fallback">{{ avatarInitial(item.user.name) }}</span>
                   </div>
                   <span class="username discover-feed-author-name">{{ item.user.name }}</span>
                 </div>
@@ -323,7 +340,33 @@ function onFeedImgLoad(ev, index) {
   feedNaturalSizes.value = next
 }
 
-function onFeedImgError(index) {
+/**
+ * 加载失败的封面/头像。
+ *
+ * 为什么要记下来：失败时浏览器会画自己的「裂图」图标（用户看到的就是那个），
+ * 记下之后渲染换成一块中性底/首字兜底 —— 页面不出现破图，版面也不跳。
+ */
+const failedCovers = ref(new Set())
+const failedAvatars = ref(new Set())
+
+const markCoverFailed = (key) => {
+  const next = new Set(failedCovers.value)
+  next.add(key)
+  failedCovers.value = next
+}
+
+const markAvatarFailed = (key) => {
+  if (!key) return
+  const next = new Set(failedAvatars.value)
+  next.add(key)
+  failedAvatars.value = next
+}
+
+/** 没有头像时用名字首字兜底（比灰色裂图图标有信息量） */
+const avatarInitial = (name) => String(name || '').trim().slice(0, 1) || '创'
+
+function onFeedImgError(index, key) {
+  if (key) markCoverFailed(key)
   if (feedNaturalSizes.value[index]) return
   const fallbackSize = feedItems.value[index]?.layoutSize
   if (!fallbackSize) return
@@ -606,6 +649,24 @@ function openWorkDetailFromCarousel(item, index) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* 取不到图时的中性底：绝不露出浏览器的裂图图标 */
+.discover-cover-fallback {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    var(--bg-block-secondary-default, rgba(255, 255, 255, 0.04));
+}
+
+/* 没头像时用首字兜底 */
+.discover-feed-avatar--fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.85);
+  background: var(--bg-block-secondary-default, rgba(255, 255, 255, 0.14));
 }
 
 .discover-feed-author-name {

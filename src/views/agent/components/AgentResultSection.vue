@@ -9,7 +9,17 @@
         :key="image.id"
         class="agent-result-card"
       >
-        <img :src="image.imageSrc" :alt="image.promptText || image.id" class="agent-result-image">
+        <!-- 与首页同一批第三方图：带 Referer 会被防盗链拒（403 XML → Chrome ORB 拦掉）→ 裂图。
+             这里同样不发 Referer，并在失败时收起这张卡而不是画裂图。 -->
+        <img
+          v-if="image.imageSrc && !failedIds.has(image.id)"
+          :src="image.imageSrc"
+          referrerpolicy="no-referrer"
+          :alt="image.promptText || image.id"
+          class="agent-result-image"
+          @error="markFailed(image.id)"
+        >
+        <div v-else class="agent-result-image agent-result-image--fallback" aria-hidden="true" />
         <div v-if="image.promptText" class="agent-result-caption">
           {{ image.promptText }}
         </div>
@@ -27,6 +37,16 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+
+/** 加载失败的图：失败就换成中性底，别让浏览器画裂图图标 */
+const failedIds = ref(new Set<string>())
+const markFailed = (id: string) => {
+  const next = new Set(failedIds.value)
+  next.add(id)
+  failedIds.value = next
+}
+
 import { computed } from 'vue'
 import type { AgentImageResult } from '@/types/agent'
 
@@ -71,6 +91,12 @@ const images = computed(() => props.images || [])
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.045);
+}
+
+.agent-result-image--fallback {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    var(--bg-block-secondary-default, rgba(255, 255, 255, 0.04));
 }
 
 .agent-result-image {
