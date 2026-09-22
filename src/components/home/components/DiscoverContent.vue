@@ -103,6 +103,12 @@
         </div>
       </div>
 
+      <!-- 空态：接口没有作品时如实告知，而不是灌演示数据 -->
+      <div v-if="!feedItems.length" class="discover-feed-empty">
+        <p class="discover-feed-empty__title">还没有公开作品</p>
+        <p class="discover-feed-empty__hint">去「生成」创作第一张，发布后就会出现在这里</p>
+      </div>
+
       <!-- Feed：位置由图片 natural 尺寸换算高度 + 最短列堆叠 -->
       <div
         v-for="(item, index) in feedItems"
@@ -271,24 +277,6 @@ const buildFeedItemFromAsset = (item) => ({
   },
 })
 
-const buildFallbackFeedItems = () => (
-  discoverContent.feedItems.map((item) => ({
-    id: item.id,
-    src: item.imageSrc,
-    alt: item.alt,
-    promptText: item.promptText,
-    user: item.user || {
-      id: '',
-      name: '创作者',
-      avatarSrc: '',
-    },
-    favoriteCount: item.favoriteCount || 0,
-    layoutSize: resolveLayoutSize({
-      aspectRatio: item.detail?.aspectRatioLabel,
-    }),
-    detail: item.detail,
-  }))
-)
 
 /**
  * @param {{
@@ -317,9 +305,14 @@ function formatFavoriteCount(count) {
   return String(count)
 }
 
-const feedItems = ref(
-  shuffleArray(buildFallbackFeedItems()),
-)
+/**
+ * 瀑布流条目：**只来自接口**（公开作品）。
+ *
+ * 早先初始值是本地演示 JSON（41 条第三方 OSS 图 + 写死的 modelLabel/比例），
+ * 于是「接口为空或失败」时会静默展示别人的图与假参数 —— 上线不可接受。
+ * 现在失败就是空：给用户一个能看懂的空态，而不是假内容。
+ */
+const feedItems = ref([])
 
 /** 每张图 natural 尺寸；未拿到真实尺寸时回退到接口/配置提供的比例提示 */
 const feedNaturalSizes = ref(
@@ -427,12 +420,12 @@ const loadDiscoverFeedItems = async () => {
       return
     }
 
-    // 接口返回空数据时，仍保持首页图片的随机展示效果。
-    feedItems.value = shuffleArray(buildFallbackFeedItems())
+    // 接口返回空：保持空态（不再灌演示数据）
+    feedItems.value = []
   } catch (error) {
-    console.warn('读取首页瀑布流失败，继续使用本地 JSON 数据。', error)
-    // 接口失败回退本地数据时，同样保持随机顺序，避免被固定顺序覆盖。
-    feedItems.value = shuffleArray(buildFallbackFeedItems())
+    // 接口失败：同样保持空态，让用户看到真实情况而不是演示数据
+    console.warn('读取首页瀑布流失败。', error)
+    feedItems.value = []
   }
 }
 
@@ -660,6 +653,19 @@ function openWorkDetailFromCarousel(item, index) {
 }
 
 /* 取不到图时的中性底：绝不露出浏览器的裂图图标 */
+.discover-feed-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 96px 24px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+.discover-feed-empty__title { margin: 0; color: var(--text-secondary); font-size: 15px; }
+.discover-feed-empty__hint { margin: 0; font-size: 13px; }
+
 .discover-cover-fallback {
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),

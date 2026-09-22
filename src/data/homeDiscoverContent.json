@@ -4,21 +4,21 @@
       "id": "hero-01",
       "title": "视觉实验室第1期 · 图标银行",
       "participants": 4888,
-      "imageSrc": "https://p9-heycan-hgt-sign.byteimg.com/tos-cn-i-31yrirwxg7/7854351dae514807b2411d3ed374be2f~tplv-3jr8j4ixpe-resize:720:720.webp?lk3s=8e790bc3&x-expires=1800580713&x-signature=9CfIpRLH%2BnjqJMGA0iOyWYBmqIQ%3D",
+      "imageSrc": "/hero/hero-1.jpg",
       "promptText": "图标银行主题视觉海报，强调实验感、设计感和未来创作氛围"
     },
     {
       "id": "hero-02",
       "title": "第105届ADC年度设计大奖·AI设计作品征集",
       "participants": null,
-      "imageSrc": "https://p9-heycan-hgt-sign.byteimg.com/tos-cn-i-31yrirwxg7/35cb2eb1fd6a465090d743cd79344dcc~tplv-3jr8j4ixpe-resize:720:720.webp?lk3s=8e790bc3&x-expires=1800580713&x-signature=rJdP73v4TQQ6I%2BGP0yeUGGIOLkA%3D",
+      "imageSrc": "/hero/hero-2.jpg",
       "promptText": "AI设计大奖征集海报，突出赛事感、艺术感和品牌识别度"
     },
     {
       "id": "hero-03",
       "title": "迷你剧场第21期 · 看见那一刻的发生",
       "participants": 926,
-      "imageSrc": "https://p9-heycan-hgt-sign.byteimg.com/tos-cn-i-31yrirwxg7/62a31d95776e4106b2e2533626551ad2~tplv-3jr8j4ixpe-resize:720:720.webp?lk3s=8e790bc3&x-expires=1800580713&x-signature=m5M3guAWnzX5TTgBNdpTuFZUNZQ%3D",
+      "imageSrc": "/hero/hero-3.jpg",
       "promptText": "迷你剧场封面视觉，突出故事瞬间、戏剧张力和画面叙事感"
     }
   ],
