@@ -66,8 +66,9 @@ export const buildAssetUrl = (path: string) => {
    * 拼了会打到后端端口上 404。目前有：
    *   /banner/      首页工具位的小图
    *   /demo-feed/   首页「发现」演示图（自有资源，见 src/data/homeDiscoverContent.json）
+   *   /hero/        首页 hero 宽幅图（自有资源，替代原第三方签名 CDN）
    */
-  const FRONTEND_STATIC_PREFIXES = ['/banner/', '/demo-feed/']
+  const FRONTEND_STATIC_PREFIXES = ['/banner/', '/demo-feed/', '/hero/']
   if (FRONTEND_STATIC_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
     return normalizedPath
   }
