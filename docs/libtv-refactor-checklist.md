@@ -312,12 +312,35 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
   `defaultChatModel` 指向它 → 目录 `defaults.chat` 自动指向它）。
 - 实测：`/models` 列出 **15 个模型**（对话：qwen3.8-flash/max、glm-5.2/5.3、
   deepseek-v4-pro 等；图片：`wan2.7-image` / `-pro`；语音：`qwen-audio-3.0-tts-plus` /
-  `-realtime-plus`）。**只登记了用户点名的 qwen3.8-flash**，其余待确认后再接 ——
-  图片与语音那两个对电商出图 / 漫剧配音有用，值得后面用上。
+  `-realtime-plus`）。**但只有 chat 能调用** —— 见下面 B2 那段的判别实验。
 - 端到端实测（`tests/e2e/submit-chat.mjs`）：目录解析出 providerId → 建任务 →
   3 秒完成 → 模型回「链路正常」。浏览器里 LLM 节点的模型下拉默认即 `Qwen3.8 Flash`。
 - 注意它是**思考型模型**（usage 里有 `reasoning_tokens`，简单问答也先推理），
   所以首字延迟比普通模型高。
+
+> **纠正一处我自己写错的话**：上一轮我按 `/models` 的返回写了「图片与语音那两个
+> 对电商出图 / 漫剧配音有用，值得后面用上」。**这是错的** —— 这个网关只转发
+> `chat/completions`（外加 `/models`），图像与语音的路由都不存在。
+> 「`/models` 列出了」≠「能调用」，这跟 `grok-imagine-video-1.5` 是同一个坑，
+> 第二次踩了才学会：下结论前必须做一次**与模型无关的对照实验**（见 B2 表格）。
+
+**配音（B2）当前做不了，卡在网关没有 TTS 路由**（2026-09-22 实测，含对照组）：
+
+| 实验 | 结果 | 说明 |
+| --- | --- | --- |
+| `POST /audio/speech` + `qwen-audio-3.0-tts-plus` | 400 `InvalidParameter: url error`，亚秒级，3/3 一致 | — |
+| **`POST /audio/speech` + `qwen3.8-flash`（已知可用的对话模型）** | 400 同样报错 | **失败与模型无关 —— 是路径没实现** |
+| `POST /images/generations` + `wan2.7-image` | 400 同样报错 | 图像路由也没有 |
+| `POST /api/v1/services/aigc/text2audio/generate` | 404 | 该域名只提供 `/compatible-mode/v1` |
+| 官方型号名 `qwen-tts` / `qwen-tts-latest` / `qwen3-tts-flash` / `cosyvoice-v1` | 404 | 这些 id 不在该套餐内 |
+| **对照：`/chat/completions` + `qwen3.8-flash`** | **200 / 2 秒** | 网关本身是健康的 |
+
+要接配音需要的是**一个真有 TTS 路由的上游**：阿里云百炼官方的
+`dashscope.aliyuncs.com/compatible-mode/v1/audio/speech`（`qwen-tts` 系）确实支持，
+只是这个 token-plan 代理没转发；或者换火山 / MiniMax 等带 TTS 的厂商。
+**上游到位之前不要先摆音频节点** —— 用户已明确要求清掉过占位入口（宁缺勿假）。
+应用侧的现状：`WorkflowNodeType` 里没有音频节点，`prisma` 的枚举里有 `AUDIO`，
+素材库有音频标签页（只是浏览已存素材，不生成）。
 
 **占位模型已从下拉里清掉**（2026-09-22）：`doubao-seedream-4-5-251128`（Seedream 4.5）
 与 `nano-banana-pro`（Nano Banana Pro）这两个没有密钥的模型**已禁用**（不是删除 ——
@@ -350,15 +373,21 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
 - **涉及**：`server/generation-tasks/*`、`VideoNode.vue` 的 `handlePromptSend`
 - **验收**：真出一条视频；失败路径（超时 / 上游报错）能正确退款
 
-### B2. 音频生成节点 `后端`
+### B2. 音频生成节点 `上游阻塞`
 - **依据**：`[实测]` `添加节点` 有「音频」；`[现状]` 无
 - **做法**：新增 `audio` 节点类型 + 策略（TTS / 配乐两种模式）；产出可挂到时间线
 - **验收**：能生成一段语音并播放
+- **2026-09-22 状态：先不动。** 用户同意接配音，但实测两个上游都没有可用的 TTS 路由
+  （判别实验与对照组见 3.0 的「配音（B2）」那段）。**缺的是能调用 TTS 的厂商，不是代码** ——
+  上游到位前不摆音频节点。
 
 ### B3. 剧本生成节点 `后端`（成本最低）
 - **依据**：`[实测]` `脚本 ▸ 脚本(NEW) / 脚本（旧版）Beta`
 - **做法**：**可复用现有 `agent-chat` 策略**，只做节点 UI + 长文本输出的落库
 - **验收**：输入一句想法 → 产出分集剧本，且能接到下游图片节点
+- **2026-09-22 更新：这条从"没上游"变成可做了** —— `qwen-maas` 的 `qwen3.8-flash`
+  接通后，`agent-chat` 策略第一次有了可用的对话模型（端到端 3 秒出文，见 3.0）。
+  这是当前**性价比最高**的下一步。
 
 ### B4. 智能剪辑节点 `后端`
 - **依据**：`[实测]` 4 个场景 `讲解视频 / 批量广告 / 口播视频 / 素材混剪`，空态「请连接视频节点后操作」；`[公告]` 粗剪去口水词/停顿/重复、花字、画中画、音效、BGM、封面预览
