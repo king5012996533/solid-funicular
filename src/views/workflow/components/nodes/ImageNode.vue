@@ -555,6 +555,7 @@ watch(
 .image-node-empty-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; color: var(--text-tertiary); font-size: 16px; }
 .image-node-empty-item:hover .image-node-empty-item-icon { color: var(--text-primary); }
 
-/* 宽 660、不随画布缩放 —— 都由内联 style 给（见 composerStyle），这里只负责挂到卡片正下方 */
-.image-node-prompt-panel { position: absolute; top: calc(100% + 18px); left: 50%; z-index: 10; }
+/* 宽 660、不随画布缩放 —— 都由内联 style 给（见 composerStyle），这里只负责挂到卡片正下方。
+   间距 12px 是 LibTV 实测值，和视频/文本节点保持一致（原先这里写的是 18px，三个节点各写一份） */
+.image-node-prompt-panel { position: absolute; top: calc(100% + 12px); left: 50%; z-index: 10; }
 </style>

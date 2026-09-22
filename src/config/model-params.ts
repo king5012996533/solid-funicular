@@ -96,9 +96,22 @@ export const BANANA_SIZES: ParamChoice[] = [
   { label: '9:21', key: '9x21' },
 ]
 
+/**
+ * OpenAI 图像族（gpt-image 系列）的尺寸档。
+ *
+ * **顺序即默认**：`readImageParamSchema` 在没有目录声明时取 `sizes[0]` 作为默认档
+ * （实测目录里 gpt-image-2 的 `capability.size` 是 null，就走这条回落）。
+ *
+ * 横版打头是对齐 LibTV 的结果：他们的图片节点默认是横版画幅（622×350 的卡片）。
+ * 我们原先方版打头，新建图片节点是个 350×350 的方块，跟 LibTV 一眼就能看出差别。
+ * Seedream / Nano Banana 那两张表本来也是横版打头的，这里只是把这个约定补齐。
+ *
+ * 只动顺序，不加档位 —— 16:9 不在 gpt-image 的支持列表里，编造一个会写进请求体
+ * 让上游报错（「宁缺勿假」）。
+ */
 const OPENAI_IMAGE_SIZES: ParamChoice[] = [
-  { label: '1:1', key: '1024x1024' },
   { label: '3:2', key: '1536x1024' },
+  { label: '1:1', key: '1024x1024' },
   { label: '2:3', key: '1024x1536' },
 ]
 
