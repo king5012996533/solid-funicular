@@ -657,6 +657,24 @@ const outgoingResolution = computed(() => {
 /** 这次提交会自动带几个素材（UI 上如实告知） */
 const autoLinkedCount = computed(() => autoLinkResult.value.tokens.length)
 
+/**
+ * 自动引用的素材也要出现在「已引用」行里。
+ *
+ * 早先只显示用户手写 @ 的那些，于是开了 AutoLink 的用户**看不到这次提交带了什么** ——
+ * 只有开关旁边一句「自动引用 N 个」。（对齐 LibTV：他们的自动引用同样是可见的缩略图。）
+ * 这一类没有 token 可删，所以不给叉号，只标一个「自动」。
+ */
+const autoLinkedMediaItems = computed(() => {
+  const tokens = new Set(autoLinkResult.value.tokens)
+  if (!tokens.size) return [] as Array<{ url: string; asset: ReferenceableAsset; auto: true }>
+  return referenceAssets.value.flatMap((asset) => {
+    if (!tokens.has(String(asset.token))) return []
+    if (asset.kind !== 'image' && asset.kind !== 'video') return []
+    if (!asset.value) return []
+    return [{ url: asset.value, asset, auto: true as const }]
+  })
+})
+
 /** 「已引用」行只展示媒体（图片 / 视频）—— 文本引用读不出缩略图，语义也不一样 */
 const referencedMediaItems = computed(() => {
   const resolved = resolvedReferences.value
@@ -1743,7 +1761,9 @@ onUnmounted(() => {
           </div>
 
           <!-- 已引用：@ 引用的媒体缩略图，点叉号即从文本里删掉对应 token -->
-          <div v-if="referencedMediaItems.length" class="mentioned-references">
+          <!-- 已引用 / 自动引用。判据要把自动引用也算上：只按用户 token 判断的话，
+               开了 AutoLink 但没手写 @ 时整行不渲染，自动引用又变成看不见的（实测踩到过） -->
+          <div v-if="referencedMediaItems.length || autoLinkedMediaItems.length" class="mentioned-references">
             <span class="mentioned-references__label">已引用</span>
             <div class="mentioned-references__list">
               <div
@@ -1753,7 +1773,7 @@ onUnmounted(() => {
                 :title="item.asset.token"
               >
                 <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
-                <span class="mentioned-reference-badge">{{ item.asset.kindLabel }}</span>
+                <span class="mentioned-reference-badge">@{{ item.asset.token }}</span>
                 <div class="remove-button-container">
                   <button type="button" class="remove-button generator-reference-clear-btn" @click.stop="removeMentionedReference(item)">
                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1761,6 +1781,16 @@ onUnmounted(() => {
                     </svg>
                   </button>
                 </div>
+              </div>
+              <!-- 自动引用的素材：没有 token 可删，所以不给叉号，只标「自动」 -->
+              <div
+                v-for="item in autoLinkedMediaItems"
+                :key="`auto-${item.url}`"
+                class="mentioned-reference-item is-auto"
+                :title="`自动引用：${item.asset.token}`"
+              >
+                <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
+                <span class="mentioned-reference-badge">自动</span>
               </div>
             </div>
           </div>
@@ -2715,14 +2745,22 @@ onUnmounted(() => {
   gap: 6px;
 }
 
+/* 48×48 是 LibTV 实测值（他们的引用缩略图就是这个尺寸）。
+   box-sizing 必须显式给 border-box：默认的 content-box 下 1px 描边会把实际渲染撑成 50×50 */
 .dimension-layout-FUl4Nj .mentioned-reference-item {
   background: var(--bg-block-primary-default);
   border: 1px solid var(--stroke-secondary);
   border-radius: 8px;
-  height: 40px;
+  box-sizing: border-box;
+  height: 48px;
   overflow: hidden;
   position: relative;
-  width: 40px;
+  width: 48px;
+}
+
+/* 自动引用的那些用虚线描边区分：看得出不是用户手写的 @ */
+.dimension-layout-FUl4Nj .mentioned-reference-item.is-auto {
+  border-style: dashed;
 }
 
 .dimension-layout-FUl4Nj .mentioned-reference-badge {

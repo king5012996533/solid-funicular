@@ -16,7 +16,6 @@
 import type {
   WorkflowCanvasNode,
   WorkflowCanvasEdge,
-  WorkflowNodeType,
 } from '@/views/workflow/composables/useWorkflowCanvas'
 import type { WorkflowCanvasPosition } from '@/views/workflow/composables/workflow-orchestrator-types'
 
@@ -185,23 +184,10 @@ export interface CanvasSelectionState {
   edgeId: string | null
 }
 
-// ============================================================
-// 节点类型 → 默认尺寸（resize 的 min/max 用）
-// ============================================================
+// 节点尺寸不在这里。
+//
+// 原先这里有一份 `NODE_SIZE_DEFAULTS`（按类型写死 min 宽高），但从 2026-09-22 起
+// 尺寸由 `views/workflow/config/node-size.ts` 统一提供：
+// 生成类节点跟「比例」参数走、工具类固定正方形 —— 那份表已经没有任何消费者，
+// 留着只会让人以为改它有用，所以删掉（WorkflowNodeType 仍在别处使用，保留）。
 
-export interface NodeSizeConstraint {
-  minWidth: number
-  minHeight: number
-  /** 是否强制等比（视频 = true，图片可切换） */
-  keepRatio?: boolean
-  /** 等比时的初始比例（仅 keepRatio=true 时使用） */
-  aspectRatio?: number
-}
-
-export const NODE_SIZE_DEFAULTS: Record<WorkflowNodeType, NodeSizeConstraint> = {
-  text: { minWidth: 220, minHeight: 120 },
-  image: { minWidth: 280, minHeight: 180 },
-  video: { minWidth: 480, minHeight: 270, keepRatio: true, aspectRatio: 16 / 9 },
-
-  asset: { minWidth: 260, minHeight: 200 },
-}
