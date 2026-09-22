@@ -104,6 +104,14 @@ const cardSize = computed(() => resolveGenerationCardSize(appliedParams.value.ra
  *   2. 给一个**真的取消按钮**（走 stop 接口），而不是只能干等或刷新页面。
  */
 const generationElapsed = ref(0)
+/**
+ * 本次运行的起点（毫秒）。
+ *
+ * 为什么不能只信节点 data 里的 `submittedAt`：实测提交时写进节点的 `prompt`/`submittedAt`
+ * **在保存后读回是空**（`taskRecordId` 却留着），所以刷新后拿不到起点、计时会是 00:00。
+ * 这里以「内存里的本次起点」为主，缺了再退回 data，最后退回任务记录的 createdAt（见对账逻辑）。
+ */
+const runStartedAt = ref(0)
 let elapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const stopElapsedTimer = () => {
@@ -115,27 +123,25 @@ const stopElapsedTimer = () => {
 
 const startElapsedTimer = (submittedAt?: number) => {
   stopElapsedTimer()
-  const startedAt = Number(submittedAt) > 0 ? Number(submittedAt) : Date.now()
-  const tick = () => { generationElapsed.value = Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) }
+  const startedAt = Number(submittedAt) > 0 ? Number(submittedAt) : (runStartedAt.value || Date.now())
+  if (!runStartedAt.value) runStartedAt.value = startedAt
+  /**
+   * 每秒把秒数写进 `generationElapsed` —— **它是唯一数据源**。
+   *
+   * 踩过的坑：早先我做成「computed 里有起点就直接用 Date.now() 算、不读这个 ref」，
+   * 结果计时器每秒更新的是 ref，而 computed 的依赖没变 → 界面**永远停在 00:00**
+   * （看着像「计时坏了」，其实是响应式没被触发）。现在 tick 统一算好写进 ref，模板只读它。
+   */
+  const tick = () => {
+    const base = runStartedAt.value || startedAt
+    generationElapsed.value = Math.max(0, Math.floor((Date.now() - base) / 1000))
+  }
   tick()
   elapsedTimer = setInterval(tick, 1000)
 }
 
-/**
- * 展示用的已等待秒数。
- *
- * **以节点数据里的 `submittedAt` 为基准**，而不是只依赖本地计时器：
- * 组件重挂载（Vue Flow 在数据变化时会重建节点组件）后本地计时会归零，
- * 按数据算则无论何时挂载都显示正确值；间隔只负责触发重算。
- */
-const elapsedSeconds = computed(() => {
-  const startedAt = Number(props.data?.submittedAt || 0)
-  if (startedAt > 0) return Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-  return generationElapsed.value
-})
-
 const formattedElapsed = computed(() => {
-  const total = elapsedSeconds.value
+  const total = generationElapsed.value
   const minutes = Math.floor(total / 60)
   const seconds = total % 60
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
@@ -143,7 +149,7 @@ const formattedElapsed = computed(() => {
 
 /** 超过这个时长给一句解释：实测快时 1 分钟内出图，慢时十几分钟 */
 const SLOW_HINT_SECONDS = 90
-const showSlowHint = computed(() => elapsedSeconds.value >= SLOW_HINT_SECONDS)
+const showSlowHint = computed(() => generationElapsed.value >= SLOW_HINT_SECONDS)
 
 /**
  * 计时由 **loading 状态**驱动，而不是在各调用点埋 start/stop。
@@ -633,6 +639,7 @@ const runGeneration = async (input: {
   taskStreamController.value?.abort()
   updateNode(props.id, { loading: true, error: '' })
   const submittedAt = Date.now()
+  runStartedAt.value = submittedAt
   try {
     const { providerId, modelKey } = resolveGenerationTaskModel({
       modelKey: input.modelKey,
@@ -721,6 +728,9 @@ const reconcileInterruptedRun = async () => {
   }
   try {
     const record = await getGenerationTask(taskId)
+    // 任务记录里的 createdAt 是**权威的提交时间**：节点 data 里的 submittedAt 可能已丢失
+    const recordStartedAt = Date.parse(String(record?.createdAt || ''))
+    if (Number.isFinite(recordStartedAt)) runStartedAt.value = recordStartedAt
     if (record?.done) {
       const urls = Array.isArray(record.images) ? record.images.filter(Boolean) : []
       if (urls.length) {
@@ -735,8 +745,8 @@ const reconcileInterruptedRun = async () => {
     // 还在跑：重新订阅跟着它走，并挂上超时兜底（而不是干等）
     const controller = new AbortController()
     taskStreamController.value = controller
-    startDeadline(submittedAt || Date.now())
-    startElapsedTimer(submittedAt || Date.now())
+    startDeadline(submittedAt || runStartedAt.value || Date.now())
+    startElapsedTimer(submittedAt || runStartedAt.value || Date.now())
     await subscribeGenerationTaskEvents(taskId, {
       signal: controller.signal,
       onEvent: applyTaskEvent,
