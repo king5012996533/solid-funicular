@@ -355,7 +355,7 @@ watch(
 
 <style scoped>
 .image-node-wrapper { position: relative; width: 100%; height: 100%; }
-.image-node-card { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
+.image-node-card { position: relative; width: 100%; height: 100%; min-width: 280px; min-height: 180px; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
 .image-node-card.is-selected { border-color: var(--canvas-node-border-selected); }
 .image-node-loading, .image-node-error { display: grid; place-items: center; width: 100%; height: 100%; }
 .image-node-error { padding: 12px; color: #ef4444; font-size: 12px; line-height: 18px; text-align: center; box-sizing: border-box; }
