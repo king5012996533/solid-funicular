@@ -300,11 +300,17 @@ const handleBatchFavorite = async () => {
   ElMessage.success(`已收藏 ${itemIds.length} 项内容`)
 }
 
+/**
+ * 去剪映编辑 —— **尚未开放**。
+ *
+ * 早先这里弹的是「将在剪映中编辑 N 项内容」，然后什么都不发生：
+ * 提示说「已经开始」而实际没开始，比一个灰掉的按钮更糟（用户会以为任务在跑）。
+ * 上线口径：先把话说准，真正的剪映衔接排在后面。
+ */
 const handleEditInCapCut = async () => {
   const itemIds = Array.from(selectedItems.value)
-  console.log('去剪映编辑:', itemIds)
-  // TODO: 实现剪映编辑逻辑
-  ElMessage.info(`将在剪映中编辑 ${itemIds.length} 项内容`)
+  console.log('去剪映编辑（未开放）:', itemIds)
+  ElMessage.warning('剪映编辑尚未开放，正在开发中')
 }
 
 // 监听标签页切换，退出批量操作模式
@@ -351,16 +357,22 @@ const handlePublishArtworkSubmit = async ({
   }
 }
 
+/**
+ * 由图片生成视频 —— **尚未开放**（画布侧的视频生成同样未接后端）。
+ * 同上的口径：不谎报「已开始」。
+ */
 const handlePreviewGenerateVideo = (image: ImageItem) => {
-  console.log('生成视频:', image)
-  ElMessage.info('开始生成视频')
-  // TODO: 实现生成视频逻辑
+  console.log('生成视频（未开放）:', image)
+  ElMessage.warning('由图生成视频尚未开放，正在开发中')
 }
 
+/**
+ * 去画布编辑 —— **尚未开放**。
+ * 真正的做法是带着这张图跳进画布并落一个图片节点（需要画布支持入口参数），已列入待办。
+ */
 const handlePreviewEditInCanvas = (image: ImageItem) => {
-  console.log('去画布编辑:', image)
-  ElMessage.info('打开画布编辑器')
-  // TODO: 实现画布编辑逻辑
+  console.log('去画布编辑（未开放）:', image)
+  ElMessage.warning('跳转画布编辑尚未开放，正在开发中')
 }
 </script>
 
