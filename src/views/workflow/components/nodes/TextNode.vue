@@ -56,8 +56,13 @@ const isSelected = computed(() => props.selected || props.data?.selected)
 const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || 'Text')
 const { updateNodeInternals } = useVueFlow()
 
-/** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
-const { style: composerStyle } = useComposerPanel()
+/** 输入框浮层：固定 660 宽 + 不随画布缩放 + 被底部工具栏挡住时自动上移（规则见 useComposerPanel.ts） */
+const composerRef = ref<HTMLElement | null>(null)
+const { style: composerStyle } = useComposerPanel({
+  el: composerRef,
+  nodeId: () => props.id,
+  cardHeight: () => CANVAS_TOOL_NODE_SIZE.height,
+})
 
 const content = ref(props.data?.content || '')
 const showActions = ref(false)
@@ -411,7 +416,7 @@ watch(content, async () => {
     <CanvasNodeTopToolbar :visible="isSelected && !isEmpty" :items="topToolbarItems" />
 
     <!-- 选中态下方浮出 prompt 输入框（按节点类型差异化） -->
-    <div v-if="isSelected" class="text-node-prompt-panel nodrag nopan" :style="composerStyle" @mousedown.stop>
+    <div v-if="isSelected" ref="composerRef" class="text-node-prompt-panel nodrag nopan" :style="composerStyle" @mousedown.stop>
       <ContentGenerator
         layout="sidebar"
         :collapsible="false"

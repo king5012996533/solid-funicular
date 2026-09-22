@@ -154,8 +154,13 @@ const outputResolutionLabel = computed(() => {
   return `${width} × ${height}`
 })
 
-/** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
-const { style: composerStyle } = useComposerPanel()
+/** 输入框浮层：固定 660 宽 + 不随画布缩放 + 被底部工具栏挡住时自动上移（规则见 useComposerPanel.ts） */
+const composerRef = ref<HTMLElement | null>(null)
+const { style: composerStyle } = useComposerPanel({
+  el: composerRef,
+  nodeId: () => props.id,
+  cardHeight: () => cardSize.value.height,
+})
 
 const appliedParams = computed<GeneratorParamsSnapshot>(() => ({
   modelKey: resolvedModelKey.value,
@@ -465,6 +470,7 @@ const handlePromptSend = (
 
     <div
       v-if="isSelected && !showLoading"
+      ref="composerRef"
       class="video-node-prompt-panel nodrag nopan"
       :style="composerStyle"
       @mousedown.stop
