@@ -326,6 +326,26 @@ const ASPECT_RATIO_CANDIDATES: Array<{ w: number; h: number; label: string }> = 
 ]
 
 /** 从尺寸 key 推导可读比例：'2048x2048' → '1:1'，'16x9' → '16:9' */
+/**
+ * 把尺寸 key 解析成宽高比。
+ *
+ * 两种写法都要认：比例写法（`16x9`）与像素档（`2048x2048` / `1440x2560`）——
+ * 视频节点存的是比例，图片节点存的是像素。
+ * 认不出来（`auto` / 空值 / 写坏）时返回 null，由调用方决定回落。
+ *
+ * 放在这里而不是各组件里：节点卡片的尺寸（`views/workflow/config/node-size.ts`）
+ * 与参数面板的比例图形卡（`components/generate/RatioChoiceGrid.vue`）都要用同一套解析，
+ * 各写一份必然漂移。
+ */
+export const parseAspectRatio = (key?: string): number | null => {
+  const matched = String(key || '').trim().match(/^(\d+(?:\.\d+)?)\s*[x×:]\s*(\d+(?:\.\d+)?)$/)
+  if (!matched) return null
+  const width = Number(matched[1])
+  const height = Number(matched[2])
+  if (!width || !height) return null
+  return width / height
+}
+
 export const describeAspectRatio = (key: string): string => {
   const matched = /^(\d+)x(\d+)$/.exec(String(key || '').trim())
   if (!matched) return String(key || '')

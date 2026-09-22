@@ -23,6 +23,8 @@
  * `h-full w-full object-cover`，也就是说**非当前比例的图会被裁切，而不是让卡片变形**。
  */
 
+import { parseAspectRatio } from '@/config/model-params'
+
 /** 生成类节点的长边（横版时的宽 / 竖版时的高） */
 export const CANVAS_GENERATION_LONG_EDGE = 622
 /** 生成类节点的短边（横版时的高 / 竖版时的宽） */
@@ -39,24 +41,17 @@ export interface NodeCardSize {
   height: number
 }
 
+
 /** 方形判定容差：像素档（2048x2048）与实际比例档（1x1）都要能命中 */
 const SQUARE_TOLERANCE = 0.02
 
 /**
- * 把「比例」参数解析成宽高比。
+ * 比例解析复用共享实现（`@/config/model-params` 的 parseAspectRatio）。
  *
- * 参数可能是比例写法（`16x9`）也可能是像素档（`2048x2048` / `1440x2560`），
- * 两种都要认 —— 图片节点存的是像素档，视频节点存的是比例写法。
- * 认不出来（`auto` / 空值）时返回 null，由调用方决定回落。
+ * 原先这里自己有一份，后来参数面板的比例图形卡也要用同一套规则 ——
+ * 两份实现迟早会漂移，所以留一个别名指过去，导出名保持不变（测试与调用方无需改动）。
  */
-export const parseRatioAspect = (ratio?: string): number | null => {
-  const matched = String(ratio || '').trim().match(/^(\d+(?:\.\d+)?)\s*[x×:]\s*(\d+(?:\.\d+)?)$/)
-  if (!matched) return null
-  const width = Number(matched[1])
-  const height = Number(matched[2])
-  if (!width || !height) return null
-  return width / height
-}
+export const parseRatioAspect = parseAspectRatio
 
 /**
  * 生成类节点（图片 / 视频）的卡片尺寸。

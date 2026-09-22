@@ -7,6 +7,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import SelectPopup from '../common/SelectPopup.vue'
 import GeneratorCountStepper from '../GeneratorCountStepper.vue'
+import RatioChoiceGrid from '../RatioChoiceGrid.vue'
 import {
   getAllVideoModels,
   getDefaultVideoModelKey,
@@ -390,18 +391,14 @@ defineExpose({
             </div>
           </div>
 
+          <!-- 比例：LibTV 是图形单选卡（按真实比例画小矩形），不是文字 chip -->
           <div v-if="hasRatioControl" class="generator-param-row">
             <div class="generator-param-row-label">比例</div>
-            <div class="generator-param-chips">
-              <button
-                v-for="ratio in ratioOptions"
-                :key="ratio.key"
-                type="button"
-                class="generator-param-chip"
-                :class="{ 'is-active': currentSize === ratio.key }"
-                @click.stop="selectSize(ratio.key)"
-              >{{ ratio.label }}</button>
-            </div>
+            <RatioChoiceGrid
+              :options="ratioOptions"
+              :model-value="currentSize"
+              @select="selectSize"
+            />
           </div>
 
           <!-- 视频时长：LibTV 是「滑杆 + 单位 s」，这里对齐；档位仍只取模型声明的离散值 -->

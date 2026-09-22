@@ -9,6 +9,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import SelectPopup from '../common/SelectPopup.vue'
 import GeneratorCountStepper from '../GeneratorCountStepper.vue'
+import RatioChoiceGrid from '../RatioChoiceGrid.vue'
 import {
   getAllImageModels,
   getDefaultImageModelKey,
@@ -387,21 +388,14 @@ defineExpose({
             </div>
           </div>
 
+          <!-- 比例：与视频节点同一套图形单选卡（图片这边 key 是像素档，图形按解析出的比例画） -->
           <div v-if="hasSizeControl" class="generator-param-row">
             <div class="generator-param-row-label">比例</div>
-            <div class="generator-param-chips">
-              <button
-                v-for="size in sizeOptions"
-                :key="size.key"
-                type="button"
-                class="generator-param-chip"
-                :class="{ 'is-active': currentSize === size.key }"
-                @click.stop="selectSize(size.key)"
-              >
-                <span>{{ size.label }}</span>
-                <span v-if="size.hint" class="generator-param-chip-hint">{{ size.hint }}</span>
-              </button>
-            </div>
+            <RatioChoiceGrid
+              :options="sizeOptions"
+              :model-value="currentSize"
+              @select="selectSize"
+            />
           </div>
 
           <div v-if="currentImageMax > 1" class="generator-param-row">

@@ -102,6 +102,7 @@ declare module 'vue' {
     PointsDetailModal: typeof import('./src/components/PointsDetailModal.vue')['default']
     PreferencePanel: typeof import('./src/components/generate/common/PreferencePanel.vue')['default']
     PublishArtworkModal: typeof import('./src/components/PublishArtworkModal.vue')['default']
+    RatioChoiceGrid: typeof import('./src/components/generate/RatioChoiceGrid.vue')['default']
     RatioSelector: typeof import('./src/components/prompt-editor/RatioSelector.vue')['default']
     RecordPromptReferenceHeader: typeof import('./src/components/generate/common/RecordPromptReferenceHeader.vue')['default']
     RightPanel: typeof import('./src/components/canana/RightPanel.vue')['default']
