@@ -23,7 +23,7 @@ import { getDefaultChatModelKey } from '@/config/models'
 import { migrateLegacyConfigNodes } from './legacy-config-node-migration'
 import type { WorkflowCanvasPosition } from './workflow-orchestrator-types'
 
-export type WorkflowNodeType = 'text' | 'image' | 'video' | 'llmConfig' | 'asset'
+export type WorkflowNodeType = 'text' | 'image' | 'video' | 'llmConfig' | 'script' | 'asset'
 
 export interface WorkflowNodeDataBase {
   label?: string
@@ -125,6 +125,7 @@ export interface WorkflowNodeDataMap {
   image: WorkflowImageNodeData
   video: WorkflowVideoNodeData
   llmConfig: WorkflowLlmConfigNodeData
+  script: WorkflowLlmConfigNodeData
   asset: WorkflowAssetNodeData
 }
 

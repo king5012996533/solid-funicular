@@ -76,7 +76,7 @@ const readNodeAsset = (node: WorkflowCanvasNode): UpstreamAsset | null => {
   if (node.type === 'text') {
     return { kind: 'text', value: String((node.data as WorkflowTextNodeData).content || ''), label }
   }
-  if (node.type === 'llmConfig') {
+  if (node.type === 'llmConfig' || node.type === 'script') {
     return { kind: 'text', value: String((node.data as WorkflowLlmConfigNodeData).outputContent || ''), label }
   }
   if (node.type === 'image') {

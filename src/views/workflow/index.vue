@@ -100,6 +100,7 @@ const nodeTypes = {
   image: markRaw(ImageNode),
   video: markRaw(VideoNode),
   llmConfig: markRaw(LlmConfigNode),
+  script: markRaw(LlmConfigNode),
   asset: markRaw(AssetNode),
 } as any
 

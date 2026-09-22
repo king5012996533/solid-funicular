@@ -67,6 +67,12 @@ export const NODE_TYPE_PRESENTATION: NodeTypePresentation[] = [
     icon: getCanvasIcon('llm'),
   },
   {
+    type: 'script',
+    name: '剧本',
+    color: 'var(--brand-script, #e8a33d)',
+    icon: getCanvasIcon('llm'),
+  },
+  {
     type: 'asset',
     name: '素材',
     color: 'var(--text-secondary)',
@@ -84,7 +90,7 @@ export const getNodeTypePresentation = (type: WorkflowNodeType): NodeTypePresent
  *
  * 判据是**下游节点真的会读这个输入**，不是「技术上能不能连」。
  * 表里的每一项都能在代码里找到对应读取逻辑（composables/upstream-inputs.ts）：
- *   text      产出 content      → 图片 / 视频（当提示词）、LLM（当输入）
+ *   text      产出 content      → 图片 / 视频（当提示词）、LLM（当输入）、剧本（当创意）
  *   llmConfig 产出 outputContent → 图片 / 视频（当提示词）、LLM（链式）
  *   image     产出图片           → 图片（当参考图）、视频（当首帧）
  *   video     产出成片           → 没有任何节点读视频，所以目前接不下去
@@ -94,8 +100,9 @@ export const getNodeTypePresentation = (type: WorkflowNodeType): NodeTypePresent
  *   · 任何节点 → video  已经由 image 覆盖（视频唯一能读的素材就是图片）
  */
 const COHERENT_DOWNSTREAM: Record<WorkflowNodeType, WorkflowNodeType[]> = {
-  text: ['image', 'video', 'llmConfig'],
+  text: ['image', 'video', 'llmConfig', 'script'],
   llmConfig: ['image', 'video', 'llmConfig'],
+  script: ['image', 'video'],
   image: ['image', 'video'],
   // 素材给下游当参考图 / 首帧，和图片节点的下游一致
   asset: ['image', 'video'],

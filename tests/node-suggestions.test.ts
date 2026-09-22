@@ -39,16 +39,17 @@ console.log('\n【1】展示信息覆盖全部节点类型，且展示顺序稳�
     image: types.includes('image'),
     video: types.includes('video'),
     llmConfig: types.includes('llmConfig'),
+    script: types.includes('script'),
   }
-  check('四类节点都有展示信息', coverage, { text: true, image: true, video: true, llmConfig: true })
-  check('展示顺序固定为 文本/图片/视频/LLM/素材', types, ['text', 'image', 'video', 'llmConfig', 'asset'])
+  check('五类节点都有展示信息', coverage, { text: true, image: true, video: true, llmConfig: true, script: true })
+  check('展示顺序固定为 文本/图片/视频/LLM/剧本/素材', types, ['text', 'image', 'video', 'llmConfig', 'script', 'asset'])
   check('每项都有名字和图标', NODE_TYPE_PRESENTATION.every(i => !!i.name && !!i.icon && !!i.color), true)
   check('能按类型取到展示信息', getNodeTypePresentation('image')?.name, '图片生成')
 }
 
 console.log('\n【2】从右侧拖出（下游）：只给「下游真的会读这个输入」的类型')
 {
-  check('文本 → 图片/视频/LLM', suggestNodeTypes('text', 'downstream'), ['image', 'video', 'llmConfig'])
+  check('文本 → 图片/视频/LLM/剧本', suggestNodeTypes('text', 'downstream'), ['image', 'video', 'llmConfig', 'script'])
   check('LLM → 图片/视频/LLM（可链式）', suggestNodeTypes('llmConfig', 'downstream'), ['image', 'video', 'llmConfig'])
   check('图片 → 图片/视频', suggestNodeTypes('image', 'downstream'), ['image', 'video'])
   // 视频产出的成片目前没有任何节点会读，所以不该给出候选，也不该弹菜单
@@ -57,11 +58,14 @@ console.log('\n【2】从右侧拖出（下游）：只给「下游真的会读�
 
 console.log('\n【3】从左侧拖出（上游）：新节点会变成上游，候选要反查')
 {
-  // 会读上游文本与参考图的：图片、视频
-  check('图片的上游 → 文本/LLM/图片/素材', suggestNodeTypes('image', 'upstream'), ['text', 'image', 'llmConfig', 'asset'])
-  check('视频的上游 → 文本/LLM/图片/素材', suggestNodeTypes('video', 'upstream'), ['text', 'image', 'llmConfig', 'asset'])
-  // 会读上游文本的：LLM 节点（链式），所以 LLM 可以接在文本或 LLM 后面
+  // 会读上游文本与参考图的：图片、视频、剧本
+  check('图片的上游 → 文本/LLM/剧本/图片/素材', suggestNodeTypes('image', 'upstream'), ['text', 'image', 'llmConfig', 'script', 'asset'])
+  check('视频的上游 → 文本/LLM/剧本/图片/素材', suggestNodeTypes('video', 'upstream'), ['text', 'image', 'llmConfig', 'script', 'asset'])
+  // 会读上游文本的：LLM（链式）。剧本只吃文本创意，所以文本可以接在剧本前面
   check('LLM 的上游 → 文本/LLM', suggestNodeTypes('llmConfig', 'upstream'), ['text', 'llmConfig'])
+  check('剧本的上游 → 文本', suggestNodeTypes('script', 'upstream'), ['text'])
+  // 剧本产出剧本文本 → 它自己可以往下接图片/视频（这是 B3 要串起的主流程）
+  check('剧本的下游 → 图片/视频', suggestNodeTypes('script', 'downstream'), ['image', 'video'])
   // 文本节点不读上游，所以它没有上游候选
   check('文本没有上游候选', suggestNodeTypes('text', 'upstream'), [])
   // 没有任何节点以视频为输入：所以任何起点都不该给出「视频在上游」的候选

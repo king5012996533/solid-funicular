@@ -171,9 +171,9 @@ console.log('\n【3】需要的基础图标都在')
 console.log('\n【4】node-suggestions 的展示信息接上了图标模块')
 {
   // 顺序是菜单稳定性的依赖，所以逐个列出来断言；新增类型必须显式改这一行
-  check('展示顺序固定为 文本/图片/视频/LLM/素材',
-    NODE_TYPE_PRESENTATION.map(item => item.type), ['text', 'image', 'video', 'llmConfig', 'asset'])
-  check('恰好五类节点', NODE_TYPE_PRESENTATION.length, 5)
+  check('展示顺序固定为 文本/图片/视频/LLM/剧本/素材',
+    NODE_TYPE_PRESENTATION.map(item => item.type), ['text', 'image', 'video', 'llmConfig', 'script', 'asset'])
+  check('恰好六类节点', NODE_TYPE_PRESENTATION.length, 6)
 
   const iconPool = new Set<string>(Object.values(CANVAS_ICONS))
   check('每个 icon 都是图标模块里的真实路径',
@@ -185,6 +185,7 @@ console.log('\n【4】node-suggestions 的展示信息接上了图标模块')
       image: getCanvasIcon('image'),
       video: getCanvasIcon('video'),
       llmConfig: getCanvasIcon('llm'),
+      script: getCanvasIcon('llm'),
       asset: getCanvasIcon('folder'),
     })
   check('icon 与 color 仍然是字符串',

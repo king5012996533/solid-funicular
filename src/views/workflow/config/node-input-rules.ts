@@ -61,10 +61,17 @@ export const NODE_INPUT_SPECS: Record<WorkflowNodeType, NodeInputSpec> = {
     optional: ['text', 'image'],
     emptyHint: '连接图片节点作为首帧，或直接描述画面生成',
   },
+  // LLM 节点：文本当输入、图片当参考素材，都是可选
   llmConfig: {
     required: [],
-    optional: ['text'],
+    optional: ['text', 'image'],
     emptyHint: '连接文本节点作为输入，或直接写系统提示词',
+  },
+  // 剧本节点：输入规则与 LLM 相同，产出更长的分集文本
+  script: {
+    required: [],
+    optional: ['text', 'image'],
+    emptyHint: '连接文本节点写下创意，或直接写系统提示词生成分集剧本',
   },
   // 素材节点是上游来源，不消费别的节点
   asset: {
@@ -96,7 +103,7 @@ export interface EdgeLike {
 export const readUpstreamKind = (node?: UpstreamNodeLike): NodeInputKind | null => {
   if (!node) return null
 
-  if (node.type === 'text' || node.type === 'llmConfig') {
+  if (node.type === 'text' || node.type === 'llmConfig' || node.type === 'script') {
     // 文本节点看 content，LLM 节点看它生成的 outputContent
     const value = node.type === 'text'
       ? String((node.data as { content?: string } | undefined)?.content || '').trim()
