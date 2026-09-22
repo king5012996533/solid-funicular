@@ -59,3 +59,39 @@ export const appendAutoLinkedTokens = (input: AutoLinkInput): AutoLinkResult => 
     tokens,
   }
 }
+
+/**
+ * 参考图合并：把「用户自己的」与「上游自动带的」合成一份有效清单。
+ *
+ * **这里对应的是一个真实 bug**：早先上游参考图直接并进同一个数组，合并之后就分不出
+ * 哪张是用户自己传的、哪张是上游自动来的 —— 于是关掉 AutoLink 再提交，
+ * 请求体里照样带着上游那张（实测：开关关掉后 `referenceImages` 仍然非空）。
+ *
+ * 所以合并必须**同时返回「哪些是上游来的」**，调用方才能在下一次合并时把它们摘干净，
+ * 而不误伤用户自己传的。用户的显式上传永远保留，不受开关影响。
+ */
+export interface MergeReferenceImagesInput {
+  /** 用户自己上传的（已排除上一次合并进来的上游那份） */
+  own: string[]
+  /** 上游塞进来的原始清单 */
+  external: string[]
+  /** AutoLink 开关状态 */
+  enabled: boolean
+  /** 上限（与 UI 一致） */
+  limit: number
+}
+
+export interface MergeReferenceImagesResult {
+  /** 有效清单：用户那份 + （开关打开时的）上游那份 */
+  effective: string[]
+  /** 本次实际并进去的上游部分 —— 下次合并要按它摘掉 */
+  mergedExternal: string[]
+}
+
+export const mergeReferenceImages = (input: MergeReferenceImagesInput): MergeReferenceImagesResult => {
+  const limit = Number(input.limit) > 0 ? Math.floor(input.limit) : 0
+  const own = input.own.filter(Boolean)
+  const mergedExternal = input.enabled ? input.external.filter(Boolean) : []
+  const effective = limit ? [...own, ...mergedExternal].slice(0, limit) : [...own, ...mergedExternal]
+  return { effective, mergedExternal: limit ? mergedExternal.slice(0, limit) : mergedExternal }
+}

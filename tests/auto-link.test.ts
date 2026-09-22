@@ -6,7 +6,7 @@
  *   开 → 带；关 → 一个都不带；已经显式 @ 过的不重复带。
  */
 
-import { appendAutoLinkedTokens, pickAutoLinkedAssets } from '../src/components/generate/auto-link'
+import { appendAutoLinkedTokens, mergeReferenceImages, pickAutoLinkedAssets } from '../src/components/generate/auto-link'
 
 let passed = 0
 let failed = 0
@@ -90,6 +90,50 @@ console.log('\n【6】空输入时不会留下一个孤零零的 token')
   check('前缀空格被 trim 掉', result.prompt, '@图片1')
 }
 
+console.log('\n【7】参考图合并：关掉开关必须摘掉上游那份（这是实测踩到的 bug）')
+{
+  const own = ['/upload/user.png']
+  const external = ['/upstream/from-node-1.png']
+
+  check('开着：用户那份 + 上游那份', mergeReferenceImages({ own, external, enabled: true, limit: 9 }), {
+    effective: ['/upload/user.png', '/upstream/from-node-1.png'],
+    mergedExternal: ['/upstream/from-node-1.png'],
+  })
+  check('关掉：只剩用户那份，上游那张不进请求体', mergeReferenceImages({ own, external, enabled: false, limit: 9 }), {
+    effective: ['/upload/user.png'],
+    mergedExternal: [],
+  })
+  check('关掉但用户没传图 → 一份都不带', mergeReferenceImages({ own: [], external, enabled: false, limit: 9 }), {
+    effective: [],
+    mergedExternal: [],
+  })
+  check('用户显式上传的那份不受开关影响', mergeReferenceImages({ own, external: [], enabled: false, limit: 9 }).effective, ['/upload/user.png'])
+}
+
+console.log('\n【8】重复合并不会把上游那张叠成两份')
+{
+  // 第一次合并（开着）→ 拿到 effective 与 mergedExternal
+  const first = mergeReferenceImages({ own: ['/upload/a.png'], external: ['/up.png'], enabled: true, limit: 9 })
+  // 第二次合并前，调用方按 mergedExternal 把上游那份从 effective 里排掉再传进来（组件里的做法）
+  const ownNext = first.effective.filter(url => !first.mergedExternal.includes(url))
+  const second = mergeReferenceImages({ own: ownNext, external: ['/up.png'], enabled: true, limit: 9 })
+  check('两次合并结果一致', second.effective, first.effective)
+  check('上游部分不会重复', second.effective.filter(u => u === '/up.png').length, 1)
+  // 再关掉：上游那份被摘掉，用户那张留下
+  const third = mergeReferenceImages({ own: ownNext, external: ['/up.png'], enabled: false, limit: 9 })
+  check('关掉后只剩用户那张', third.effective, ['/upload/a.png'])
+}
+
+console.log('\n【9】上限仍然生效（合并不能突破张数限制）')
+{
+  const own = Array.from({ length: 8 }, (_, i) => `/own-${i}.png`)
+  const external = Array.from({ length: 5 }, (_, i) => `/ext-${i}.png`)
+  const merged = mergeReferenceImages({ own, external, enabled: true, limit: 9 })
+  check('总数为上限 9', merged.effective.length, 9)
+  check('上游部分也被截到上限内', merged.mergedExternal.length <= 9, true)
+}
+
 console.log(`\n${'─'.repeat(52)}`)
 console.log(`  通过 ${passed} / 失败 ${failed}`)
 process.exit(failed ? 1 : 0)
+

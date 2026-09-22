@@ -10,7 +10,7 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 // 导入子组件
 import { TypeSelector, type CreationType } from './selectors'
 import { AgentToolbar, ImageToolbar, VideoToolbar, DigitalHumanToolbar } from './toolbars'
-import { appendAutoLinkedTokens, type AutoLinkInput } from './auto-link'
+import { appendAutoLinkedTokens, mergeReferenceImages, type AutoLinkInput } from './auto-link'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
 import {
   probeReferenceUrls,
@@ -238,6 +238,29 @@ watch(autoValidateReferences, (on) => {
 })
 
 const imageReferenceImages = ref<string[]>([])
+/**
+ * 上游塞进来的参考图（未合并前的原始清单）与「已合并进 imageReferenceImages 的那部分」。
+ *
+ * 为什么要记来源：合并之后两类参考图长得一模一样，分不出「用户自己传的」和「上游自动带的」，
+ * 于是关掉 AutoLink 也拦不住上游图 —— **实测踩到过**（关了开关再提交，请求体里照样带着上游图）。
+ * 有这两个清单才能做到「关开关 = 只摘掉上游那份，用户自己传的一张不动」。
+ */
+const externalReferenceUrls = ref<string[]>([])
+const externalMergedUrls = ref<string[]>([])
+
+/** 按当前开关状态把两类参考图合成一份有效清单（规则在 auto-link.ts，带单测） */
+const syncImageReferences = () => {
+  const mergedBefore = new Set(externalMergedUrls.value)
+  const { effective, mergedExternal } = mergeReferenceImages({
+    // 用户自己的（含手动上传）：排掉上一次合并进来的上游那份
+    own: imageReferenceImages.value.filter(url => !mergedBefore.has(url)),
+    external: externalReferenceUrls.value,
+    enabled: autoLinkEnabled.value,
+    limit: IMAGE_REFERENCE_LIMIT,
+  })
+  externalMergedUrls.value = mergedExternal
+  imageReferenceImages.value = effective
+}
 const videoFirstFrameImage = ref('')
 const videoLastFrameImage = ref('')
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -247,20 +270,13 @@ const videoFirstFrameInputRef = ref<HTMLInputElement | null>(null)
 const videoLastFrameInputRef = ref<HTMLInputElement | null>(null)
 const IMAGE_REFERENCE_LIMIT = 9
 
-// 外部塞入的参考图（如节点画布把上游连线的图作为参考图）→ 同步进 imageReferenceImages
-// 用 deep 监听，让 ImageNode 切换上游连线时实时反映到输入框
+// 外部塞入的参考图（如节点画布把上游连线的图作为参考图）→ 按 AutoLink 开关同步进 imageReferenceImages
+// 用 deep 监听，让 ImageNode 切换上游连线时实时反映到输入框；开关状态变化时也要重算
 watch(
-  () => props.externalReferenceImages,
-  (urls) => {
-    if (!Array.isArray(urls)) return
-    const normalized = urls.filter(Boolean).slice(0, IMAGE_REFERENCE_LIMIT)
-    // 仅在差异时写入，避免循环
-    const same =
-      normalized.length === imageReferenceImages.value.length &&
-      normalized.every((u, i) => u === imageReferenceImages.value[i])
-    if (!same) {
-      imageReferenceImages.value = normalized
-    }
+  [() => props.externalReferenceImages, autoLinkEnabled],
+  ([urls]) => {
+    externalReferenceUrls.value = Array.isArray(urls) ? urls.filter(Boolean) : []
+    syncImageReferences()
   },
   { immediate: true, deep: true },
 )
@@ -321,10 +337,11 @@ const currentType = ref<CreationType>(props.initialCreationType ?? storedCreatio
 // 视频模式：外部参考图按位置映射成首帧 / 尾帧，
 // 这样图片节点连到视频节点时首帧是自动带上的，不用手动再传一次。
 watch(
-  [() => props.externalReferenceImages, currentType],
+  [() => props.externalReferenceImages, currentType, autoLinkEnabled],
   ([urls, type]) => {
     if (type !== 'video' || !Array.isArray(urls)) return
-    const normalized = urls.filter(Boolean)
+    // 关了 AutoLink 就不自动带首尾帧 —— 与图片参考图同一条语义
+    const normalized = autoLinkEnabled.value ? urls.filter(Boolean) : []
     const first = String(normalized[0] || '')
     const last = String(normalized[1] || '')
     if (first !== videoFirstFrameImage.value) videoFirstFrameImage.value = first
@@ -1329,6 +1346,12 @@ const handleImageReferenceChange = async (event: Event) => {
 }
 
 const removeImageReference = (index: number) => {
+  const removed = imageReferenceImages.value[index]
+  if (removed) {
+    // 用户亲手删掉的、哪怕是上游合并进来的那张，也不该在重新打开开关后自己长回来
+    externalMergedUrls.value = externalMergedUrls.value.filter(url => url !== removed)
+    externalReferenceUrls.value = externalReferenceUrls.value.filter(url => url !== removed)
+  }
   imageReferenceImages.value = imageReferenceImages.value.filter((_, currentIndex) => currentIndex !== index)
 }
 
