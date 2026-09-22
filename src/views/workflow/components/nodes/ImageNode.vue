@@ -42,7 +42,13 @@ import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
-import { createGenerationTask, subscribeGenerationTaskEvents, resolveGenerationTaskModel } from '@/api/generation-tasks'
+import {
+  createGenerationTask,
+  getGenerationTask,
+  subscribeGenerationTaskEvents,
+  resolveGenerationTaskModel,
+  type GenerationTaskStreamEvent,
+} from '@/api/generation-tasks'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 
 const props = defineProps<{
@@ -312,6 +318,33 @@ const openImagePreview = (url?: unknown) => {
 onMounted(() => {
   void loadPublicModelCatalog()
 })
+
+/**
+ * 对账必须**观察 loading 的变化**，不能在 onMounted 里跑一次就完。
+ *
+ * 工作流定义是异步加载的：定义一到达就会整体替换 nodes，把挂载时的改动冲掉
+ * （实测：node_3 的对账结果就这么被覆盖，节点回到空态、用户依旧看不到任何解释）。
+ * 这里按 taskId 去重，避免同一个任务反复对账。
+ */
+const reconciledTaskKey = ref('')
+watch(
+  () => [props.data?.loading, props.data?.taskRecordId, props.data?.submittedAt] as const,
+  ([loading, taskId, submittedAt]) => {
+    if (!loading) return
+    const key = `${String(taskId || '')}#${Number(submittedAt || 0)}`
+    if (reconciledTaskKey.value === key) return
+    reconciledTaskKey.value = key
+    // 判断与对账都放到下一个 tick：
+    //   · `isGenerating` / `taskStreamController` 在本文件里声明得更晚，
+    //     在 immediate 回调里同步读会撞上 TDZ —— **实测把整个节点组件 setup 打挂、节点从画布上消失**；
+    //   · 顺手让工作流定义先加载完（异步到达的定义会整体替换 nodes）。
+    setTimeout(() => {
+      if (isGenerating.value || taskStreamController.value) return
+      void reconcileInterruptedRun()
+    }, 200)
+  },
+  { immediate: true, flush: 'post' },
+)
 // 上游图片素材 → 作为图生图参考图（直接拿 url 数组）
 // 注意：上游图生图模型（如 gpt-image-2）只接受栅格格式，SVG/PDF/HEIC 等会让 PIL 在
 // BytesIO 解码时报 "cannot identify image file"，必须在客户端过滤掉。
@@ -429,6 +462,245 @@ const handleParamsChange = (params: GeneratorParamsSnapshot) => {
 // ContentGenerator 发送：用上游图作为参考 + 用户 prompt 调图生图，结果回填到当前节点
 const isGenerating = ref(false)
 const taskStreamController = ref<AbortController | null>(null)
+/**
+ * 生成等待上限。
+ *
+ * 超过就判失败 —— 节点**绝不能永远转圈**：用户看着一个不动的圈，既不知道要不要继续等、
+ * 也没法重试，比直接看到失败更焦虑。失败态是可操作的（下面给了「重试 / 放弃」）。
+ */
+const GENERATION_DEADLINE_MS = 15 * 60 * 1000
+let deadlineTimer: ReturnType<typeof setTimeout> | null = null
+const clearDeadline = () => {
+  if (deadlineTimer) {
+    clearTimeout(deadlineTimer)
+    deadlineTimer = null
+  }
+}
+
+/** 统一失败出口：停订阅、停计时、落可重试的错误态 */
+const failRun = (message: string) => {
+  clearDeadline()
+  taskStreamController.value?.abort()
+  isGenerating.value = false
+  isLoading.value = false
+  errorMsg.value = message
+  updateNode(props.id, { loading: false, error: message })
+}
+
+/**
+ * 终态与快照统一落盘：提交路径与「刷新后对账」共用同一份判断，
+ * 两处各写一遍必然漂移（这也是这次 bug 的成因之一）。
+ */
+const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
+  if (event.type === 'snapshot' || event.type === 'completed') {
+    const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+    if (urls.length) {
+      clearDeadline()
+      updateNode(props.id, {
+        url: urls[0],
+        loading: false,
+        error: '',
+        executed: true,
+        submittedAt: 0,
+        ...(urls.length > 1
+          ? {
+              isBatchRoot: true,
+              primaryImageId: 'primary',
+              batchChildren: urls.map((url, index) => ({ id: index === 0 ? 'primary' : `child_${index}`, url })),
+            }
+          : {}),
+      })
+      isGenerating.value = false
+    }
+    return
+  }
+  if (event.type === 'failed') {
+    failRun(String(event.message || event.record?.error || '图片生成失败'))
+    return
+  }
+  if (event.type === 'stopped') failRun('任务已停止，可以重试')
+}
+
+const startDeadline = (submittedAt: number) => {
+  clearDeadline()
+  const remaining = submittedAt + GENERATION_DEADLINE_MS - Date.now()
+  deadlineTimer = setTimeout(
+    () => failRun('生成等待超时（长时间没有任何结果），可以重试'),
+    Math.max(1000, remaining),
+  )
+}
+
+/** 提交与重试共用的核心：建任务 → **立刻落 taskId/提示词** → 订阅 → 挂超时兜底 */
+const runGeneration = async (input: {
+  prompt: string
+  refImages: string[]
+  modelKey: string
+  ratio?: string
+  resolution?: string
+  count?: number
+}) => {
+  isGenerating.value = true
+  taskStreamController.value?.abort()
+  updateNode(props.id, { loading: true, error: '' })
+  const submittedAt = Date.now()
+  try {
+    const { providerId, modelKey } = resolveGenerationTaskModel({
+      modelKey: input.modelKey,
+      fallbackModelKey: input.modelKey,
+      category: 'IMAGE',
+      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+    })
+    const requestBody: Record<string, unknown> = {
+      model: modelKey,
+      prompt: input.prompt,
+      n: Math.max(1, Math.min(8, Number(input.count) || 1)),
+      providerId,
+    }
+    // 尺寸与画质都来自模型能力，这里只负责透传
+    if (input.ratio) requestBody.size = input.ratio
+    if (input.resolution) requestBody.quality = input.resolution
+    const hasRef = input.refImages.length > 0
+    const finalBody = hasRef ? appendImageReferencesToRequestBody(requestBody, input.refImages) : requestBody
+
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'image',
+      requestMode: hasRef ? 'image-edit' : 'image-generation',
+      prompt: input.prompt,
+      modelKey,
+      ratio: input.ratio,
+      resolution: input.resolution,
+      referenceImages: hasRef ? [...input.refImages] : [],
+      requestBody: finalBody,
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('图片任务创建失败')
+
+    // 提交时就落库：id 用于「刷新后对账」，提示词与参数用于「重试」。
+    // 早先只在完成时才写 id —— 生成中刷新一次，节点就永远转圈（实测两次都这样）。
+    updateNode(props.id, {
+      prompt: input.prompt,
+      referenceImages: hasRef ? [...input.refImages] : [],
+      model: modelKey,
+      size: input.ratio,
+      quality: input.resolution,
+      taskRecordId: taskId,
+      submittedAt,
+      loading: true,
+      error: '',
+    })
+
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    startDeadline(submittedAt)
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: applyTaskEvent,
+    })
+  } catch (err: unknown) {
+    console.error('[ImageNode] generation failed', err)
+    failRun(err instanceof Error ? err.message : '图片生成失败')
+  }
+}
+
+/**
+ * 刷新页面后对账：节点上残留的 loading 是**持久化下来的**，不对账就永远转圈。
+ *
+ * 实测：两次生成在服务端都是 `done: true` 且图片已存好，画布上却一直转 ——
+ * 因为订阅随刷新丢了，而节点既没留任务 id、也没人去查。
+ */
+const reconcileInterruptedRun = async () => {
+  if (!isLoading.value) return
+  const taskId = String(props.data?.taskRecordId || '').trim()
+  const submittedAt = Number(props.data?.submittedAt || 0)
+  /**
+   * 只信任「提交时写下的」id，也就是带 submittedAt 的那种。
+   *
+   * 遗留数据里可能有**上一次**生成留下的 id（旧版只在完成时写 id），
+   * 拿它对账会把上一轮的结果落到这一轮上 —— 实测发生过：节点凭空显示了一张旧图。
+   * 宁可给出可重试的失败态，也不要落一张来路不对的图。
+   */
+  if (!taskId || !submittedAt) {
+    failRun('上次生成中断了（任务信息不完整），可以重试')
+    return
+  }
+  if (Date.now() - submittedAt > GENERATION_DEADLINE_MS) {
+    failRun('上次生成等待超时，可以重试')
+    return
+  }
+  try {
+    const record = await getGenerationTask(taskId)
+    if (record?.done) {
+      const urls = Array.isArray(record.images) ? record.images.filter(Boolean) : []
+      if (urls.length) {
+        applyTaskEvent({ type: 'completed', record } as GenerationTaskStreamEvent)
+        return
+      }
+      failRun('上次生成没有产出结果，可以重试')
+      return
+    }
+    if (record?.stopped) { failRun('任务已停止，可以重试'); return }
+    if (record?.error) { failRun(String(record.error)); return }
+    // 还在跑：重新订阅跟着它走，并挂上超时兜底（而不是干等）
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    startDeadline(submittedAt || Date.now())
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: applyTaskEvent,
+    })
+  } catch (err: unknown) {
+    failRun(err instanceof Error ? err.message : '无法获取任务状态，可以重试')
+  }
+}
+
+/**
+ * 失败后重试：用**任务记录里那次真实提交的正文**与参数原样重跑。
+ *
+ * 为什么以记录为准而不是节点上的 `prompt`：实测发现节点上那份可能被清成空串
+ * （同一批写入里 `taskRecordId` 落盘了、`prompt` 是空，原因未查明），
+ * 而任务记录里存的永远是那次提交的原文 —— 拿它重试才是「原样重跑」。
+ *
+ * 另外**不再走 composeFinalPrompt**：那份正文已经合并过上游文本，再拼一次会说两遍。
+ */
+const retryLastRun = async () => {
+  const taskId = String(props.data?.taskRecordId || '').trim()
+  let prompt = String(props.data?.prompt || '').trim()
+  let refImages = (Array.isArray(props.data?.referenceImages) ? props.data.referenceImages : [])
+    .filter(isRasterReferenceUrl)
+
+  if ((!prompt || !refImages.length) && taskId) {
+    try {
+      const record = await getGenerationTask(taskId)
+      if (!prompt) prompt = String(record?.prompt || '').trim()
+      const media = Array.isArray(record?.referenceImages) ? record.referenceImages.filter(Boolean) : []
+      if (!refImages.length && media.length) refImages = media.filter(isRasterReferenceUrl)
+    } catch {
+      // 取不到就退回下面的「请重新输入」，不静默失败
+    }
+  }
+
+  if (!prompt) {
+    dismissError()
+    ElMessage.info('没有可重试的提示词，请重新输入')
+    return
+  }
+  void runGeneration({
+    prompt,
+    refImages,
+    modelKey: String(props.data?.model || '').trim(),
+    ratio: String(props.data?.size || '') || undefined,
+    resolution: String(props.data?.quality || '') || undefined,
+    count: 1,
+  })
+}
+
+/** 放弃这次生成：回到空态，用户可以重新写提示词 */
+const dismissError = () => {
+  errorMsg.value = ''
+  updateNode(props.id, { error: '', loading: false, taskRecordId: '', submittedAt: 0 })
+}
+
 const handlePromptSend = async (
   message: string,
   _type?: string,
@@ -575,7 +847,14 @@ watch(
       <div v-if="showLoading" class="image-node-loading" aria-label="图片生成中">
         <div class="image-node-spinner" />
       </div>
-      <div v-else-if="showError" class="image-node-error" role="alert">{{ errorMsg }}</div>
+      <!-- 失败态必须可操作：一直转圈会让用户既不敢走也不知道能不能等（用户反馈原话） -->
+      <div v-else-if="showError" class="image-node-error" role="alert">
+        <div class="image-node-error-text">{{ errorMsg }}</div>
+        <div class="image-node-error-actions">
+          <button type="button" class="image-node-error-btn is-primary nodrag nopan" @click.stop="retryLastRun">重试</button>
+          <button type="button" class="image-node-error-btn nodrag nopan" @click.stop="dismissError">放弃</button>
+        </div>
+      </div>
       <img v-else-if="showImage" :src="imageUrl" alt="生成图片" class="image-node-image" @dblclick.stop="openImagePreview()" />
 
       <!-- 角标盖在图上，不吃鼠标事件（不挡双击预览与拖拽） -->
@@ -651,7 +930,39 @@ watch(
 .image-node-card { position: relative; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
 .image-node-card.is-selected { border-color: var(--canvas-node-border-selected); }
 .image-node-loading, .image-node-error { display: grid; place-items: center; width: 100%; height: 100%; }
-.image-node-error { padding: 12px; color: #ef4444; font-size: 12px; line-height: 18px; text-align: center; box-sizing: border-box; }
+.image-node-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  color: #ef4444;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  box-sizing: border-box;
+}
+.image-node-error-text { max-width: 100%; word-break: break-word; }
+.image-node-error-actions { display: inline-flex; align-items: center; gap: 8px; }
+.image-node-error-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--canvas-node-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.image-node-error-btn:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
+.image-node-error-btn.is-primary {
+  border-color: transparent;
+  background: var(--brand-main-default);
+  color: #fff;
+}
+.image-node-error-btn.is-primary:hover { filter: brightness(1.08); color: #fff; }
 .image-node-spinner { width: 18px; height: 18px; border: 2px solid var(--stroke-secondary); border-top-color: var(--brand-main-default); border-radius: 50%; animation: image-node-spin 0.8s linear infinite; }
 @keyframes image-node-spin { to { transform: rotate(360deg); } }
 /* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，

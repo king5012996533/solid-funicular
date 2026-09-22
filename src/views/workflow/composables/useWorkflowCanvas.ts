@@ -38,6 +38,13 @@ export interface WorkflowNodeDataBase {
   loading?: boolean
   error?: string
   taskRecordId?: string
+  /**
+   * 本次生成的提交时间（毫秒）。
+   *
+   * 配合 `loading` 用来做「刷新后对账」：生成中刷新页面时，节点上残留的 loading 是持久化的，
+   * 没有这个时间戳就只能永远转圈（实测两次：服务端都已 done 且出了图，画布还在转）。
+   */
+  submittedAt?: number
   autoExecute?: boolean
   executed?: boolean
   outputNodeId?: string
@@ -61,6 +68,8 @@ export interface WorkflowTextNodeData extends WorkflowNodeDataBase {
 export interface WorkflowGenerationParamsData {
   /** 图生图/图生视频时用户额外补充的提示词，与上游文本拼接后提交 */
   prompt?: string
+  /** 本次提交实际带上的参考图（用于失败后「重试」原样重跑） */
+  referenceImages?: string[]
   /** 模型目录里的 selectionKey */
   model?: string
   size?: string
