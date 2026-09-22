@@ -9,6 +9,13 @@
  * 这个脚本按上游文档填入几条真实的模型能力声明，让目录可用、可验证。
  * 它只做新增与更新（按 provider.code + model_key 幂等），不删任何东西。
  *
+ * **注意：它种的模型默认是禁用的**（`isEnabled: false`）。
+ * 原因是这里四个厂商（火山方舟 / Nano Banana / 可灵 —— 图片与视频共 4 个模型）
+ * 都没配密钥，启用只会在模型下拉里造出几个"选中必然失败"的选项。
+ * 正确用法：跑这个脚本声明能力 → 在后台给要用的厂商配上密钥 →
+ * 把对应模型打开。想让目录里立刻有可用模型，得配的是**真有密钥**的厂商。
+ * 这条是踩过的坑：之前写成 isEnabled: true，用户看到下拉里一堆点不通的占位符。
+ *
  * 用法：
  *   node scripts/seed-model-catalog.mjs            # 幂等写入 / 更新
  *   node scripts/seed-model-catalog.mjs --dry-run  # 只打印将要写入的内容
@@ -256,7 +263,11 @@ const main = async () => {
         capabilityJson: model.capabilityJson,
         defaultParamsJson: model.defaultParamsJson,
         sortOrder: model.sortOrder,
-        isEnabled: true,
+        // 默认**不启用**。这里种的是"能力声明"（可选尺寸/画质/比例/时长），
+        // 而它对应的厂商——火山方舟 / Nano Banana / 可灵——都没配密钥。
+        // 启用它们只会让模型下拉里多出几个"选中必然失败"的选项（用户已经把这些
+        // 当成占位符要求清掉了）。给某个厂商配好密钥之后，在后台把它的模型打开即可。
+        isEnabled: false,
         isBuiltIn: false,
       }
       if (existing) {

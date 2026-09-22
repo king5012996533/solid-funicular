@@ -303,6 +303,18 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
 分组的令牌。分组是绑在令牌上的，不是绑在账号上的，所以改 Token 即可，不用改代码。
 拿到新 Key 后只需在后台「厂商配置」里新增一个厂商，B1/B3 就能接。
 
+**占位模型已从下拉里清掉**（2026-09-22）：`doubao-seedream-4-5-251128`（Seedream 4.5）
+与 `nano-banana-pro`（Nano Banana Pro）这两个没有密钥的模型**已禁用**（不是删除 ——
+标签与能力声明都留着，将来给这两个厂商配上密钥，在后台一键启用即可）。
+禁用即从下拉消失：目录查询本身就是 `models: { where: { isEnabled: true } }`。
+现在图片下拉只剩 `GPT Image 2` / `GPT Image 2.5`，默认仍是前者。
+
+**同时堵住来源**：`scripts/seed-model-catalog.mjs` 原本把 4 个演示模型的 `isEnabled`
+写成 `true`，谁重跑一次就又把占位符塞回下拉 —— 已改成默认禁用，并把原因写进脚本头。
+
+**仍留着的同类占位**（用户只点名了图片那两个，这两个视频的没动）：`Seedance 1.0`
+（volcengine-ark）与 `Kling v2`（kling）—— 同样没密钥，且视频本身就被 Key 分组挡着。
+
 **图生图已实测可用**（这是电商出图的主路径，不依赖上面的解锁）：
 `POST /v1/images/edits` 用 gpt-image-2 + 参考图 → 200 / 89 秒 / 返回 `b64_json`；
 走应用自己的后端（`requestMode=image-edit`）→ 90 秒完成、落盘。
