@@ -34,6 +34,7 @@
         :prompt-tip-label="workDetailPromptTipLabel"
         :model-label="workDetailModelLabel"
         :aspect-ratio-label="workDetailAspectRatioLabel"
+        :size-key="workDetailSizeKey"
         :gallery-length="workDetailGallery.length"
         @gallery-nav="handleGalleryNav"
         @favorite="handleWorkDetailFavorite"
@@ -105,7 +106,7 @@ const workDetailOwnerId = computed(() => {
 const workDetailLikeCount = computed(() => {
   const g = workDetailGallery.value
   const i = workDetailGalleryIndex.value
-  return g[i]?.favoriteCount ?? 999
+  return g[i]?.favoriteCount ?? 0
 })
 
 const currentWorkDetailAssetId = computed(() => {
@@ -117,7 +118,7 @@ const currentWorkDetailAssetId = computed(() => {
 const workDetailCreateDate = computed(() => {
   const g = workDetailGallery.value
   const i = workDetailGalleryIndex.value
-  return g[i]?.detail?.createDate || '2026-04-16'
+  return g[i]?.detail?.createDate || ''
 })
 
 const workDetailAiGeneratedText = computed(() => {
@@ -135,13 +136,20 @@ const workDetailPromptTipLabel = computed(() => {
 const workDetailModelLabel = computed(() => {
   const g = workDetailGallery.value
   const i = workDetailGalleryIndex.value
-  return g[i]?.detail?.modelLabel || '图片 4.1'
+  return g[i]?.detail?.modelLabel || ''
+})
+
+/** 「做同款」要用的画幅 key（真实尺寸串，如 1536x1024） */
+const workDetailSizeKey = computed(() => {
+  const g = workDetailGallery.value
+  const i = workDetailGalleryIndex.value
+  return g[i]?.detail?.ratioKey || ''
 })
 
 const workDetailAspectRatioLabel = computed(() => {
   const g = workDetailGallery.value
   const i = workDetailGalleryIndex.value
-  return g[i]?.detail?.aspectRatioLabel || '9:16'
+  return g[i]?.detail?.aspectRatioLabel || ''
 })
 
 /**

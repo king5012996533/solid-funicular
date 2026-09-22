@@ -209,6 +209,7 @@ import { listAssetItems } from '@/api/asset-items'
 import { AUTH_LOGIN_SUCCESS_EVENT } from '@/stores/auth'
 import { buildAssetUrl } from '@/api/http'
 import discoverContent from '@/data/homeDiscoverContent.json'
+import { describeAspectRatio } from '@/config/model-params'
 
 const emit = defineEmits(['open-work-detail'])
 
@@ -258,8 +259,15 @@ const buildFeedItemFromAsset = (item) => ({
     createDate: item.createdAt,
     aiGeneratedText: '内容由 AI 生成',
     promptTipLabel: '图片提示词',
-    modelLabel: item.modelLabel || '图片模型',
-    aspectRatioLabel: item.aspectRatio || '1:1',
+    /**
+     * 这三行原先都拿 mock 值兜底，结果把假数据当真的显示给用户：
+     *  · modelLabel 兜底成字面量 '图片模型' → 详情面板「图片模型」那一行显示的就是这四个字；
+     *  · aspectRatio 直接把尺寸串（'1536x1024'）当比例显示；
+     *  · 现在：没有就说没有（空字符串 → 面板整行不渲染），比例用 describeAspectRatio 换算。
+     */
+    modelLabel: String(item.modelLabel || '').trim(),
+    aspectRatioLabel: describeAspectRatio(String(item.aspectRatio || '')) || '',
+    ratioKey: String(item.aspectRatio || '').trim(),
   },
 })
 

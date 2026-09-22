@@ -79,6 +79,7 @@
                             :default-expanded="true"
                             initial-creation-type="image"
                             :external-prompt="generatorPromptForSync"
+                            :external-reference-images="inlineReferenceImages"
                             :prompt-sync-key="contentGeneratorPromptSyncKey"
                             popup-placement="top"
                             @send="(...args) => emit('content-send', ...args)"
@@ -278,8 +279,8 @@
                         </div>
                         <div class="work-info-section">
                           <div class="meta-info-wrapper">
-                            <div class="create-time-wrapper">
-                              {{ createDate }}
+                            <div class="create-time-wrapper" :title="createDate">
+                              {{ displayCreateDate }}
                             </div>
                             <div class="ai-generated-text-IHOsIL">{{ aiGeneratedText }}</div>
                           </div>
@@ -305,11 +306,11 @@
                                                                         </span>
                           <span>{{ usePromptLabel }}</span>
                         </button>
-                        <div class="prompt-tags-Ixl0vJ">
-                          <div>{{ modelLabel }}</div>
-                          <span class="divider-RsIwo2"></span>
-                          <div>{{ aspectRatioLabel }}</div>
-                          <span class="divider-RsIwo2"></span><span
+                        <div v-if="hasModelOrRatio" class="prompt-tags-Ixl0vJ">
+                          <div v-if="modelLabel">{{ modelLabel }}</div>
+                          <span v-if="modelLabel && aspectRatioLabel" class="divider-RsIwo2"></span>
+                          <div v-if="aspectRatioLabel">{{ aspectRatioLabel }}</div>
+                          <span v-if="aspectRatioLabel" class="divider-RsIwo2"></span><span
                             class="more-info-label-v4090A"><span
                             class="more-info-label-inner-pYC8kr">更多 <svg
                             width="1em" height="1em" viewBox="0 0 24 24"
@@ -323,7 +324,17 @@
                         </div>
                       </div>
                       <div class="action-buttons-wrapper">
-                        <div tabindex="0" class="operation-button-ZGVDtf">
+                        <!-- 「做同款」：早先是个只有 tabindex 的 div，没有任何处理 → 看着能点、点了没反应。
+                             现在接上真实行为：用同款提示词 + 同款参数直接提交一次生成。 -->
+                        <div
+                          tabindex="0"
+                          role="button"
+                          class="operation-button-ZGVDtf"
+                          :title="`用同款提示词和参数再生成一张`"
+                          @click.stop="handleMakeSame"
+                          @keydown.enter.prevent="handleMakeSame"
+                          @keydown.space.prevent="handleMakeSame"
+                        >
                           <svg width="1em" height="1em" viewBox="0 0 24 24"
                                preserveAspectRatio="xMidYMid meet"
                                fill="none" role="presentation"
@@ -338,7 +349,16 @@
                             </g>
                           </svg>
                           <p class="operation-text">{{ makeSameLabel }}</p></div>
-                        <div tabindex="0" class="operation-button-ZGVDtf">
+                        <!-- 「用作参考图」：同样接上真实行为 —— 把这张图加进下方生成器的参考图列表并展开 -->
+                        <div
+                          tabindex="0"
+                          role="button"
+                          class="operation-button-ZGVDtf"
+                          title="把这张图作为参考图加入下方生成器"
+                          @click.stop="handleUseAsReference"
+                          @keydown.enter.prevent="handleUseAsReference"
+                          @keydown.space.prevent="handleUseAsReference"
+                        >
                           <svg width="1em" height="1em" viewBox="0 0 24 24"
                                preserveAspectRatio="xMidYMid meet"
                                fill="none" role="presentation"
@@ -406,16 +426,19 @@ const props = defineProps({
   ownerId: { type: String, default: '' },
   authorName: { type: String, default: '创作者' },
   authorAvatarSrc: { type: String, default: '' },
-  likeCount: { type: [String, Number], default: 999 },
-  createDate: { type: String, default: '2026-04-16' },
+  likeCount: { type: [String, Number], default: 0 },
+  createDate: { type: String, default: '' },
   aiGeneratedText: { type: String, default: '内容由 AI 生成' },
   promptTipLabel: { type: String, default: '图片提示词' },
   promptText: {
     type: String,
     default: DEFAULT_DETAIL_PROMPT,
   },
-  modelLabel: { type: String, default: '图片 4.1' },
-  aspectRatioLabel: { type: String, default: '9:16' },
+  modelLabel: { type: String, default: '' },
+  /** 作品的真实模型 key / 尺寸 key：「做同款」按这两个参数复现 */
+  modelKey: { type: String, default: '' },
+  sizeKey: { type: String, default: '' },
+  aspectRatioLabel: { type: String, default: '' },
   makeSameLabel: { type: String, default: '做同款' },
   useAsReferenceLabel: { type: String, default: '用作参考图' },
   /** 右侧「使用提示词」，点击后展示底部 ContentGenerator */
@@ -443,6 +466,49 @@ const generatorPromptForSync = computed(() =>
 )
 
 const resolvedAuthorAvatarSrc = computed(() => props.authorAvatarSrc || EMPTY_AVATAR_DATA_URI)
+
+/**
+ * 展示用的创建时间。
+ *
+ * 面板原来直接把后端的 ISO 串（`2026-09-22T15:00:23.984Z`）渲染上屏 —— 实测就是这个。
+ * 这里转成本地可读格式；如果不是能解析的时间（已经是文案），原样返回。
+ */
+const displayCreateDate = computed(() => {
+  const raw = String(props.createDate || '').trim()
+  if (!raw) return ''
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return raw
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+})
+
+/** 模型名与比例都为空时整行不渲染（原来会用 mock 值顶上：'图片 4.1' / '9:16'） */
+const hasModelOrRatio = computed(() => Boolean(String(props.modelLabel || '').trim() || String(props.aspectRatioLabel || '').trim()))
+
+/** 「用作参考图」加进来的那张图 */
+const inlineReferenceImages = ref([])
+
+/** 做同款：用同款提示词 + 同款模型/尺寸直接提交一次生成 */
+const handleMakeSame = async () => {
+  contentGeneratorVisible.value = true
+  await nextTick()
+  void contentGeneratorRef.value?.submitDraft({
+    type: 'image',
+    prompt: generatorPromptForSync.value,
+    modelKey: props.modelKey,
+    ratio: props.sizeKey,
+  })
+}
+
+/** 用作参考图：把当前大图加进生成器的参考图并展开 */
+const handleUseAsReference = async () => {
+  const src = String(props.imageSrc || '').trim()
+  if (!src) return
+  inlineReferenceImages.value = [src]
+  contentGeneratorVisible.value = true
+  await nextTick()
+  contentGeneratorRef.value?.expand()
+}
 const authStore = useAuthStore()
 const isAuthor = computed(() => Boolean(props.ownerId) && authStore.currentUser.value?.id === props.ownerId)
 
