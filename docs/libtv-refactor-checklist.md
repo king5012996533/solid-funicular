@@ -277,6 +277,7 @@
 | 模型 | 端点类型 | 价格 |
 | --- | --- | --- |
 | `gpt-image-2` | openai / image-generation / image-edits | $0.03 |
+| `gpt-image-2.5`（**已接入**） | openai / image-generation / image-edits | $0.04 |
 | `gpt-image-2.5` / `-flare` / `-sunburst` | openai / image-generation / image-edits | $0.04~0.05 |
 | `gemini-3-pro-image-preview`(-c) | gemini / openai | ratio 榜 |
 | `gemini-3.1-flash-image-preview`(-c) | gemini / openai | $0.08~0.15 |
@@ -306,6 +307,14 @@ gpt-绘画4k专用` —— 该组没有任何 chat 模型。
 `POST /v1/images/edits` 用 gpt-image-2 + 参考图 → 200 / 89 秒 / 返回 `b64_json`；
 走应用自己的后端（`requestMode=image-edit`）→ 90 秒完成、落盘。
 提示词「把背景换成纯白电商主图风格，保留产品本身不变」实测**主体保持不变**。
+
+**`gpt-image-2.5` 已接入并实测**（2026-09-22）：
+- 能力探测：三个档位 `1024x1024` / `1536x1024` / `1024x1536` 请求后**返回尺寸与请求完全一致**，
+  即 size 是真被遵守的（另测 `999x999` 返回 `992x992`，说明它按某个网格取整，不是只认那三档）。
+- 走应用后端端到端：`submit-generation.mjs` 指定 `MODEL_KEY=gpt-image-2.5` → 50 秒出图、
+  落成文件、库里 `model_key=gpt-image-2.5`、产物是合法 PNG 1024×1024。
+- 浏览器里模型下拉已出现「GPT Image 2.5」（顺序在 GPT Image 2 之后；**默认仍是 GPT Image 2**）。
+- 计费 $0.04/张（比 2 贵 $0.01）。同一分组下 `-flare` / `-sunburst` 变体**未接入**（用户明确说只接 2.5）。
 
 ### B1. 视频生成策略 `后端`
 - **依据**：`[公告]` Seedance 2.5 / MiniMax H3 Max / Wan 3.0；`[现状]` 服务端 `GenerationTaskStrategyKey` 只有 4 个值，**没有 video**
