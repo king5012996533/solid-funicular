@@ -12,7 +12,6 @@
 import {
   type WorkflowCanvasNode,
   type WorkflowImageNodeData,
-  type WorkflowLlmConfigNodeData,
   type WorkflowTextNodeData,
   type WorkflowVideoNodeData,
 } from './useWorkflowCanvas'
@@ -66,7 +65,7 @@ interface UpstreamAsset {
 /**
  * 一个节点能对外贡献的引用资产。
  *   text      用 content（用户写的）
- *   llmConfig 用 outputContent（LLM 生成的）
+ *   文本节点用 content
  *   image     用 url
  *   video     用 url
  * 其余情况不贡献资产。
@@ -75,9 +74,6 @@ const readNodeAsset = (node: WorkflowCanvasNode): UpstreamAsset | null => {
   const label = String(node.data.label || '').trim()
   if (node.type === 'text') {
     return { kind: 'text', value: String((node.data as WorkflowTextNodeData).content || ''), label }
-  }
-  if (node.type === 'llmConfig' || node.type === 'script') {
-    return { kind: 'text', value: String((node.data as WorkflowLlmConfigNodeData).outputContent || ''), label }
   }
   if (node.type === 'image') {
     return { kind: 'image', value: String((node.data as WorkflowImageNodeData).url || ''), label }

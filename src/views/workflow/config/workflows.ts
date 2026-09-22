@@ -358,10 +358,6 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       const storyId = getId()
       nodes.push({ id: storyId, type: 'text', position: { x: startPosition.x, y: startPosition.y }, data: { content: '【绘本名称】小兔子的冒险之旅\n\n【故事主题】勇气与友谊\n\n【主要角色】\n1. 小白兔米米 - 主角，白色毛发，粉红色耳朵内侧，穿蓝色背带裤\n2. 小狐狸橙橙 - 伙伴，橙色毛发，白色尾巴尖，戴绿色围巾\n\n【故事梗概】\n小白兔米米发现了一张神秘的藏宝图，在好朋友小狐狸橙橙的陪伴下踏上寻宝之旅。\n\n【画风要求】温馨治愈的水彩绘本风格，色彩明亮柔和，适合3-6岁儿童阅读', label: '故事大纲' } })
 
-      // 角色设计 LLM
-      const charLlmId = getId()
-      nodes.push({ id: charLlmId, type: 'llmConfig', position: { x: startPosition.x + col * 2, y: startPosition.y - row }, data: { label: '角色设计生成', systemPrompt: '你是专业的绘本角色设计师。根据故事大纲提取所有角色，为每个角色生成适合图像生成的详细提示词。包含：外貌特征、服装、表情、姿态、背景色。使用绘本水彩风格描述。', model: 'gemini-3-flash-preview', outputFormat: 'text' } })
-
       // 角色1
       const char1PromptId = getId()
       nodes.push({ id: char1PromptId, type: 'text', position: { x: startPosition.x + col * 2.5, y: startPosition.y - row * 1.5 }, data: { content: '可爱的小白兔，白色毛发蓬松柔软，粉红色耳朵内侧，穿着蓝色背带裤，大眼睛明亮有神，全身正面站立，白色简洁背景，儿童绘本水彩风格', label: '角色1:小白兔米米' } })
@@ -373,10 +369,6 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       nodes.push({ id: char2PromptId, type: 'text', position: { x: startPosition.x + col * 2.5, y: startPosition.y - row * 0.5 }, data: { content: '可爱的小狐狸，橙色毛发光泽亮丽，白色尾巴尖，戴着绿色围巾，机灵的眼睛，调皮的微笑，全身正面站立，白色简洁背景，儿童绘本水彩风格', label: '角色2:小狐狸橙橙' } })
       const char2ImgId = getId()
       nodes.push({ id: char2ImgId, type: 'image', position: { x: startPosition.x + col * 3, y: startPosition.y - row * 0.5 }, data: { url: '', label: '主角色2设计图', ...imageParams() } })
-
-      // 第二阶段：剧情拆分
-      const storyLlmId = getId()
-      nodes.push({ id: storyLlmId, type: 'llmConfig', position: { x: startPosition.x + col, y: startPosition.y + row }, data: { label: '剧情拆分(16页)', systemPrompt: '你是专业的绘本编剧。将故事拆分成16页绘本内容。\n\n输出格式：\n第1页：[场景描述] | [画面内容] | [配文]\n...\n第16页：[场景描述] | [画面内容] | [配文]\n\n要求：每页有明确场景和配文，故事节奏合理，配文简洁适合幼儿。', model: 'gpt-4o', outputFormat: 'text' } })
 
       // 第三阶段：示例前4页
       const pages = [
@@ -401,10 +393,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplateDefinition[] = [
       })
 
       // 连线
-      edges.push({ id: `e_${storyId}_${charLlmId}`, source: storyId, target: charLlmId, sourceHandle: 'right', targetHandle: 'left' })
       edges.push({ id: `e_${char1PromptId}_${char1ImgId}`, source: char1PromptId, target: char1ImgId, type: 'promptOrder', data: { promptOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
       edges.push({ id: `e_${char2PromptId}_${char2ImgId}`, source: char2PromptId, target: char2ImgId, type: 'promptOrder', data: { promptOrder: 1 }, sourceHandle: 'right', targetHandle: 'left' })
-      edges.push({ id: `e_${storyId}_${storyLlmId}`, source: storyId, target: storyLlmId, sourceHandle: 'right', targetHandle: 'left' })
 
       return { nodes, edges }
     }

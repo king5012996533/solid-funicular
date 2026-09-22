@@ -37,7 +37,6 @@ const TYPE_LABEL: Record<string, string> = {
   text: '文本',
   image: '图片',
   video: '视频',
-  llmConfig: 'LLM文本',
   asset: '素材',
 }
 
@@ -55,7 +54,7 @@ const readString = (value: unknown, fallback = ''): string => {
 
 const readText = (node: BriefNode): string => {
   const data = node.data || {}
-  // text 节点存 content，llmConfig 节点的产物在 outputContent
+  // text 节点存 content，文本节点存 content
   return readString(data.content) || readString(data.outputContent)
 }
 
@@ -72,12 +71,6 @@ const describeNode = (node: BriefNode): string => {
     if (size) parts.push(`尺寸=${size}`)
     const hasOutput = Boolean(readString(data.url)) || Array.isArray(data.batchChildren) && data.batchChildren.length > 0
     parts.push(hasOutput ? '已出图' : '还没有产物')
-  }
-
-  if (node.type === 'llmConfig') {
-    const model = readString(data.model)
-    if (model) parts.push(`模型=${model}`)
-    parts.push(readString(data.outputContent) ? '已产出文本' : '尚未执行')
   }
 
   const text = readText(node)

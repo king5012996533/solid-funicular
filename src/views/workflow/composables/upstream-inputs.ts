@@ -14,15 +14,12 @@ import { nodeIndex, inboundEdges } from './workflow-graph-index'
 /**
  * 一个节点能对外贡献的提示词文本。
  *   text      用 content（用户写的）
- *   llmConfig 用 outputContent（LLM 生成的）
+ *   文本节点用 content
  * 其他类型不贡献文本。
  */
 export const readNodePromptText = (node?: WorkflowCanvasNode): string => {
   if (node?.type === 'text') {
     return String((node.data as { content?: string })?.content || '').trim()
-  }
-  if (node?.type === 'llmConfig') {
-    return String((node.data as { outputContent?: string })?.outputContent || '').trim()
   }
   return ''
 }

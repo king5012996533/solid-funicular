@@ -8,7 +8,7 @@
 
 import { WORKFLOW_TEMPLATES } from '../src/views/workflow/config/workflows'
 
-const ALLOWED_TYPES = new Set(['text', 'image', 'video', 'llmConfig'])
+const ALLOWED_TYPES = new Set(['text', 'image', 'video', 'asset'])
 const GENERATION_TYPES = new Set(['image', 'video'])
 
 let passed = 0
@@ -98,7 +98,7 @@ console.log('\n【4】显式标了 promptOrder 的连线，目标必须是能消
     const promptEdges = edges.filter(e => e.type === 'promptOrder')
     const badHops = promptEdges.filter(e => {
       const targetType = typeById.get(e.target)
-      return targetType !== 'image' && targetType !== 'video' && targetType !== 'llmConfig'
+      return targetType !== 'image' && targetType !== 'video'
     })
     check(
       `${template.name}：${promptEdges.length} 条 promptOrder 连线目标合法`,

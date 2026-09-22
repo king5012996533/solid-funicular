@@ -19,11 +19,10 @@
  *   canvasChatSessions / canvasActiveChatId。
  */
 import { computed, ref, watch } from 'vue'
-import { getDefaultChatModelKey } from '@/config/models'
 import { migrateLegacyConfigNodes } from './legacy-config-node-migration'
 import type { WorkflowCanvasPosition } from './workflow-orchestrator-types'
 
-export type WorkflowNodeType = 'text' | 'image' | 'video' | 'llmConfig' | 'script' | 'asset'
+export type WorkflowNodeType = 'text' | 'image' | 'video' | 'asset'
 
 export interface WorkflowNodeDataBase {
   label?: string
@@ -113,19 +112,10 @@ export interface WorkflowAssetNodeData extends WorkflowNodeDataBase {
   assetType?: 'image' | 'video'
 }
 
-export interface WorkflowLlmConfigNodeData extends WorkflowNodeDataBase {
-  systemPrompt?: string
-  model?: string
-  outputFormat?: string
-  outputContent?: string
-}
-
 export interface WorkflowNodeDataMap {
   text: WorkflowTextNodeData
   image: WorkflowImageNodeData
   video: WorkflowVideoNodeData
-  llmConfig: WorkflowLlmConfigNodeData
-  script: WorkflowLlmConfigNodeData
   asset: WorkflowAssetNodeData
 }
 
@@ -378,25 +368,6 @@ const getDefaultNodeData = <T extends WorkflowNodeType>(type: T): WorkflowNodeDa
     }
     case 'asset':
       return { label: '素材' } as WorkflowNodeDataMap[T]
-    case 'llmConfig':
-      return {
-        systemPrompt: '',
-        model: getDefaultChatModelKey(),
-        outputFormat: 'text',
-        outputContent: '',
-        label: 'LLM文本生成'
-      } as WorkflowNodeDataMap[T]
-    case 'script':
-      // 剧本节点复用 LLM 节点的数据形状（模型 + 长文本产出），
-      // 但出厂就带剧本专用的系统提示词 —— 模型接到的第一句话决定了它写的是剧本
-      // 而不是普通回答；输出格式用 markdown，分集结构靠标题层级表达。
-      return {
-        systemPrompt: '你是短剧编剧。把用户给出的创意扩写成可拍摄的剧本：按集/场划分，每场给出场景、出场人物、画面动作与台词，语言口语化、可直接拍摄。',
-        model: getDefaultChatModelKey(),
-        outputFormat: 'markdown',
-        outputContent: '',
-        label: '剧本'
-      } as WorkflowNodeDataMap[T]
     default:
       throw new Error(`不支持的节点类型: ${String(type)}`)
   }

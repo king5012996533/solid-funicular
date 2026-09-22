@@ -29,8 +29,6 @@ const nodeColor = (node: Node) => {
       return readToken('--brand-image') || readToken('--brand-main-default')
     case 'video':
       return readToken('--brand-video') || readToken('--brand-main-default')
-    case 'llmConfig':
-      return readToken('--brand-main-default') || readToken('--text-secondary')
     default:
       return readToken('--text-tertiary') || readToken('--text-primary')
   }

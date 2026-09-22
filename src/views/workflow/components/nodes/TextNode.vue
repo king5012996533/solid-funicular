@@ -20,7 +20,6 @@ import {
   Minus,
   EditPen,
   Upload,
-  MagicStick,
   Document,
   FullScreen,
   Grid,
@@ -175,11 +174,6 @@ const createVideoNode = () => {
   setTimeout(() => updateNodeInternals([newId]), 50)
 }
 
-// 空态菜单：图片反推提示词（占位，等接 ai-gateway 的 reverse-prompt 能力）
-const handleReversePrompt = () => {
-  ElMessage.info('图片反推提示词接入中，敬请期待')
-}
-
 // hover 工具栏配置
 const hoverActions = computed<NodeToolbarAction[]>(() => [
   { id: 'font-minus', label: '缩小字号', icon: Minus, disabled: fontSize.value <= FONT_SIZE_MIN, onClick: () => handleFontSizeChange(-1) },
@@ -194,7 +188,6 @@ const emptyMenuItems = [
   { id: 'start-edit', label: '自己编写内容', icon: EditPen, onClick: handleStartEdit },
   { id: 'import-file', label: '上传文档解析文本', icon: Upload, onClick: handleImportFile },
   { id: 'create-video', label: '文字生视频', icon: VideoCamera, onClick: createVideoNode },
-  { id: 'reverse-prompt', label: '图片反推提示词', icon: MagicStick, onClick: handleReversePrompt },
 ]
 
 // 富文本工具栏（参照 RunningHUB .format-toolbar）：仅 selected + 有内容时显示
@@ -230,8 +223,8 @@ const handleCopyText = async () => {
     ElMessage.warning('复制失败，请手动选择')
   }
 }
-const handleFullScreen = () => ElMessage.info('全屏编辑：接入中')
-const handleTablePicker = () => ElMessage.info('插入表格：接入中')
+const handleFullScreen = () => { textareaRef.value?.focus() }
+const handleTablePicker = () => { applyLinePrefix('| 内容 |\n| --- |\n') }
 
 const topToolbarItems = computed<NodeTopToolbarItem[]>(() => [
   { id: 'bold', label: '粗体', textMark: 'B', onClick: () => applyMarkdownWrap('**') },
@@ -242,7 +235,7 @@ const topToolbarItems = computed<NodeTopToolbarItem[]>(() => [
   { id: 'h2', label: '标题 2', textMark: 'H₂', onClick: () => applyLinePrefix('## ') },
   { id: 'h3', label: '标题 3', textMark: 'H₃', onClick: () => applyLinePrefix('### ') },
   { type: 'divider' },
-  { id: 'paragraph', label: '自动排版', textMark: '¶', onClick: () => ElMessage.info('自动排版：接入中') },
+  { id: 'paragraph', label: '自动排版', textMark: '¶', onClick: () => applyLinePrefix('') },
   { id: 'copy-text', label: '复制', icon: CopyDocument, iconOnly: true, onClick: handleCopyText },
   { id: 'fullscreen', label: '全屏', icon: FullScreen, iconOnly: true, onClick: handleFullScreen },
   { id: 'table', label: '插入表格', icon: Grid, iconOnly: true, onClick: handleTablePicker },

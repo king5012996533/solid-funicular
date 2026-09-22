@@ -25,7 +25,6 @@ const TEXT_BODY = '一只金毛在草地上奔跑'
 
 const IMAGE_NODE = { id: 'n_img', type: 'image', position: { x: 0, y: 0 }, data: { url: IMG_URL, label: '产品图' } }
 const TEXT_NODE = { id: 'n_txt', type: 'text', position: { x: 0, y: 0 }, data: { content: TEXT_BODY, label: '文案' } }
-const LLM_NODE = { id: 'n_llm', type: 'llmConfig', position: { x: 0, y: 0 }, data: { outputContent: '水彩风格', label: '' } }
 const VIDEO_NODE = { id: 'n_vid', type: 'video', position: { x: 0, y: 0 }, data: { url: VIDEO_URL, label: '' } }
 
 /** 直接替换画布 ref 的内容：解析器读的就是这两个 ref */
@@ -54,21 +53,19 @@ function check(label: string, actual: unknown, expected: unknown) {
 console.log('\n【1】资产收集：种类映射、固定分组顺序、token 与展示名')
 {
   setGraph(
-    [VIDEO_NODE, TEXT_NODE, IMAGE_NODE, LLM_NODE],
+    [VIDEO_NODE, TEXT_NODE, IMAGE_NODE],
     // 故意让视频排在第一条边：分组顺序必须由种类决定，不受连线顺序影响
-    [['n_vid', 'n_gen'], ['n_txt', 'n_gen'], ['n_img', 'n_gen'], ['n_llm', 'n_gen']],
+    [['n_vid', 'n_gen'], ['n_txt', 'n_gen'], ['n_img', 'n_gen']],
   )
   const assets = collectReferenceableAssets('n_gen')
 
-  check('分组顺序固定为 图片 → 文本 → 视频', assets.map((item) => item.kind), ['image', 'text', 'text', 'video'])
+  check('分组顺序固定为 图片 → 文本 → 视频', assets.map((item) => item.kind), ['image', 'text', 'video'])
   check('完整清单（含 token 与展示名）', assets, [
     { index: 1, kind: 'image', sourceNodeId: 'n_img', kindLabel: '图片', token: '图片1', displayName: '产品图', value: IMG_URL },
     { index: 1, kind: 'text', sourceNodeId: 'n_txt', kindLabel: '文本', token: '文本1', displayName: '文案', value: TEXT_BODY },
-    // llmConfig 的正文来自 outputContent，节点没起名时展示名要能区分出序号
-    { index: 2, kind: 'text', sourceNodeId: 'n_llm', kindLabel: '文本', token: '文本2', displayName: '文本 2', value: '水彩风格' },
     { index: 1, kind: 'video', sourceNodeId: 'n_vid', kindLabel: '视频', token: '视频1', displayName: '视频 1', value: VIDEO_URL },
   ])
-  check('text 与 llmConfig 共用「文本」这一类的序号', assets.filter((item) => item.kind === 'text').map((item) => item.token), ['文本1', '文本2'])
+  check('文本节点按「文本」这一类编号', assets.filter((item) => item.kind === 'text').map((item) => item.token), ['文本1'])
   check('token 等于 种类名 + 序号', assets.map((item) => item.token), assets.map((item) => `${item.kindLabel}${item.index}`))
   check('同一画布重复收集结果一致', collectReferenceableAssets('n_gen'), assets)
   check('没连线的节点没有资产', collectReferenceableAssets('n_orphan'), [])
@@ -82,8 +79,8 @@ console.log('\n【2】序号按连线顺序稳定编号')
   ])
   check('图片序号跟连线顺序走', collectReferenceableAssets('n_gen').map((item) => `${item.token}=${item.displayName}`), ['图片1=参考图', '图片2=产品图'])
 
-  setGraph([TEXT_NODE, LLM_NODE], [['n_llm', 'n_gen'], ['n_txt', 'n_gen']])
-  check('同种类内换顺序，序号随之改变', collectReferenceableAssets('n_gen').map((item) => `${item.token}=${item.sourceNodeId}`), ['文本1=n_llm', '文本2=n_txt'])
+  setGraph([TEXT_NODE], [['n_txt', 'n_gen']])
+  check('文本序号稳定', collectReferenceableAssets('n_gen').map((item) => `${item.token}=${item.sourceNodeId}`), ['文本1=n_txt'])
 }
 
 console.log('\n【3】空值资产被过滤、重复值只算一个、悬挂边跳过')
@@ -92,7 +89,6 @@ console.log('\n【3】空值资产被过滤、重复值只算一个、悬挂边�
     [
       { id: 'n_img_empty', type: 'image', position: { x: 0, y: 0 }, data: { url: '   ', label: '空的' } },
       { id: 'n_txt_empty', type: 'text', position: { x: 0, y: 0 }, data: { content: '', label: '空的' } },
-      { id: 'n_llm_empty', type: 'llmConfig', position: { x: 0, y: 0 }, data: { outputContent: '\n  ', label: '空的' } },
       { id: 'n_img_a', type: 'image', position: { x: 0, y: 0 }, data: { url: 'https://cdn.example.com/a.png', label: '甲' } },
       { id: 'n_img_b', type: 'image', position: { x: 0, y: 0 }, data: { url: 'https://cdn.example.com/a.png', label: '乙' } },
       { id: 'n_img_c', type: 'image', position: { x: 0, y: 0 }, data: { url: 'https://cdn.example.com/c.png', label: '丙' } },
@@ -257,7 +253,7 @@ console.log('\n【7】token 正则与收集/解析两端一致')
   // 带 g 标记的正则会因 lastIndex 变成有状态的，连续调用不能出现真假交替
   check('连续 test 结果稳定（没有 g 标记的副作用）', [0, 1, 2].map(() => REFERENCE_TOKEN_PATTERN.test('@图片1')), [true, true, true])
 
-  setGraph([VIDEO_NODE, TEXT_NODE, IMAGE_NODE, LLM_NODE], [['n_vid', 'n_gen'], ['n_txt', 'n_gen'], ['n_img', 'n_gen'], ['n_llm', 'n_gen']])
+  setGraph([VIDEO_NODE, TEXT_NODE, IMAGE_NODE], [['n_vid', 'n_gen'], ['n_txt', 'n_gen'], ['n_img', 'n_gen']])
   const assets = collectReferenceableAssets('n_gen')
   const resolvable: string[] = []
   for (const asset of assets) {

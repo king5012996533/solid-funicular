@@ -29,7 +29,6 @@ import type { WorkflowCanvasPosition } from './composables/workflow-orchestrator
 import TextNode from './components/nodes/TextNode.vue'
 import ImageNode from './components/nodes/ImageNode.vue'
 import VideoNode from './components/nodes/VideoNode.vue'
-import LlmConfigNode from './components/nodes/LlmConfigNode.vue'
 import AssetNode from './components/nodes/AssetNode.vue'
 import { buildCanvasBrief } from './config/canvas-brief'
 
@@ -99,8 +98,6 @@ const nodeTypes = {
   text: markRaw(TextNode),
   image: markRaw(ImageNode),
   video: markRaw(VideoNode),
-  llmConfig: markRaw(LlmConfigNode),
-  script: markRaw(LlmConfigNode),
   asset: markRaw(AssetNode),
 } as any
 

@@ -36,8 +36,6 @@ console.log('\n【1】上游节点能给什么输入')
 {
   check('文本节点有内容 → text', readUpstreamKind(node('t', 'text', { content: '一只猫' })), 'text')
   check('文本节点内容为空 → 不算已连接', readUpstreamKind(node('t', 'text', { content: '   ' })), null)
-  check('LLM 节点看 outputContent', readUpstreamKind(node('l', 'llmConfig', { outputContent: '分镜脚本' })), 'text')
-  check('LLM 节点只有系统提示词 → 不算已连接', readUpstreamKind(node('l', 'llmConfig', { systemPrompt: '你是导演' })), null)
   check('图片节点有 url → image', readUpstreamKind(node('i', 'image', { url: '/uploads/a.png' })), 'image')
   check('图片节点还没出图 → 不算已连接', readUpstreamKind(node('i', 'image', { url: '' })), null)
   check('视频节点有 url → video', readUpstreamKind(node('v', 'video', { url: '/uploads/a.mp4' })), 'video')
@@ -85,13 +83,13 @@ console.log('\n【4】视频节点声明与图片节点不同')
   check('文本节点空态不提连接', /连接/.test(NODE_INPUT_SPECS.text.emptyHint), false)
 }
 
-console.log('\n【5】required 缺失会反映到 ready 上（当前四类都没有必需输入）')
+console.log('\n【5】required 缺失会反映到 ready 上（当前节点都没有必需输入）')
 {
   const strict = { required: ['image'] as const, optional: [], emptyHint: '请连接图片节点' }
   check('缺必需输入 → 不 ready', deriveNodeInputState({ ...strict, required: ['image'] }, ['text']).ready, false)
   check('缺必需输入 → missing 有值', deriveNodeInputState({ ...strict, required: ['image'] }, []).missing, ['image'])
   check('必需到齐 → ready', deriveNodeInputState({ ...strict, required: ['image'] }, ['image']).ready, true)
-  check('四类节点的 required 都是空（空节点也能直接生成）',
+  check('所有节点的 required 都是空（空节点也能直接生成）',
     Object.values(NODE_INPUT_SPECS).every(spec => spec.required.length === 0), true)
 }
 

@@ -203,7 +203,5 @@ export const NODE_SIZE_DEFAULTS: Record<WorkflowNodeType, NodeSizeConstraint> = 
   image: { minWidth: 280, minHeight: 180 },
   video: { minWidth: 480, minHeight: 270, keepRatio: true, aspectRatio: 16 / 9 },
 
-  llmConfig: { minWidth: 320, minHeight: 220 },
-  script: { minWidth: 360, minHeight: 260 },
   asset: { minWidth: 260, minHeight: 200 },
 }
