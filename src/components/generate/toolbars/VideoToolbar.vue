@@ -93,6 +93,26 @@ const currentDurationChoice = computed(() => findChoice(durationOptions.value, c
 const currentResolutionChoice = computed(() => findChoice(resolutionOptions.value, currentResolution.value))
 const currentFeatureChoice = computed(() => findChoice(featureOptions.value, currentFeature.value))
 
+/**
+ * 视频时长滑杆：档位是**模型声明的离散值**（5 秒 / 10 秒…），所以滑杆走「下标」而不是秒数。
+ *
+ * 直接绑秒数会在模型只认 5/10 两档时给出 7 秒这种上游不认的值；下标映射能保证
+ * 拖出来的永远是声明过的档位（对齐 LibTV 的「滑杆 + 单位 s」，但不给模型留猜的余地）。
+ */
+const durationIndex = computed(() => {
+  const index = durationOptions.value.findIndex(item => item.key === currentDuration.value)
+  return index >= 0 ? index : 0
+})
+const durationValueLabel = computed(() => {
+  const key = String(currentDurationChoice.value?.key || '').trim()
+  // 档位 key 就是秒数（'5' / '10'）；声明成别的写法时退回标签，别显示成空白
+  return /^\d+$/.test(key) ? key : String(currentDurationChoice.value?.label || '').replace(/\s*秒$/, '')
+})
+const selectDurationByIndex = (index: number) => {
+  const choice = durationOptions.value[Math.round(Number(index) || 0)]
+  if (choice) selectDuration(choice.key)
+}
+
 const getCurrentModelLabel = () => currentModel.value?.label || currentModelVersion.value || '未配置模型'
 const getCurrentFeatureLabel = () => currentFeatureChoice.value?.label || ''
 const getCurrentDurationLabel = () => currentDurationChoice.value?.label || ''
@@ -384,17 +404,23 @@ defineExpose({
             </div>
           </div>
 
+          <!-- 视频时长：LibTV 是「滑杆 + 单位 s」，这里对齐；档位仍只取模型声明的离散值 -->
           <div v-if="hasDurationControl" class="generator-param-row">
-            <div class="generator-param-row-label">时长</div>
-            <div class="generator-param-chips">
-              <button
-                v-for="duration in durationOptions"
-                :key="duration.key"
-                type="button"
-                class="generator-param-chip"
-                :class="{ 'is-active': currentDuration === duration.key }"
-                @click.stop="selectDuration(duration.key)"
-              >{{ duration.label }}</button>
+            <div class="generator-param-row-label">视频时长</div>
+            <div class="generator-duration-slider">
+              <el-slider
+                :model-value="durationIndex"
+                :min="0"
+                :max="Math.max(0, durationOptions.length - 1)"
+                :step="1"
+                :show-tooltip="false"
+                :show-stops="false"
+                size="small"
+                @update:model-value="selectDurationByIndex"
+              />
+              <span class="generator-duration-value">
+                {{ durationValueLabel }}<em>s</em>
+              </span>
             </div>
           </div>
 
@@ -428,6 +454,31 @@ defineExpose({
 /* 主要样式在 generate.css 中定义 */
 .video-toolbar {
   display: contents;
+}
+
+/* 视频时长滑杆行：滑杆占满，右侧固定显示「值 + s」 */
+.generator-duration-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+}
+.generator-duration-slider .el-slider {
+  flex: 1;
+  min-width: 120px;
+}
+.generator-duration-value {
+  flex-shrink: 0;
+  min-width: 34px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.generator-duration-value em {
+  margin-left: 2px;
+  font-style: normal;
+  color: var(--text-tertiary);
 }
 
 .toolbar-empty-hint {
