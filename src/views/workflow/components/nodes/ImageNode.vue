@@ -731,6 +731,23 @@ const reconcileInterruptedRun = async () => {
     // 任务记录里的 createdAt 是**权威的提交时间**：节点 data 里的 submittedAt 可能已丢失
     const recordStartedAt = Date.parse(String(record?.createdAt || ''))
     if (Number.isFinite(recordStartedAt)) runStartedAt.value = recordStartedAt
+
+    /**
+     * 自愈：把任务记录里的 prompt / submittedAt 回填到节点 data。
+     *
+     * 为什么要这么做：实测提交时写进节点的 `prompt`/`submittedAt` 在**保存后读回是空**
+     * （`taskRecordId` 却留着），用户因此会觉得「重试还要重新输一遍提示词」——
+     * 等于白写一次。任务记录里存着那次提交的原文与时间，是权威来源，
+     * 加载时发现节点上缺了就用它补回去；补完这次保存就是干净的，之后不再丢。
+     */
+    const missingPrompt = !String(props.data?.prompt || '').trim()
+    const missingSubmittedAt = !(Number(props.data?.submittedAt) > 0)
+    if (missingPrompt || missingSubmittedAt) {
+      updateNode(props.id, {
+        ...(missingPrompt && record?.prompt ? { prompt: String(record.prompt) } : {}),
+        ...(missingSubmittedAt && Number.isFinite(recordStartedAt) ? { submittedAt: recordStartedAt } : {}),
+      })
+    }
     if (record?.done) {
       const urls = Array.isArray(record.images) ? record.images.filter(Boolean) : []
       if (urls.length) {
