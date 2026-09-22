@@ -338,6 +338,11 @@ defineExpose({
   focus,
   getElement,
   setValueAndCaret,
+  /**
+   * 当前光标在纯文本里的偏移；不在编辑器内（没聚焦、选区在别处）时返回 -1。
+   * 给「缩略图上的 @ 按钮」用：要在光标处插入 token，就必须先问到光标在哪。
+   */
+  getCaretOffset: () => readCaretOffset(),
 })
 </script>
 

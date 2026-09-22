@@ -695,6 +695,35 @@ const referencedMediaItems = computed(() => {
 })
 
 /**
+ * 缩略图上的 `@` 按钮：把该素材的 token 插进提示词（对齐 LibTV 缩略图右下角那个 @）。
+ *
+ * 两处刻意的取舍：
+ *  1. **按光标插入**，拿不到光标（输入框没聚焦 / 选区在别处）就追加到末尾 ——
+ *     用户在输入框中间点缩略图时，token 不该跑到段尾去；
+ *  2. 自动引用的缩略图也给这个按钮：点一下等于「把它钉进提示词」，
+ *     该素材就从自动引用变成显式引用（去重是按 URL 算的，不会出现两份）。
+ *
+ * 走的是敲 `@` 选素材的**同一条** `insertReferenceToken` 管线，不另写一套插入逻辑。
+ */
+const insertReferenceFromThumbnail = (asset: ReferenceableAsset) => {
+  const token = String(asset.token || '').trim()
+  if (!token) return
+  const caretRaw = inlineMentionRef.value?.getCaretOffset?.() ?? -1
+  const caret = caretRaw >= 0 ? caretRaw : inputValue.value.length
+  const inserted = insertReferenceToken(inputValue.value, caret, token)
+  inputValue.value = inserted.prompt
+  if (mentionTarget.value === 'inline') {
+    inlineMentionRef.value?.setValueAndCaret(inserted.prompt, inserted.caret)
+    return
+  }
+  nextTick(() => {
+    const el = getMentionTargetElement()
+    el?.focus()
+    el?.setSelectionRange(inserted.caret, inserted.caret)
+  })
+}
+
+/**
  * 移除引用 = 从文本里删掉该资产的 token。
  * 逐 token 匹配后整段比较，而不是直接 replace 子串：
  * `@图片1` 是 `@图片10` 的前缀，子串替换会误伤。
@@ -1774,6 +1803,12 @@ onUnmounted(() => {
               >
                 <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
                 <span class="mentioned-reference-badge">@{{ item.asset.token }}</span>
+                <button
+                  type="button"
+                  class="mentioned-reference-mention-btn"
+                  :title="`把 @${item.asset.token} 插入提示词`"
+                  @click.stop="insertReferenceFromThumbnail(item.asset)"
+                >@</button>
                 <div class="remove-button-container">
                   <button type="button" class="remove-button generator-reference-clear-btn" @click.stop="removeMentionedReference(item)">
                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1791,6 +1826,12 @@ onUnmounted(() => {
               >
                 <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
                 <span class="mentioned-reference-badge">自动</span>
+                <button
+                  type="button"
+                  class="mentioned-reference-mention-btn"
+                  :title="`把 @${item.asset.token} 插入提示词（插入后即为显式引用）`"
+                  @click.stop="insertReferenceFromThumbnail(item.asset)"
+                >@</button>
               </div>
             </div>
           </div>
@@ -2774,6 +2815,35 @@ onUnmounted(() => {
   padding: 0 4px;
   pointer-events: none;
   position: absolute;
+}
+
+/* 缩略图右下角的 @：点一下把该素材的 token 插到光标处（对齐 LibTV 缩略图上的 @）。
+   16×16 而不是 LibTV 的 12×12 —— 那个尺寸是装饰，这个是可点按钮，得留够命中面积。 */
+.mentioned-reference-mention-btn {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--canvas-float-block-default, rgba(0, 0, 0, 0.6));
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.9;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.mentioned-reference-mention-btn:hover {
+  opacity: 1;
+  background: var(--brand-main-default);
 }
 
 /* 叉号平时藏起来，hover / 键盘聚焦时才浮现，与参考图缩略图一致 */
