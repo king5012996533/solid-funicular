@@ -5184,7 +5184,28 @@ body,html {
 
         * {
             -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            -moz-osx-font-smoothing: grayscale
+        }
+
+        /*
+         * 原先这里是 `* { user-select: none }` —— 全站禁止选中文字，
+         * 后果是**任何地方都复制不了**：助手面板、生成的提示词、后台字段全都是死的
+         * （实测在助手气泡上按住鼠标框选，选区是空字符串）。
+         * 而且它已被证明是长期痛点：homeDetailModal.css 里只能用
+         * `user-select: text` 逐处对抗这条全局规则。
+         *
+         * 正确做法是反过来：**默认允许选中**，只在"会被拖动"的地方禁选。
+         * 画布交给下面这条（Vue Flow 自己也给 .vue-flow__node / __edge-text
+         * 设了 none，所以画布内行为与改动前完全一致），按钮交给再下面那条。
+         */
+        .vue-flow {
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none
+        }
+
+        button {
             -webkit-user-select: none;
             -moz-user-select: none;
             -ms-user-select: none;

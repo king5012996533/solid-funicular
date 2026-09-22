@@ -17,11 +17,17 @@ import {
 } from '@/config/models'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
+import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
 
 const props = defineProps({
   title: { type: String, default: '' },
   visible: { type: Boolean, default: false },
-  initialMessage: { type: String, default: '' }
+  initialMessage: { type: String, default: '' },
+  /**
+   * 画布状态摘要（由 workflow 页生成的纯文本）。
+   * 没有它，助手完全看不见用户眼前有什么节点 —— 只能空对空写提示词。
+   */
+  canvasBrief: { type: String, default: '' }
 })
 
 const emit = defineEmits(['close', 'message-received', 'add-image-to-canvas'])
@@ -37,6 +43,7 @@ const {
   removeSessionById,
   setActive,
   ensureSession,
+  touchActiveSession,
   ASSISTANT_SOURCE,
 } = useAssistantSessions()
 
@@ -374,6 +381,18 @@ const runImageGeneration = async (prompt, refImages, aiMsg) => {
 }
 
 // 调用流式对话 API（走 createGenerationTask({ type:'agent' }) + SSE 订阅，后端持久化 record，刷新可恢复）
+
+/**
+ * 把面板里已有的历史拼成上游的 messages 数组。
+ *
+ * 原来这里写死 `messages: [{ role:'user', content: prompt }]` —— 只发当前这一句，
+ * 于是**面板上有历史、模型侧完全没有记忆**（用户原话"完全没有上下文记忆"）。
+ * 真正的拼装逻辑在 `composables/assistant-chat-history.ts`（纯函数 + 单测）：
+ * 这类 bug 不报错、不改变返回值的形状，模型照样答得通，只不上文，
+ * 靠 typecheck / 构建 / e2e 一个都抓不住，所以必须有单元测试钉着。
+ */
+const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value, prompt, props.canvasBrief)
+
 const runChatStream = async (prompt, aiMsg) => {
   try {
     const fallbackKey = getDefaultChatModelKey() || ''
@@ -392,10 +411,12 @@ const runChatStream = async (prompt, aiMsg) => {
       requestBody: {
         model: modelKey,
         providerId,
-        messages: [{ role: 'user', content: prompt }],
+        messages: buildChatMessages(prompt),
         stream: true,
       },
     })
+    // 聊过就算"用过"：否则 lastUsedAt 一直是 0，新会话永远沉在最下面
+    touchActiveSession()
 
     const taskId = String(saved?.id || '').trim()
     if (!taskId) throw new Error('对话任务创建失败')

@@ -31,6 +31,7 @@ import ImageNode from './components/nodes/ImageNode.vue'
 import VideoNode from './components/nodes/VideoNode.vue'
 import LlmConfigNode from './components/nodes/LlmConfigNode.vue'
 import AssetNode from './components/nodes/AssetNode.vue'
+import { buildCanvasBrief } from './config/canvas-brief'
 
 // 边组件
 import ImageRoleEdge from './components/edges/ImageRoleEdge.vue'
@@ -76,7 +77,19 @@ const {
   screenToFlowCoordinate,
   setNodes,
   connectionStartHandle,
+  getSelectedNodes,
 } = useVueFlow()
+
+/**
+ * 助手面板要的画布摘要。
+ * 以前助手完全看不见画布（没传任何状态），只能空对空写提示词 ——
+ * 用户问"这个画布还缺什么"它只能猜。摘要本身是纯函数，有单测。
+ */
+const assistantCanvasBrief = computed(() => buildCanvasBrief(
+  nodes.value,
+  edges.value,
+  getSelectedNodes.value.map(node => node.id),
+))
 
 // 对齐辅助线：拖拽节点时与邻近节点吸附，并显示对齐虚线
 const { guides, computeAlignment, clear: clearGuides } = useCanvasAlignmentGuides()
@@ -1709,6 +1722,7 @@ watch(canvasSnapshot, () => {
           :title="currentWorkflowTitle"
           :visible="!isAssistantCollapsed"
           :initial-message="pendingAssistantMessage"
+          :canvas-brief="assistantCanvasBrief"
           @close="toggleAssistantPanel"
           @message-received="pendingAssistantMessage = ''"
           @add-image-to-canvas="handleAssistantAddImage"

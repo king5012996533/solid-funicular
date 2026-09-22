@@ -8,6 +8,7 @@
  */
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import type { PersistedGenerationSession } from '@/api/generation-sessions'
+import { sortAssistantSessions } from '@/composables/assistant-session-order'
 
 const props = defineProps<{
   visible: boolean
@@ -48,17 +49,21 @@ const updatePosition = () => {
   }
 }
 
-const sortedSessions = computed(() => {
-  const list = [...props.sessions]
-  list.sort((a, b) => {
-    if (a.isDefault && !b.isDefault) return -1
-    if (!a.isDefault && b.isDefault) return 1
-    const aTime = new Date(a.lastRecordAt || a.updatedAt || a.createdAt).getTime()
-    const bTime = new Date(b.lastRecordAt || b.updatedAt || b.createdAt).getTime()
-    return bTime - aTime
-  })
-  return list
-})
+/**
+ * 会话排序：按"最近真正用过"的时间倒序。
+ *
+ * 原来有两个毛病（用户反馈"刚聊完的排在后面、以前用的浮在最上面"）：
+ *  1. `isDefault` 被无条件置顶 —— 那个默认会话可能几个月没动过，却永远压在所有
+ *     新会话上面；新对话因此被挤到后面。
+ *  2. 时间回落到 `updatedAt` —— 而**重命名**也会改 updatedAt，于是"只是改了个标题"
+ *     就会让会话跳到列表中间。改标题不是使用。
+ *
+ * 现在只认 `lastRecordAt`（创建生成记录时才更新），没有记录就用 `createdAt`：
+ * 新会话一创建就排在最前，聊过就一直留在最前，改标题不再影响位置。
+ */
+// 规则本身在 assistant-session-order.ts（纯函数 + 单测）：
+// 本地会话太少时，这个顺序在浏览器里演示不出来，所以不能只靠肉眼看。
+const sortedSessions = computed(() => sortAssistantSessions(props.sessions))
 
 const handleDocumentMouseDown = (event: MouseEvent) => {
   if (!props.visible) return

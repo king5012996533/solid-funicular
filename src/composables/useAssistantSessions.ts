@@ -126,6 +126,24 @@ export function useAssistantSessions() {
     return next
   }
 
+  /**
+   * 把当前会话标记为"刚刚用过"（只改本地那一份，用于立刻重排列表）。
+   *
+   * 为什么需要：会话列表按 lastRecordAt 排序，而它要等**后端创建生成记录**之后
+   * 才会更新；用户发完消息马上打开列表看，顺序还是旧的 —— 体感就是
+   * "刚聊完的排到后面去了"。服务端那边仍然自己维护真值，这里只是把本地视图提前对齐。
+   *
+   * 刻意只动 lastRecordAt，不动 updatedAt：重命名才该动 updatedAt，
+   * 而排序已经不信 updatedAt 了。
+   */
+  const touchActiveSession = () => {
+    const id = String(activeSessionId.value || '').trim()
+    if (!id) return
+    const session = sessions.value.find((item) => item.id === id)
+    if (!session) return
+    session.lastRecordAt = new Date().toISOString()
+  }
+
   return {
     sessions,
     activeSession,
@@ -137,6 +155,7 @@ export function useAssistantSessions() {
     removeSessionById,
     setActive,
     ensureSession,
+    touchActiveSession,
     ASSISTANT_SOURCE,
   }
 }
