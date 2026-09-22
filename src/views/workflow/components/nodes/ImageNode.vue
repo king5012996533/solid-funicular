@@ -10,7 +10,7 @@
  *   - 有图时双击放大预览；删除走 Delete 键与右键菜单
  *   - 选中后卡片下方浮出输入框（ContentGenerator，与 /generate 同款）
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import { ElMessage } from 'element-plus'
 import { Aim, Crop, MagicStick, Picture, Sunny } from '@element-plus/icons-vue'
@@ -45,6 +45,7 @@ import { collectReferenceableAssets } from '../../composables/reference-resolver
 import {
   createGenerationTask,
   getGenerationTask,
+  stopGenerationTask,
   subscribeGenerationTaskEvents,
   resolveGenerationTaskModel,
   type GenerationTaskStreamEvent,
@@ -92,6 +93,88 @@ const showEmpty = computed(() => !showLoading.value && !showError.value && !show
 const cardSize = computed(() => resolveGenerationCardSize(appliedParams.value.ratio))
 
 /** 输入框浮层：固定 660 宽 + 不随画布缩放 + 被底部工具栏挡住时自动上移（规则见 useComposerPanel.ts） */
+/**
+ * 生成中的「已等待时长」与取消出口。
+ *
+ * 用户原话：「一直在转圈，没结果返回，用户会很焦虑，要么失败重试，要么放弃」，
+ * 以及「等五十分钟用户都放弃了」。服务端任务接口**没有暴露排队位置**（我用 API 实测过，
+ * 返回里没有任何 queue/wait/progress 字段），所以做不到「前面还有 N 个」；
+ * 但两件真实可做的事能显著降低焦虑：
+ *   1. 显示**已等待时长**（时间在走，用户知道系统没死）；
+ *   2. 给一个**真的取消按钮**（走 stop 接口），而不是只能干等或刷新页面。
+ */
+const generationElapsed = ref(0)
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+
+const stopElapsedTimer = () => {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+}
+
+const startElapsedTimer = (submittedAt?: number) => {
+  stopElapsedTimer()
+  const startedAt = Number(submittedAt) > 0 ? Number(submittedAt) : Date.now()
+  const tick = () => { generationElapsed.value = Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) }
+  tick()
+  elapsedTimer = setInterval(tick, 1000)
+}
+
+/**
+ * 展示用的已等待秒数。
+ *
+ * **以节点数据里的 `submittedAt` 为基准**，而不是只依赖本地计时器：
+ * 组件重挂载（Vue Flow 在数据变化时会重建节点组件）后本地计时会归零，
+ * 按数据算则无论何时挂载都显示正确值；间隔只负责触发重算。
+ */
+const elapsedSeconds = computed(() => {
+  const startedAt = Number(props.data?.submittedAt || 0)
+  if (startedAt > 0) return Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+  return generationElapsed.value
+})
+
+const formattedElapsed = computed(() => {
+  const total = elapsedSeconds.value
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+})
+
+/** 超过这个时长给一句解释：实测快时 1 分钟内出图，慢时十几分钟 */
+const SLOW_HINT_SECONDS = 90
+const showSlowHint = computed(() => elapsedSeconds.value >= SLOW_HINT_SECONDS)
+
+/**
+ * 计时由 **loading 状态**驱动，而不是在各调用点埋 start/stop。
+ *
+ * 理由：调用点有四处（提交 / 对账重订阅 / 终态 / 失败），漏一处就出现「转圈但计时不动」；
+ * 挂在 loading 上则无论谁把节点置为生成中都必然计时，且以数据里的 submittedAt 为基准。
+ */
+watch(
+  () => [props.data?.loading, props.data?.submittedAt] as const,
+  ([loading, submittedAt]) => {
+    if (loading) startElapsedTimer(Number(submittedAt) || Date.now())
+    else stopElapsedTimer()
+  },
+  { immediate: true },
+)
+
+const cancelling = ref(false)
+const handleCancelRun = async () => {
+  const taskId = String(props.data?.taskRecordId || '').trim()
+  cancelling.value = true
+  try {
+    if (taskId) await stopGenerationTask(taskId)
+    taskStreamController.value?.abort()
+    failRun('已取消本次生成')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消失败')
+  } finally {
+    cancelling.value = false
+  }
+}
+
 const composerRef = ref<HTMLElement | null>(null)
 const { style: composerStyle } = useComposerPanel({
   el: composerRef,
@@ -319,6 +402,11 @@ onMounted(() => {
   void loadPublicModelCatalog()
 })
 
+// 节点卸载时清掉计时器，避免后台空转
+onBeforeUnmount(() => {
+  stopElapsedTimer()
+})
+
 /**
  * 对账必须**观察 loading 的变化**，不能在 onMounted 里跑一次就完。
  *
@@ -480,6 +568,7 @@ const clearDeadline = () => {
 /** 统一失败出口：停订阅、停计时、落可重试的错误态 */
 const failRun = (message: string) => {
   clearDeadline()
+  stopElapsedTimer()
   taskStreamController.value?.abort()
   isGenerating.value = false
   isLoading.value = false
@@ -496,6 +585,7 @@ const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
     const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
     if (urls.length) {
       clearDeadline()
+      stopElapsedTimer()
       updateNode(props.id, {
         url: urls[0],
         loading: false,
@@ -593,6 +683,7 @@ const runGeneration = async (input: {
     const controller = new AbortController()
     taskStreamController.value = controller
     startDeadline(submittedAt)
+    startElapsedTimer(submittedAt)
     await subscribeGenerationTaskEvents(taskId, {
       signal: controller.signal,
       onEvent: applyTaskEvent,
@@ -645,6 +736,7 @@ const reconcileInterruptedRun = async () => {
     const controller = new AbortController()
     taskStreamController.value = controller
     startDeadline(submittedAt || Date.now())
+    startElapsedTimer(submittedAt || Date.now())
     await subscribeGenerationTaskEvents(taskId, {
       signal: controller.signal,
       onEvent: applyTaskEvent,
@@ -846,6 +938,16 @@ watch(
     <div class="image-node-card" :class="{ 'is-selected': isSelected }" :style="cardSizeStyle(cardSize)">
       <div v-if="showLoading" class="image-node-loading" aria-label="图片生成中">
         <div class="image-node-spinner" />
+        <div class="image-node-loading-meta">
+          <span class="image-node-loading-elapsed">生成中 {{ formattedElapsed }}</span>
+          <span v-if="showSlowHint" class="image-node-loading-hint">比平时慢，可能在上游排队</span>
+          <button
+            type="button"
+            class="image-node-cancel nodrag nopan"
+            :disabled="cancelling"
+            @click.stop="handleCancelRun"
+          >{{ cancelling ? '取消中…' : '取消' }}</button>
+        </div>
       </div>
       <!-- 失败态必须可操作：一直转圈会让用户既不敢走也不知道能不能等（用户反馈原话） -->
       <div v-else-if="showError" class="image-node-error" role="alert">
@@ -963,6 +1065,31 @@ watch(
   color: #fff;
 }
 .image-node-error-btn.is-primary:hover { filter: brightness(1.08); color: #fff; }
+.image-node-loading-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.image-node-loading-elapsed {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.image-node-loading-hint { color: var(--text-tertiary); font-size: 11px; }
+.image-node-cancel {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--canvas-node-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.image-node-cancel:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
+.image-node-cancel:disabled { opacity: 0.6; cursor: default; }
 .image-node-spinner { width: 18px; height: 18px; border: 2px solid var(--stroke-secondary); border-top-color: var(--brand-main-default); border-radius: 50%; animation: image-node-spin 0.8s linear infinite; }
 @keyframes image-node-spin { to { transform: rotate(360deg); } }
 /* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，

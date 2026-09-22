@@ -1027,6 +1027,19 @@ useShortcut('Alt+Shift+F', () => autoLayoutCanvas())
 const isSpacePressed = ref(false)
 const panOnDragValue = computed<true | number[]>(() => (isSpacePressed.value ? [0, 1, 2] : true))
 
+/**
+ * Vue Flow 的选择键（按住 Cmd 框选、按住 Shift 多选）。
+ *
+ * 说明一处**库内自相矛盾**，免得后人再查：`.d.ts` 里这两个 prop 的类型是 `KeyFilter | null`
+ * （字符串是合法的，库里自己的默认值也是字符串 `'Shift'`），但**运行时 props 声明**写的是 `Boolean | null`，
+ * 于是 Vue 在 dev 模式下会一直刷：
+ *   Invalid prop: type check failed for prop "selectionKeyCode". Expected Boolean | Null, got String "Meta"
+ * 这个警告**改不掉**（除非改库或改成 `true`/`null` 那种语义、从而改变拖拽框选行为），
+ * 而且**只在 dev 构建出现**、不进生产包，所以这里保留正确行为、不迁就声明。
+ */
+const selectionKeyCode = 'Meta'
+const multiSelectionKeyCode = 'Shift'
+
 const isEditableSpaceTarget = (el: EventTarget | null): boolean => {
   if (!(el instanceof HTMLElement)) return false
   const tag = el.tagName.toLowerCase()
@@ -1321,8 +1334,8 @@ watch(canvasSnapshot, () => {
             :snap-to-grid="true"
             :snap-grid="[20, 20]"
             :delete-key-code="['Delete', 'Backspace']"
-            :selection-key-code="'Meta'"
-            :multi-selection-key-code="'Shift'"
+            :selection-key-code="selectionKeyCode"
+            :multi-selection-key-code="multiSelectionKeyCode"
             :selection-mode="SelectionMode.Partial"
             :pan-on-drag="panOnDragValue"
             :nodes-draggable="!isSpacePressed"
