@@ -450,20 +450,14 @@ const handleDownload = async () => {  if (!imageUrl.value) return
 /**
  * 点图放大预览。
  *
- * 为什么不能直接绑在 click 上：图片在可拖拽的节点内部，拖节点时鼠标也会
- * 在图片上按下再抬起，浏览器同样会补一个 click —— 那样"拖一下节点"就会
- * 弹出大图。所以按下时记坐标，抬起时位移超过阈值就当作拖拽，不开预览。
+ * 为什么是双击而不是单击：画布上**拖拽是第一交互**，而图片占了节点几乎全部面积。
+ * 早先版本用单击放大，结果是每次想拖节点都担心弹出大图，光标还是放大镜，
+ * 拖拽的手感直接被破坏（用户反馈"鼠标移到图片就变成放大镜，没法拖拽"）。
+ * 双击与拖拽天然不冲突 —— 拖完只会产生单击，不会产生 dblclick。
+ * 想单击直达的，用顶部工具栏那个「放大预览」按钮。
  */
 const previewVisible = ref(false)
 const previewTarget = ref('')
-const previewPointerStart = { x: 0, y: 0 }
-/** 位移阈值（px）：触屏/触控板手抖也会有几像素，给一点余量 */
-const PREVIEW_CLICK_TOLERANCE = 4
-
-const handleImagePointerDown = (event: PointerEvent) => {
-  previewPointerStart.x = event.clientX
-  previewPointerStart.y = event.clientY
-}
 
 const openImagePreview = (url?: unknown) => {
   // 只认字符串：工具栏那份是 `item.onClick()`（无参），但悬停工具栏是
@@ -476,15 +470,11 @@ const openImagePreview = (url?: unknown) => {
   previewVisible.value = true
 }
 
-const handleImageClick = (event: MouseEvent) => {
-  const moved = Math.abs(event.clientX - previewPointerStart.x)
-    + Math.abs(event.clientY - previewPointerStart.y)
-  if (moved > PREVIEW_CLICK_TOLERANCE) return
-  // 折叠的批量组上，双击的既有语义是"展开"；而双击必然先触发两次单击，
-  // 那样大图会盖住刚展开的宫格，看起来像坏了。折叠态不弹预览，
-  // 展开后点具体子图即可看大图。
+const handleImageDblClick = (url?: string) => {
+  // 折叠的批量组上，双击的既有语义是"展开宫格"，别抢它的手势；
+  // 展开后双击具体子图即可看大图。
   if (isBatchGroupVisible.value && !props.data?.batchExpanded) return
-  openImagePreview()
+  openImagePreview(url)
 }
 
 const handleDelete = () => removeNode(props.id)
@@ -1005,16 +995,14 @@ watch(
           <div class="image-node-batch-frame image-node-batch-frame--2" aria-hidden="true" />
           <div class="image-node-batch-frame image-node-batch-frame--1" aria-hidden="true" />
         </template>
-        <!-- 不要 @click.stop：Vue Flow 靠冒泡到节点上才把节点选中，
-             挡住了就会出现"点标题能选中、点图片选不中"的怪现象。
-             拖拽误触由 handleImageClick 里的位移阈值挡掉。 -->
+        <!-- 不要阻止冒泡：Vue Flow 靠冒泡到节点上才把节点选中，
+             挡住了就会出现"点标题能选中、点图片选不中"的怪现象。 -->
         <img
           :src="imageUrl"
           alt="生成图片"
           class="image-node-image"
-          title="点击放大查看"
-          @pointerdown="handleImagePointerDown"
-          @click="handleImageClick"
+          title="双击放大查看"
+          @dblclick.stop="handleImageDblClick()"
         />
         <span v-if="isBatchGroupVisible" class="image-node-batch-count" :title="`批量组 ${batchChildCount} 张，双击展开/折叠`">
           {{ batchChildCount }}
@@ -1030,9 +1018,8 @@ watch(
             <img
               :src="child.url"
               alt="批量子图"
-              title="点击放大查看"
-              @pointerdown="handleImagePointerDown"
-              @click.stop="openImagePreview(child.url)"
+              title="双击放大查看"
+              @dblclick.stop="handleImageDblClick(child.url)"
             />
 
             <button
@@ -1370,7 +1357,9 @@ watch(
   display: block;
   overflow: hidden;
 }
-/* 图即卡片：满宽、不裁切、不要圆角（外层卡片已 overflow:hidden + 12px 圆角负责裁边） */
+/* 图即卡片：满宽、不裁切、不要圆角（外层卡片已 overflow:hidden + 12px 圆角负责裁边）。
+   光标**不做特殊化**：图片就是节点本体，拖它就是在拖节点，
+   给个 zoom-in 会让用户以为这里只能点不能拖（踩过这个坑）。 */
 .image-node-image {
   display: block;
   width: 100%;
@@ -1380,7 +1369,6 @@ watch(
   object-fit: contain;
   position: relative;
   z-index: 1;
-  cursor: zoom-in;
 }
 .image-node-batch-frame {
   position: absolute;
