@@ -163,13 +163,14 @@ defineProps<{
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 28px;
+  /* 32px 高是 LibTV 实测值（且两档缩放下都是 32，不随画布缩放） */
+  height: 32px;
   padding: 0 10px;
   background: transparent;
   border: 0;
   border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 0.15s, color 0.15s;
@@ -179,7 +180,7 @@ defineProps<{
   color: var(--text-primary);
 }
 .canvas-node-top-toolbar__btn.is-icon-only {
-  width: 28px;
+  width: 32px;
   padding: 0;
 }
 .canvas-node-top-toolbar__btn.is-disabled {

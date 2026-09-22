@@ -13,7 +13,9 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import { ElMessage } from 'element-plus'
-import { MagicStick, Picture } from '@element-plus/icons-vue'
+import { Aim, Crop, MagicStick, Picture, Sunny } from '@element-plus/icons-vue'
+import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canvas/CanvasNodeTopToolbar.vue'
+import ImageCropDialog from '@/components/canvas/ImageCropDialog.vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import {
@@ -26,9 +28,16 @@ import {
 import { uploadStorageFile } from '@/api/storage'
 import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type ImageModel } from '@/config/models'
 import { pickSizeByAspect, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
-import { ENHANCE_PRESET, type ImageEditPreset } from '../../config/image-edit-presets'
+import {
+  ANGLE_PRESETS,
+  ENHANCE_PRESET,
+  LIGHT_PRESETS,
+  PANORAMA_PRESET,
+  type ImageEditPreset,
+} from '../../config/image-edit-presets'
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
 import { useComposerPanel } from '../../composables/useComposerPanel'
+import { useNodeToolbar } from '../../composables/useNodeToolbar'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -201,6 +210,77 @@ const runImageEditJob = async (preset: ImageEditPreset) => {
 }
 
 const handleEnhance = () => runImageEditJob(ENHANCE_PRESET)
+
+/** 节点工具栏：固定屏幕尺寸 + 贴边收敛（规则见 composables/useNodeToolbar.ts） */
+const toolbarRef = ref<HTMLElement | null>(null)
+const { style: toolbarStyle } = useNodeToolbar({
+  el: toolbarRef,
+  nodeId: () => props.id,
+  cardWidth: () => cardSize.value.width,
+})
+
+/**
+ * 工具栏条目：**只放已经接线的能力**，每一项点下去都会真的产出新节点。
+ *
+ * 与 LibTV 对照：他们图片节点是 9 项 + 4 个图标按钮，我们只放得起这 5 项 ——
+ * 「九宫格 / 元素编辑 / 图层分离 / 宫格切分」这些我们还没有对应管线，
+ * 宁可少放，也不摆「接入中」那种假入口（上一轮刚因为假入口砍过一遍）。
+ * 标签用 LibTV 的叫法：全景 / 多角度 / 打光 / 高清。
+ */
+const toolbarItems = computed<NodeTopToolbarItem[]>(() => [
+  { id: 'hd', label: '高清', icon: MagicStick, onClick: handleEnhance },
+  { id: 'panorama', label: '全景', icon: Picture, onClick: () => runImageEditJob(PANORAMA_PRESET) },
+  {
+    id: 'angle',
+    label: '多角度',
+    icon: Aim,
+    hasDropdown: true,
+    dropdownItems: ANGLE_PRESETS.map(preset => ({
+      id: preset.key,
+      label: preset.label,
+      description: preset.description,
+      onClick: () => runImageEditJob(preset),
+    })),
+  },
+  {
+    id: 'light',
+    label: '打光',
+    icon: Sunny,
+    hasDropdown: true,
+    dropdownItems: LIGHT_PRESETS.map(preset => ({
+      id: preset.key,
+      label: preset.label,
+      description: preset.description,
+      onClick: () => runImageEditJob(preset),
+    })),
+  },
+  { type: 'divider' },
+  { id: 'crop', label: '裁剪', icon: Crop, onClick: () => { cropVisible.value = true } },
+])
+
+// 裁剪是纯本地操作（不上上游）：裁完直接把结果上传成一个新节点
+const cropVisible = ref(false)
+const handleCropConfirm = async (blob: Blob) => {
+  const sourceNode = nodes.value.find(item => item.id === props.id)
+  if (!sourceNode) return
+  const targetId = addNode('image', { x: sourceNode.position.x + 640, y: sourceNode.position.y }, {
+    label: '裁剪',
+    loading: true,
+  })
+  try {
+    const file = new File([blob], `crop-${Date.now()}.png`, { type: 'image/png' })
+    const uploaded = await uploadStorageFile(file, 'asset')
+    if (!uploaded) throw new Error('裁剪结果上传失败')
+    updateNode(targetId, { url: uploaded.publicUrl, loading: false, error: '', executed: true })
+    ElMessage.success('已裁剪并生成新节点')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '裁剪结果上传失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
 
 const previewVisible = ref(false)
 const previewTarget = ref('')
@@ -505,8 +585,19 @@ watch(
         @change="handleFileChange"
       />
     </div>
+    <!-- 节点工具栏：只在有图时出现（LibTV 同款规则 —— 空节点给的是卡内「尝试」列表） -->
+    <div class="image-node-toolbar-anchor">
+      <!-- 这一层必须紧包住工具栏本身：贴边收敛要按**工具栏的真实宽度**算，
+           挂在撑满卡片的锚点层上会量到卡片宽度（622），收敛位置就会偏 -->
+      <div ref="toolbarRef" class="image-node-toolbar-box" :style="toolbarStyle">
+        <CanvasNodeTopToolbar :visible="isSelected && showImage && !isLoading" :items="toolbarItems" />
+      </div>
+    </div>
+
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
+    <ImageCropDialog v-model="cropVisible" :src="imageUrl" @confirm="handleCropConfirm" />
+
     <el-image-viewer v-if="previewVisible" :url-list="[previewTarget]" :z-index="4000" :scale="0.86" teleported hide-on-click-modal @close="previewVisible = false" />
     <div
       v-if="isSelected && !showLoading"
@@ -554,6 +645,17 @@ watch(
 .image-node-empty-item:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
 .image-node-empty-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; color: var(--text-tertiary); font-size: 16px; }
 .image-node-empty-item:hover .image-node-empty-item-icon { color: var(--text-primary); }
+
+/* 工具栏锚点撑满卡片（提供 bottom:100% / left:50% 的参照），真正的盒子是里面那层 */
+.image-node-toolbar-anchor { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+.image-node-toolbar-box { position: absolute; bottom: 100%; left: 50%; display: inline-flex; pointer-events: auto; }
+/* 工具栏组件自带一套「浮在卡片上方」的定位，这里由外层盒子接管，把它退回普通流 */
+.image-node-toolbar-box :deep(.canvas-node-top-toolbar) {
+  position: static;
+  bottom: auto;
+  left: auto;
+  transform: none;
+}
 
 /* 宽 660、不随画布缩放 —— 都由内联 style 给（见 composerStyle），这里只负责挂到卡片正下方。
    间距 12px 是 LibTV 实测值，和视频/文本节点保持一致（原先这里写的是 18px，三个节点各写一份） */
