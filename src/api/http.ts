@@ -61,6 +61,17 @@ export const buildAssetUrl = (path: string) => {
     return normalizedPath
   }
 
+  /**
+   * 前端自带静态资源（`public/` 下的目录）由前端自身服务，**不能**拼 API 基址 ——
+   * 拼了会打到后端端口上 404。目前有：
+   *   /banner/      首页工具位的小图
+   *   /demo-feed/   首页「发现」演示图（自有资源，见 src/data/homeDiscoverContent.json）
+   */
+  const FRONTEND_STATIC_PREFIXES = ['/banner/', '/demo-feed/']
+  if (FRONTEND_STATIC_PREFIXES.some((prefix) => normalizedPath.startsWith(prefix))) {
+    return normalizedPath
+  }
+
   // 其余以站点 API 基址补全，解决 /uploads 相对路径命中前端端口的问题。
   return buildApiUrl(normalizedPath)
 }
