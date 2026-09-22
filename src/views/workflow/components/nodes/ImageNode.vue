@@ -434,6 +434,8 @@ const handlePromptSend = async (
     count?: number
     referenceImages?: string[]
     unresolvedReferences?: string[]
+    /** 「智能引用 AutoLink」开关状态：关掉时不再兜底注入上游素材 */
+    autoLink?: boolean
   },
 ) => {
   // 上游文本节点连过来的提示词 + 节点内输入，合并后提交
@@ -454,10 +456,13 @@ const handlePromptSend = async (
   //   · 用户在提示词里敲了 @ 引用 → composer 已把解析出的媒体按出现顺序放进
   //     options.referenceImages，这里原样使用，绝不能用「上游图片全量注入」覆盖回去，
   //     否则用户挑出来的那张会被整条上游覆盖，显式引用等于失效；
-  //   · 一个 @ 都没敲（或解析结果为空）→ 保持原来的全自动注入行为，向后兼容。
+  //   · 一个 @ 都没敲（或解析结果为空）→ 走「上游全量注入」的兜底，
+  //     但**只有 AutoLink 开着时才兜底**：关掉开关就是「只提交我显式引用的」，
+  //     这时再兜底等于开关没生效（这条由 composer 通过 options.autoLink 带过来）。
+  const autoLinkEnabled = options?.autoLink !== false
   const rawRefImages = Array.isArray(options?.referenceImages) && options.referenceImages.length
     ? options.referenceImages
-    : upstreamReferenceUrls.value
+    : (autoLinkEnabled ? upstreamReferenceUrls.value : [])
   // 再做一次栅格过滤，防止用户直接通过 ContentGenerator 上传 SVG/PDF 等
   const refImages = rawRefImages.filter(isRasterReferenceUrl)
   if (rawRefImages.length > refImages.length) {

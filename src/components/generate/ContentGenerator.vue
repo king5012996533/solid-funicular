@@ -10,6 +10,7 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 // 导入子组件
 import { TypeSelector, type CreationType } from './selectors'
 import { AgentToolbar, ImageToolbar, VideoToolbar, DigitalHumanToolbar } from './toolbars'
+import { appendAutoLinkedTokens, type AutoLinkInput } from './auto-link'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
 import {
   probeReferenceUrls,
@@ -121,6 +122,12 @@ interface GeneratorSendOptions {
   capabilityFlags?: ModelCapabilityFlags
   /** 解析失败的引用 token 原文（资产已失效或序号不存在），由调用方决定是否提示 */
   unresolvedReferences?: string[]
+  /**
+   * 「智能引用 AutoLink」的开关状态。
+   * 节点侧据此决定要不要走「没有 @ 就注入全部上游素材」的兜底：
+   * 关掉开关时不能再兜底，否则关了个寂寞。
+   */
+  autoLink?: boolean
 }
 
 interface GeneratorDraftPayload {
@@ -201,6 +208,29 @@ const readAutoValidatePreference = (): boolean => {
   const stored = window.localStorage.getItem(AUTO_VALIDATE_STORAGE_KEY)
   return stored === null ? true : stored === '1'
 }
+/**
+ * 「智能引用 AutoLink」开关（对齐 LibTV）。
+ *
+ * 语义：**上游连入、而你没在提示词里 @ 的素材，自动进这次提交** ——
+ * 正文里补上 `@图片1`（解析后是 `【图片1】`），URL 照样走请求体。
+ * 关掉后只用你显式 @ 的那些；节点侧原本「没有 @ 就注入全部上游」的兜底也会一起停
+ * （靠 send options 里的 autoLink 传过去，否则关了开关上游图还是会被塞进来）。
+ *
+ * 与「自动校验素材」一样存成全局偏好（localStorage），不挂到单个节点上 ——
+ * 这是使用习惯，不是某张卡的参数。
+ */
+const AUTO_LINK_STORAGE_KEY = 'canana:generator:auto-link'
+const readAutoLinkPreference = (): boolean => {
+  if (typeof window === 'undefined') return true
+  const stored = window.localStorage.getItem(AUTO_LINK_STORAGE_KEY)
+  return stored === null ? true : stored === '1'
+}
+const autoLinkEnabled = ref(readAutoLinkPreference())
+watch(autoLinkEnabled, (on) => {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(AUTO_LINK_STORAGE_KEY, on ? '1' : '0')
+})
+
 const autoValidateReferences = ref(readAutoValidatePreference())
 watch(autoValidateReferences, (on) => {
   if (typeof window === 'undefined') return
@@ -600,6 +630,33 @@ const hasReferenceTokens = computed(() => {
   return resolved.media.length > 0 || resolved.texts.length > 0
 })
 
+/**
+ * AutoLink 的输入：开关状态 + 候选资产 + 已被显式引用的媒体 URL。
+ * 规则本身在 auto-link.ts（纯函数、有单测），这里只负责把响应式数据喂进去。
+ */
+const autoLinkInput = computed<AutoLinkInput>(() => ({
+  input: inputValue.value,
+  assets: referenceAssets.value,
+  referencedMediaUrls: resolvedReferences.value.media,
+  enabled: autoLinkEnabled.value,
+}))
+
+const autoLinkResult = computed(() => appendAutoLinkedTokens(autoLinkInput.value))
+
+/**
+ * 提交时真正用的提示词与引用解析。
+ * 开了 AutoLink 且有待自动引用的素材时，先把它们的 token 拼进正文再解析 ——
+ * 于是正文里出现 `【图片1】`、URL 进 media，两处与手写引用走的是同一条路。
+ */
+const outgoingResolution = computed(() => {
+  const autoLinkedPrompt = autoLinkResult.value.prompt
+  if (autoLinkedPrompt === inputValue.value) return resolvedReferences.value
+  return resolvePromptReferences(autoLinkedPrompt, referenceAssets.value)
+})
+
+/** 这次提交会自动带几个素材（UI 上如实告知） */
+const autoLinkedCount = computed(() => autoLinkResult.value.tokens.length)
+
 /** 「已引用」行只展示媒体（图片 / 视频）—— 文本引用读不出缩略图，语义也不一样 */
 const referencedMediaItems = computed(() => {
   const resolved = resolvedReferences.value
@@ -704,9 +761,11 @@ const ensureReferencesUsable = async (urls: string[]): Promise<boolean> => {
 }
 
 const handleSubmit = async () => {
-  const resolved = resolvedReferences.value
-  // 没有引用任何 token 时直接用原始输入，保证既有调用方行为逐字节不变
-  const message = (hasReferenceTokens.value ? resolved.text : inputValue.value).trim()
+  const resolved = outgoingResolution.value
+  // 自动引用也要走「解析后正文」这条路（内容里会出现【图片N】），
+  // 否则关了 AutoLink、又没手写 @ 时才能保持逐字节原样
+  const hasAutoLinked = autoLinkedCount.value > 0
+  const message = (hasReferenceTokens.value || hasAutoLinked ? resolved.text : inputValue.value).trim()
   if (!message) return
 
   // 提交前校验参考图；不通过就停在本地，不发请求
@@ -716,6 +775,8 @@ const handleSubmit = async () => {
   const unresolvedOptions = resolved.unresolved.length
     ? { unresolvedReferences: [...resolved.unresolved] }
     : {}
+  // 开关状态随提交带出去：节点侧「没有 @ 就注入全部上游」的兜底要跟着关
+  const autoLinkOption = { autoLink: autoLinkEnabled.value }
 
   // 未登录时直接弹出登录框，并保留当前输入内容。
   if (!authStore.isLoggedIn.value) {
@@ -736,6 +797,7 @@ const handleSubmit = async () => {
       referenceImages: collectOutgoingReferences(resolved.media),
       count: toolbar?.currentCount || 1,
       ...unresolvedOptions,
+      ...autoLinkOption,
     }
     emit('send', message, currentType.value, sendOptions)
   } else if (currentType.value === 'video' && videoToolbarRef.value) {
@@ -1893,6 +1955,27 @@ onUnmounted(() => {
                 </span>
                 <span class="generator-switch__label">自动校验素材</span>
               </button>
+              <!-- 智能引用 AutoLink（对齐 LibTV）：上游连入但没被 @ 的素材自动进本次提交。
+                  右边如实显示会带几个 —— 不让用户在看不见的情况下被塞素材。 -->
+              <button
+                type="button"
+                class="generator-switch"
+                :class="{ 'is-on': autoLinkEnabled }"
+                role="switch"
+                :aria-checked="autoLinkEnabled"
+                :title="autoLinkEnabled
+                  ? '上游连入、而你没 @ 的素材会自动引用进本次提交；关掉后只提交你显式 @ 的素材'
+                  : '已关闭：只提交你在提示词里显式 @ 的素材'"
+                @click.stop="autoLinkEnabled = !autoLinkEnabled"
+              >
+                <span class="generator-switch__track" aria-hidden="true">
+                  <span class="generator-switch__thumb" />
+                </span>
+                <span class="generator-switch__label">智能引用 AutoLink</span>
+                <span v-if="autoLinkEnabled && autoLinkedCount" class="generator-switch__hint">
+                  自动引用 {{ autoLinkedCount }} 个
+                </span>
+              </button>
             </template>
           </div>
         </div>
@@ -2886,6 +2969,12 @@ onUnmounted(() => {
 .generator-switch:hover {
   background: var(--bg-block-secondary-hover);
   color: var(--text-primary);
+}
+
+/* 自动引用计数：如实告知这次会自动带几个素材，别让用户在看不见的情况下被塞素材 */
+.generator-switch__hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 .generator-switch__track {
