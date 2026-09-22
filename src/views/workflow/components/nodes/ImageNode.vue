@@ -28,6 +28,7 @@ import { loadPublicModelCatalog, getModelByName, getDefaultImageModelKey, type I
 import { pickSizeByAspect, pickValidChoice, resolveImageParamSchema } from '@/config/model-params'
 import { ENHANCE_PRESET, type ImageEditPreset } from '../../config/image-edit-presets'
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
+import { useComposerPanel } from '../../composables/useComposerPanel'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -67,6 +68,9 @@ const showEmpty = computed(() => !showLoading.value && !showError.value && !show
  * 横版 622×350、竖版 350×622、方版 350×350。图用 object-cover 填满这张框。
  */
 const cardSize = computed(() => resolveGenerationCardSize(appliedParams.value.ratio))
+
+/** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
+const { style: composerStyle } = useComposerPanel()
 
 const triggerUpload = () => fileInputRef.value?.click()
 const handleFileChange = async (event: Event) => {
@@ -504,7 +508,12 @@ watch(
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
     <el-image-viewer v-if="previewVisible" :url-list="[previewTarget]" :z-index="4000" :scale="0.86" teleported hide-on-click-modal @close="previewVisible = false" />
-    <div v-if="isSelected && !showLoading" class="image-node-prompt-panel nodrag nopan" @mousedown.stop>
+    <div
+      v-if="isSelected && !showLoading"
+      class="image-node-prompt-panel nodrag nopan"
+      :style="composerStyle"
+      @mousedown.stop
+    >
       <ContentGenerator
         layout="sidebar"
         :collapsible="false"
@@ -546,5 +555,6 @@ watch(
 .image-node-empty-item-icon { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; color: var(--text-tertiary); font-size: 16px; }
 .image-node-empty-item:hover .image-node-empty-item-icon { color: var(--text-primary); }
 
-.image-node-prompt-panel { position: absolute; top: calc(100% + 18px); left: 50%; transform: translateX(-50%); z-index: 10; }
+/* 宽 660、不随画布缩放 —— 都由内联 style 给（见 composerStyle），这里只负责挂到卡片正下方 */
+.image-node-prompt-panel { position: absolute; top: calc(100% + 18px); left: 50%; z-index: 10; }
 </style>

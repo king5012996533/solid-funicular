@@ -31,6 +31,7 @@ import ContentGenerator from '@/components/generate/ContentGenerator.vue'
 import type { CreationType } from '@/components/generate/selectors'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { CANVAS_TOOL_NODE_SIZE, cardSizeStyle } from '../../config/node-size'
+import { useComposerPanel } from '../../composables/useComposerPanel'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
@@ -54,6 +55,9 @@ const props = defineProps<{
 const isSelected = computed(() => props.selected || props.data?.selected)
 const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || 'Text')
 const { updateNodeInternals } = useVueFlow()
+
+/** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
+const { style: composerStyle } = useComposerPanel()
 
 const content = ref(props.data?.content || '')
 const showActions = ref(false)
@@ -407,7 +411,7 @@ watch(content, async () => {
     <CanvasNodeTopToolbar :visible="isSelected && !isEmpty" :items="topToolbarItems" />
 
     <!-- 选中态下方浮出 prompt 输入框（按节点类型差异化） -->
-    <div v-if="isSelected" class="text-node-prompt-panel nodrag nopan" @mousedown.stop>
+    <div v-if="isSelected" class="text-node-prompt-panel nodrag nopan" :style="composerStyle" @mousedown.stop>
       <ContentGenerator
         layout="sidebar"
         :collapsible="false"
@@ -624,14 +628,11 @@ watch(content, async () => {
 }
 
 /* 选中态下方 prompt 浮层 */
+/* 宽 660、不随画布缩放 —— 都由内联 style 给（见 useComposerPanel），这里只负责挂到卡片正下方 */
 .text-node-prompt-panel {
   position: absolute;
   top: calc(100% + 12px);
   left: 50%;
-  transform: translateX(-50%);
-  width: max-content;
-  min-width: 380px;
-  max-width: 560px;
   z-index: 5;
 }
 </style>

@@ -41,6 +41,7 @@ import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
+import { useComposerPanel } from '../../composables/useComposerPanel'
 
 const props = defineProps<{
   id: string
@@ -131,6 +132,9 @@ const resolvedResolution = computed(() => {
 
 /** 卡片尺寸跟着「比例」参数走（对齐 LibTV 实测，见 config/node-size.ts） */
 const cardSize = computed(() => resolveGenerationCardSize(resolvedRatio.value))
+
+/** 输入框浮层：固定 660 宽 + 不随画布缩放（规则见 composables/useComposerPanel.ts） */
+const { style: composerStyle } = useComposerPanel()
 
 const appliedParams = computed<GeneratorParamsSnapshot>(() => ({
   modelKey: resolvedModelKey.value,
@@ -437,7 +441,12 @@ const handlePromptSend = (
 
     <CanvasNodeHoverToolbar :visible="showActions" :actions="hoverActions" />
 
-    <div v-if="isSelected && !showLoading" class="video-node-prompt-panel nodrag nopan" @mousedown.stop>
+    <div
+      v-if="isSelected && !showLoading"
+      class="video-node-prompt-panel nodrag nopan"
+      :style="composerStyle"
+      @mousedown.stop
+    >
       <ContentGenerator
         layout="sidebar"
         :collapsible="false"
@@ -748,14 +757,11 @@ const handlePromptSend = (
 .video-node-add-btn:hover { color: var(--text-primary); }
 .video-node-add-btn:active { transform: translateY(-50%) scale(0.95); }
 
+/* 宽 660、不随画布缩放 —— 都由内联 style 给（见 useComposerPanel），这里只负责挂到卡片正下方 */
 .video-node-prompt-panel {
   position: absolute;
   top: calc(100% + 12px);
   left: 50%;
-  transform: translateX(-50%);
-  width: max-content;
-  min-width: 540px;
-  max-width: 760px;
   z-index: 5;
 }
 </style>
