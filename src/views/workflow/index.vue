@@ -66,7 +66,7 @@ import type { GraphNode } from '@vue-flow/core'
 import type { CanvasAgentContext } from './agent/canvas-agent-tools'
 import { runNodeById } from './composables/useCanvasNodeRunner'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
-import { resolveModelSelectionKey } from '@/config/models'
+import { resolveModelSelectionKey, getAllImageModels, getAllVideoModels, getAllChatModels } from '@/config/models'
 
 const router = useRouter()
 const route = useRoute()
@@ -1274,8 +1274,25 @@ const normalizeAgentModelPatch = (type: string, patch: Record<string, unknown>) 
   const model = typeof patch?.model === 'string' ? patch.model.trim() : ''
   if (!model) return patch
   const category = type === 'image' ? 'IMAGE' : type === 'video' ? 'VIDEO' : 'CHAT'
-  const resolved = resolveModelSelectionKey(model, category)
-  return resolved && resolved !== model ? { ...patch, model: resolved } : patch
+  const byKey = resolveModelSelectionKey(model, category)
+  if (byKey) return { ...patch, model: byKey }
+  /**
+   * 再按**展示名**匹配一次：Agent 常常直接把面板上看到的名字念出来（例如「打桩视频（本地）」），
+   * 而画布上存的是 providerId::CATEGORY::modelKey。
+   * 之前只按 key 匹配 → 匹配不到就把这个裸名字写进节点 → 节点解析不了、静默回退到默认模型
+   * （实测：节点上的模型被换成了 Seedance）。
+   */
+  const candidates = category === 'IMAGE' ? getAllImageModels() : category === 'VIDEO' ? getAllVideoModels() : getAllChatModels()
+  const normalized = model.toLowerCase()
+  const byLabel = candidates.find((item) => {
+    const label = String((item as { label?: string }).label || '').toLowerCase()
+    return label && (label === normalized || label.includes(normalized) || normalized.includes(label))
+  })
+  if (byLabel) return { ...patch, model: byLabel.key }
+  // 两边都匹配不到：**不要**把裸名字写进节点（那会让它回退到默认模型），保持节点原样并留下痕迹
+  console.warn('[canvas-agent] 模型名无法解析，已忽略该字段：', model)
+  const { model: _ignored, ...rest } = patch
+  return rest
 }
 
 const canvasAgentContext: CanvasAgentContext = {
