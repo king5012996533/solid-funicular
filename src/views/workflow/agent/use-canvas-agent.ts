@@ -6,6 +6,7 @@ import {
 } from "@/api/ai-gateway";
 import { buildApiUrl } from "@/api/http";
 import {
+  getAllChatModels,
   getDefaultChatModelKey,
   loadPublicModelCatalog,
 } from "@/config/models";
@@ -84,16 +85,31 @@ export const useCanvasAgent = (options: UseCanvasAgentOptions) => {
   const error = ref("");
   let controller: AbortController | null = null;
 
-  const resolveModelKey = () => {
+  /**
+   * 解析这次要用哪个对话模型。
+   *
+   * 两个坑（都是实测踩到的）：
+   *   1. `getDefaultChatModelKey()` 返回的是目录里的 **selectionKey**（providerId::CATEGORY::modelKey），
+   *      而网关那侧要的是**裸 modelKey** —— 直接把 selectionKey 传过去会得到「模型不存在或未启用」。
+   *   2. 目录在客户端是模块级缓存：管理员在后台改配置（例如停用某个厂商）后，页面不刷新就一直用旧的，
+   *      于是请求打到一个已经停用的厂商上。这里**强制刷新**一次，免得每次都要用户手动刷新页面。
+   */
+  const resolveModelKey = async () => {
     const explicit = options.modelKey?.() || "";
     if (explicit) return explicit;
-    return getDefaultChatModelKey();
+    await loadPublicModelCatalog(true);
+    const selectionKey = getDefaultChatModelKey();
+    const chatModels = getAllChatModels();
+    const picked = chatModels.find((item) => item.key === selectionKey)
+      || chatModels.find((item) => selectionKey.endsWith(item.modelKey))
+      || chatModels[0];
+    return picked?.modelKey || "";
   };
 
   /** 一次模型调用：带上工具清单，返回 message（可能是 tool_calls，也可能是最终文本） */
   const callModel = async (messages: ChatTurn[], signal: AbortSignal) => {
-    await loadPublicModelCatalog();
-    const modelKey = resolveModelKey();
+    // 目录刷新在 resolveModelKey 里做（force 一次），这里不再重复加载
+    const modelKey = await resolveModelKey();
     if (!modelKey)
       throw new Error(
         "后台还没有配置可用的对话模型（去「模型配置」里加一个 CHAT 模型）",
