@@ -1,10 +1,12 @@
 import type { GenerationTaskStreamEvent } from './shared'
+import type { GenerationTaskStrategyKey } from './strategy'
 
 export interface LocalRunningGenerationTask {
   recordId: string
   userId: string
   type: 'image' | 'agent' | 'research'
-  strategyKey: string
+  // 用策略键联合类型（而不是宽松 string）：运行时治理层的 RuntimeManagedTask 依赖它做收窄
+  strategyKey: GenerationTaskStrategyKey
   abortController: AbortController
   associationNo: string
   billedEndpointType: 'chat' | 'image' | 'video'

@@ -350,7 +350,10 @@ export const rankReadTargets = (
   const displayNameAnchor = queryAnchors.find(item => !item.includes('/') && /[A-Za-z]/.test(item)) || subject
 
   return [
-    ...seedUrls.map((url, index) => ({
+    // 显式标注 item 类型：不标的话 TS 会把这一支推成 `{title,url,snippet,siteName,publishedTime}`，
+    // 与另一支（完整 ResearchSearchResultItem）求并集后丢掉 siteIcon/query/referenceIndex，
+    // 下游 deep-reading 一读这三个可选字段就报「属性不存在」（运行时它们本来就在）。
+    ...seedUrls.map((url, index): { item: ResearchSearchResultItem; allowExternalWithoutAnchor: boolean } => ({
       item: {
         title: `用户提供链接 ${index + 1}`,
         url,

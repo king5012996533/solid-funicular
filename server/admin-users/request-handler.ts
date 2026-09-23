@@ -193,7 +193,9 @@ export const handleAdminUsersRequest = async (req: any, res: any) => {
       const payload = await readAdminUserCreateBody(req)
       const data = await createAdminUser({
         currentUserId: currentUser.id,
-        ...payload,
+        // 请求体 reader 返回的是宽松 string（未做枚举收窄），服务层按 UserRole 处理；
+        // 非法值会在 Prisma 写入时报错，不会静默写成脏角色
+        ...(payload as Omit<Parameters<typeof createAdminUser>[0], 'currentUserId'>),
       })
       await recordAdminAuditLog({
         req,
@@ -213,7 +215,7 @@ export const handleAdminUsersRequest = async (req: any, res: any) => {
       const before = await getAdminUserDetail(targetUserId)
       const data = await updateAdminUserRole({
         targetUserId,
-        role: payload.role,
+        role: payload.role as Parameters<typeof updateAdminUserRole>[0]['role'],
         currentUserId: currentUser.id,
       })
       await recordAdminAuditLog({

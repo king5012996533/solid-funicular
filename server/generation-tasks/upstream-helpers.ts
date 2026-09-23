@@ -15,12 +15,10 @@ import {
 } from '../../src/shared/upstream-request-normalizer'
 import {
   extractChatTextFromJsonPayload,
-  extractChatReasoningFromJsonPayload,
   extractImageUrlsFromJsonResponse,
   extractImageUrlsFromText,
   parseChatChunkError,
   parseChatChunkText,
-  parseChatChunkReasoning,
   parseUpstreamStreamChunk,
 } from '../../src/shared/upstream-stream-parser'
 

@@ -1,11 +1,9 @@
 import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './shared'
 import type { GenerationRecordPayload } from '../generation-records/shared'
+import type { RuntimeManagedTask } from './task-runtime-governor'
 
-type ImageExecutionTask = {
-  recordId: string
-  userId: string
-  abortController: AbortController
-}
+// 与运行时治理层、策略层统一同一份任务类型（详见 execution-strategies.ts 的说明）
+type ImageExecutionTask = RuntimeManagedTask
 
 type ImageTaskRetryState = {
   attempt: number
@@ -44,10 +42,13 @@ export interface ImageTaskExecutorContext {
     size?: string
     count?: number
     referenceImages: string[]
+    /** 局部重绘蒙版（透明处 = 可重绘区域）。实现层 upstream-helpers 早就支持，声明漏了 → 传就被报类型错。 */
+    mask?: string
     onRetry?: (retryState: ImageTaskRetryState) => Promise<void> | void
   }) => Promise<{ upstreamUrl: string; imageUrls: string[] }>
   buildInitialRecordPayload: (payload: GenerationTaskStartPayload) => GenerationRecordPayload
-  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<void>
+  // 实现层返回更新后的记录；这里只关心写成功与否
+  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<unknown>
   getGenerationRecordById: (recordId: string, currentUserId: string) => Promise<Record<string, unknown>>
   emitTaskStreamEvent: (recordId: string, event: GenerationTaskStreamEvent) => void
   logGenerationTask: (stage: string, detail: Record<string, unknown>) => void
@@ -82,7 +83,9 @@ export const executeImageTask = async (
   const referenceImages = Array.isArray(payload.referenceImages)
     ? payload.referenceImages.map(item => String(item || '').trim()).filter(Boolean)
     : []
-  const requestBody = {
+  // 显式标成 Record<string, unknown>：不标的话 TS 会把这里推成 { model: string }，
+  // 于是下面读 requestBody.prompt / .size / .mask 全是「属性不存在」（其实运行时都在）
+  const requestBody: Record<string, unknown> = {
     ...(payload.requestBody || {}),
     model: modelKey,
   }

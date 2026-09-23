@@ -15,6 +15,7 @@ import {
 } from '../generation-sessions/service'
 import { writeScopedLog } from '../shared/logging'
 import type { GenerationRecordPayload, GenerationOutputPayload } from './shared'
+import { toNullableJsonInput } from '../shared/json-input'
 
 const GENERATION_RECORDS_LIST_SCOPE = 'generation-records-list'
 const GENERATION_RECORDS_LIST_CACHE_PATTERN = redisKeys.cache(GENERATION_RECORDS_LIST_SCOPE, '*')
@@ -661,6 +662,28 @@ const mapAgentStepStatus = (status?: string) => {
 }
 
 // 过程分组类型映射
+/**
+ * 落库时读的是 AgentRunStep / AgentProcessSection 这两张表的**列名**（stepKey / sortOrder /
+ * paragraphsJson …），与展示层的 `AgentTaskStep` / `AgentProcessSection` 不是一套字段
+ * —— 一开始按展示层类型标注，反而多出 10 处「属性不存在」。这里按实际读的字段声明最小形状。
+ */
+type PersistedAgentStep = {
+  stepKey?: string | null
+  title?: string | null
+  status?: string | null
+  description?: string | null
+  sortOrder?: number | null
+}
+
+type PersistedAgentSection = {
+  sectionKey?: string | null
+  kind?: string | null
+  label?: string | null
+  paragraphsJson?: unknown
+  taskItemsJson?: unknown
+  sortOrder?: number | null
+}
+
 const mapAgentProcessSectionKind = (kind?: string) => {
   return kind === 'skill' ? 'SKILL' : 'REASONING'
 }
@@ -909,7 +932,7 @@ export const createGenerationRecord = async (payload: GenerationRecordPayload, c
           feature: String(payload.feature || '').trim() || null,
           skill: String(payload.skill || '').trim() || 'general',
           agentTaskId: String(payload.agentTaskId || '').trim() || null,
-          metaJson: {
+          metaJson: toNullableJsonInput({
             source: String(payload.source || 'generate').trim() || 'generate',
             referenceImages: normalizedReferenceImages,
             ...(typeof payload.thinkingContent === 'string'
@@ -918,7 +941,7 @@ export const createGenerationRecord = async (payload: GenerationRecordPayload, c
             ...(payload.research && typeof payload.research === 'object'
               ? { research: payload.research }
               : {}),
-          },
+          }),
           startedAt: new Date(),
           finishedAt: payload.done ? new Date() : null,
         },
@@ -1012,7 +1035,7 @@ export const createGenerationRecord = async (payload: GenerationRecordPayload, c
 
           if (agentRun.steps.length) {
             await tx.agentRunStep.createMany({
-              data: agentRun.steps.map((step) => ({
+              data: agentRun.steps.map((step: PersistedAgentStep) => ({
                 agentRunId: createdAgentRun.id,
                 stepKey: step.stepKey,
                 title: step.title,
@@ -1025,7 +1048,7 @@ export const createGenerationRecord = async (payload: GenerationRecordPayload, c
 
           if (agentRun.processSections.length) {
             await tx.agentProcessSection.createMany({
-              data: agentRun.processSections.map((section) => ({
+              data: agentRun.processSections.map((section: PersistedAgentSection) => ({
                 agentRunId: createdAgentRun.id,
                 sectionKey: section.sectionKey,
                 kind: section.kind,
@@ -1179,7 +1202,7 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
           feature: String(payload.feature || '').trim() || null,
           skill: String(payload.skill || '').trim() || 'general',
           agentTaskId: String(payload.agentTaskId || '').trim() || null,
-          metaJson: {
+          metaJson: toNullableJsonInput({
             ...(((existingRecord.metaJson as Record<string, unknown> | null) || {})),
             source: String(payload.source || (existingRecord.metaJson as any)?.source || 'generate').trim() || 'generate',
             ...(shouldOverwriteReferenceImages
@@ -1191,7 +1214,7 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
             ...(payload.research && typeof payload.research === 'object'
               ? { research: payload.research }
               : {}),
-          },
+          }),
           finishedAt: payload.done ? new Date() : null,
         },
       })
@@ -1344,7 +1367,7 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
 
         if (agentRun.steps.length) {
           await tx.agentRunStep.createMany({
-            data: agentRun.steps.map((step) => ({
+            data: agentRun.steps.map((step: PersistedAgentStep) => ({
               agentRunId: savedAgentRun.id,
               stepKey: step.stepKey,
               title: step.title,
@@ -1357,7 +1380,7 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
 
         if (agentRun.processSections.length) {
           await tx.agentProcessSection.createMany({
-            data: agentRun.processSections.map((section) => ({
+            data: agentRun.processSections.map((section: PersistedAgentSection) => ({
               agentRunId: savedAgentRun.id,
               sectionKey: section.sectionKey,
               kind: section.kind,

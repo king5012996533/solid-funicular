@@ -2,24 +2,35 @@ import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './sh
 import type { GenerationRecordPayload } from '../generation-records/shared'
 import type { GenerationTaskStrategyKey } from './strategy'
 import type { AgentRunState } from '../../src/types/agent'
+import type { RuntimeManagedTask, SyncStatus } from './task-runtime-governor'
 
 export type TaskAbortReason = 'user_stop' | 'shared_stop' | 'execution_lock_lost'
 
-type SettlementTask = {
-  recordId: string
-  userId: string
-  strategyKey: string
-}
+/**
+ * 结算路径手上的任务对象。
+ *
+ * 以前这里是**第三份**最小类型 `{recordId, userId, strategyKey}`，而运行时治理层（task-runtime-governor）
+ * 用的是 `RuntimeManagedTask`（多一个 `type`）、各执行器又各自声明了第四、第五份
+ * `{recordId, userId, abortController}`。三份形状互相不可赋值，于是上下文对象一传递就报 33 处类型错
+ * （2026-09-23 清债时发现）。现在统一用治理层那一份 —— 运行时本来就是同一个对象。
+ */
+type SettlementTask = RuntimeManagedTask
 
 type SettlementRecord = Record<string, unknown> & {
   content?: string
   agentRun?: AgentRunState | null
 }
 
-type EmitTaskProgressEvent = (recordId: string, event: {
+/**
+ * 任务进度事件。字段取各执行器用到的并集（`record`/`done` 是工作台那套在传）——
+ * 以前只声明 stage/stopped/message，工作台执行器按自己的形状传 record 就报类型错。
+ */
+export type EmitTaskProgressEvent = (recordId: string, event: {
   stage: string
-  stopped?: boolean
   message?: string
+  stopped?: boolean
+  done?: boolean
+  record?: Record<string, unknown> | null
 }) => void
 
 type EmitTaskStreamEvent = (recordId: string, event: GenerationTaskStreamEvent) => void
@@ -37,9 +48,10 @@ export interface GenerationTaskExecutionStrategyContext {
   emitTaskProgressEvent: EmitTaskProgressEvent
   emitTaskStreamEvent: EmitTaskStreamEvent
   buildInitialRecordPayload: (payload: GenerationTaskStartPayload) => GenerationRecordPayload
-  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<void>
+  // 实现层返回更新后的记录；这里只关心「写成功了没有」，所以返回值类型放宽（写 void 会让实现无法赋值）
+  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<unknown>
   getGenerationRecordById: (recordId: string, currentUserId: string) => Promise<SettlementRecord>
-  syncSharedTaskRuntime: (task: SettlementTask, status: 'stopped' | 'failed') => Promise<void>
+  syncSharedTaskRuntime: (task: SettlementTask, status: SyncStatus, extra?: Record<string, unknown>) => Promise<void>
   buildAgentStoppedRun: (agentRun: AgentRunState, message: string) => AgentRunState
   buildAgentErrorRun: (agentRun: AgentRunState, message: string) => AgentRunState
   normalizeGenerationErrorMessage: (error: unknown, fallbackMessage: string) => string

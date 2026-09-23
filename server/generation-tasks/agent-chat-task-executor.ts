@@ -6,20 +6,12 @@ import {
   parseModelCapabilitySpec,
   readCapabilityFlagsFromRequestBody,
 } from '../../src/shared/provider-capability'
+import type { RetryState, RuntimeManagedTask } from './task-runtime-governor'
 
-type AgentChatExecutionTask = {
-  recordId: string
-  userId: string
-  abortController: AbortController
-}
+// 与运行时治理层、策略层统一同一份任务类型（详见 execution-strategies.ts 的说明）
+type AgentChatExecutionTask = RuntimeManagedTask
 
-type AgentChatRetryState = {
-  attempt: number
-  waitDurationMs: number
-  status: number
-  errorPreview: string
-  stage: string
-}
+type AgentChatRetryState = RetryState
 
 type PersistState = {
   lastPersistAt: number
@@ -77,7 +69,8 @@ export interface AgentChatTaskExecutorContext {
     force?: boolean
   }, state: PersistState) => Promise<void>
   buildInitialRecordPayload: (payload: GenerationTaskStartPayload) => GenerationRecordPayload
-  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<void>
+  // 实现层返回更新后的记录；这里只关心写成功与否，写 void 会让实现无法赋值
+  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<unknown>
   getGenerationRecordById: (recordId: string, currentUserId: string) => Promise<Record<string, unknown>>
   emitTaskStreamEvent: (recordId: string, event: GenerationTaskStreamEvent) => void
   logGenerationTask: (stage: string, detail: Record<string, unknown>) => void

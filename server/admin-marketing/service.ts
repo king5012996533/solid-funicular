@@ -163,7 +163,9 @@ const parseMembershipPlanBenefits = (value: unknown) => {
   }
 }
 
-const pickDefaultMembershipBillingRule = (billingRules: NormalizedMembershipBillingRule[]) => {
+// 用泛型保住调用方传进来的富类型：billingRules 里每项都被补过 `level`（见 decorateMembershipPlanRecord），
+// 但参数标成基础类型会让返回值丢掉 `level` —— 下面 `level: defaultRule?.level` 就报「属性不存在」。
+const pickDefaultMembershipBillingRule = <T extends NormalizedMembershipBillingRule>(billingRules: T[]) => {
   return billingRules.find((item) => item.status) || billingRules[0] || null
 }
 

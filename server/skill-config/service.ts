@@ -7,6 +7,7 @@ import type {
 } from '@prisma/client'
 import { isPrismaConfigured, prisma } from '../db/prisma'
 import { getOrSetJsonCache, invalidateRedisCaches, redisKeys } from '../redis'
+import { toNullableJsonInput } from '../shared/json-input'
 
 export interface AdminSkillItem {
   id: string
@@ -928,7 +929,7 @@ const ensureBuiltInSkillSeeds = async () => {
             isEnabled: normalizedPayload.isEnabled,
             isBuiltIn: true,
             sortOrder: normalizedPayload.sortOrder,
-            configJson: normalizedPayload.configJson,
+            configJson: toNullableJsonInput(normalizedPayload.configJson),
           },
         })
 
@@ -1263,7 +1264,7 @@ const replaceSkillTemplates = async (
         workflowLabel: item.workflowLabel,
         workflowType: item.workflowType,
         expectedImageCount: item.expectedImageCount,
-        workflowParamsTemplateJson: item.workflowParamsTemplateJson,
+        workflowParamsTemplateJson: toNullableJsonInput(item.workflowParamsTemplateJson),
         isEnabled: item.isEnabled,
       })),
     })
@@ -1320,7 +1321,7 @@ export const createAdminSkill = async (payload: AdminSkillPayload) => {
         isEnabled: normalizedPayload.isEnabled,
         isBuiltIn: normalizedPayload.isBuiltIn,
         sortOrder: normalizedPayload.sortOrder,
-        configJson: normalizedPayload.configJson,
+        configJson: toNullableJsonInput(normalizedPayload.configJson),
       },
     })
 
@@ -1368,7 +1369,7 @@ export const updateAdminSkill = async (skillKey: string, payload: AdminSkillPayl
         isEnabled: normalizedPayload.isEnabled,
         isBuiltIn: normalizedPayload.isBuiltIn,
         sortOrder: normalizedPayload.sortOrder,
-        configJson: normalizedPayload.configJson,
+        configJson: toNullableJsonInput(normalizedPayload.configJson),
       },
     })
 

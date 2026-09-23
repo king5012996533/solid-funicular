@@ -9,18 +9,17 @@ import type {
 } from '../../../src/shared/research/research-types'
 import type { ResearchEvidenceStore } from '../evidence-store'
 import type { ResearchUsageAccumulator } from './usage-accumulator'
+import type { RuntimeManagedTask } from '../../generation-tasks/task-runtime-governor'
 
-export type ResearchExecutionTask = {
-  recordId: string
-  userId: string
-  abortController: AbortController
-}
+// 与运行时治理层统一同一份任务类型（详见 generation-tasks/execution-strategies.ts 的说明）
+export type ResearchExecutionTask = RuntimeManagedTask
 
 export interface ResearchTaskExecutorContext {
   syncSharedTaskRuntime: (task: ResearchExecutionTask, status: 'running' | 'completed') => Promise<void>
   ensureTaskNotAborted: (task: ResearchExecutionTask) => Promise<void>
   buildInitialRecordPayload: (payload: GenerationTaskStartPayload) => GenerationRecordPayload
-  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<void>
+  // 实现层返回更新后的记录；这里只关心写成功与否
+  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<unknown>
   getGenerationRecordById: (recordId: string, currentUserId: string) => Promise<Record<string, unknown>>
   emitTaskStreamEvent: (recordId: string, event: GenerationTaskStreamEvent) => void
   emitTaskProgressEvent: (recordId: string, input: {

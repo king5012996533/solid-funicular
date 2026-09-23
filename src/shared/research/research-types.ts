@@ -103,15 +103,17 @@ export interface ResearchFact {
   statement: string
   confidence: ResearchConfidence
   supportedEvidenceIds: string[]
-  factType?: ResearchFactType
-  factNature?: ResearchFactNature
+  // 显式 `| undefined`：调用方会带着 `factType: maybeUndefined` 构造对象，
+  // 而 exactOptionalPropertyTypes 下「可选」不等于「可以显式传 undefined」
+  factType?: ResearchFactType | undefined
+  factNature?: ResearchFactNature | undefined
   numbers?: string[]
   timeRefs?: string[]
   directSourceDomainCount?: number
   independentSourceDomainCount?: number
   sourceDomainCount?: number
-  verificationStatus?: ResearchVerificationStatus
-  uncertaintyNote?: string
+  verificationStatus?: ResearchVerificationStatus | undefined
+  uncertaintyNote?: string | undefined
 }
 
 export interface ResearchReasoningSummary {

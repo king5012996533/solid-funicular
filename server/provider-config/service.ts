@@ -7,17 +7,12 @@ import {
   resolveEndpointModelCategory,
   resolveProviderEndpointField,
 } from '../../src/shared/provider-endpoint-strategy'
+import { toNullableJsonInput } from '../shared/json-input'
 
 const DEFAULT_PROVIDER_CODE = 'default-generate-provider'
 const DEFAULT_PROVIDER_NAME = '默认生成厂商'
 const DEFAULT_SUPPORTED_TYPES = ['CHAT', 'IMAGE', 'VIDEO']
 const LEGACY_DEFAULT_SCENE = 'generate'
-
-const MODEL_CATEGORY_TO_ENDPOINT_TYPE = {
-  CHAT: 'chat',
-  IMAGE: 'image',
-  VIDEO: 'video',
-} as const
 
 export interface PublicProviderCatalogItem {
   id: string
@@ -240,7 +235,7 @@ const materializeLegacyProvider = async () => {
       isEnabled: legacyConfig.isEnabled,
       isBuiltIn: false,
       sortOrder: 0,
-      extraJson: legacyConfig.extraJson || null,
+      extraJson: toNullableJsonInput(legacyConfig.extraJson || null),
     },
   })
 
@@ -262,8 +257,8 @@ const materializeLegacyProvider = async () => {
         category: item.category,
         name: item.label,
         modelKey: item.modelKey,
-        capabilityJson: item.capabilityJson,
-        defaultParamsJson: item.defaultParamsJson,
+        capabilityJson: toNullableJsonInput(item.capabilityJson),
+        defaultParamsJson: toNullableJsonInput(item.defaultParamsJson),
         sortOrder: item.sortOrder,
         isEnabled: item.isEnabled,
         isBuiltIn: false,
