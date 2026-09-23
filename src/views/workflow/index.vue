@@ -66,6 +66,7 @@ import type { GraphNode } from '@vue-flow/core'
 import type { CanvasAgentContext } from './agent/canvas-agent-tools'
 import { runNodeById } from './composables/useCanvasNodeRunner'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
+import { resolveModelSelectionKey } from '@/config/models'
 
 const router = useRouter()
 const route = useRoute()
@@ -1261,6 +1262,22 @@ const { isPanelCollapsed: isAssistantCollapsed, togglePanel: toggleAssistantPane
  * 面板自己不 import 画布 store：能力从这个对象进来，好处是能力清单一眼可读、
  * 也能用假上下文单测（scripts/tests/test-canvas-agent-tools.mjs）。
  */
+/**
+ * 把 Agent 给的模型名规范成画布上真正在用的格式。
+ *
+ * 画布节点的 `data.model` 存的是目录里的 **selectionKey**（providerId::CATEGORY::modelKey），
+ * 只写裸模型名（比如 mock-image）在生产里解析不到，会**静默回退到默认厂商** ——
+ * 实测时 Agent 就踩了这个坑：它把模型改成 mock-image 后执行，结果打到了另一个厂商上，
+ * 报出「API Key 解密失败」，而它自己还猜到了「看起来 key 格式不对」。
+ */
+const normalizeAgentModelPatch = (type: string, patch: Record<string, unknown>) => {
+  const model = typeof patch?.model === 'string' ? patch.model.trim() : ''
+  if (!model) return patch
+  const category = type === 'image' ? 'IMAGE' : type === 'video' ? 'VIDEO' : 'CHAT'
+  const resolved = resolveModelSelectionKey(model, category)
+  return resolved && resolved !== model ? { ...patch, model: resolved } : patch
+}
+
 const canvasAgentContext: CanvasAgentContext = {
   snapshotNodes: () => nodes.value.map((node) => ({
     id: node.id,
@@ -1280,10 +1297,11 @@ const canvasAgentContext: CanvasAgentContext = {
     x: window.innerWidth / 2,
     y: window.innerHeight / 2,
   }),
-  addNode: (type, position, data) => addNode(type as WorkflowNodeType, position, data),
+  addNode: (type, position, data) => addNode(type as WorkflowNodeType, position, normalizeAgentModelPatch(type, data || {})),
   updateNode: (id, patch) => {
-    if (!nodes.value.some((node) => node.id === id)) return false
-    updateNode(id, patch as Parameters<typeof updateNode>[1])
+    const target = nodes.value.find((node) => node.id === id)
+    if (!target) return false
+    updateNode(id, normalizeAgentModelPatch(target.type, patch || {}) as Parameters<typeof updateNode>[1])
     return true
   },
   removeNode: (id) => {
