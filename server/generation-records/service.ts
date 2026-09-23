@@ -149,6 +149,9 @@ const mapGenerationType = (type: string) => {
 }
 
 // 根据当前记录内容推导存储状态
+/** 三个「已经收口」的状态：一旦落到这里，就不允许被非终态的写入回退 */
+const TERMINAL_RECORD_STATUSES = new Set(['COMPLETED', 'STOPPED', 'FAILED'])
+
 const mapGenerationStatus = (payload: GenerationRecordPayload) => {
   if (payload.agentRun && typeof payload.agentRun === 'object') {
     const status = String(payload.agentRun.status || '').trim()
@@ -1188,7 +1191,7 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
     await prisma.$transaction(async (tx) => {
       const existingRecord = await tx.generationRecord.findUnique({
         where: { id },
-        select: { id: true, userId: true, sessionId: true, createdAt: true, metaJson: true },
+        select: { id: true, userId: true, sessionId: true, createdAt: true, metaJson: true, status: true },
       })
 
       if (!existingRecord) {
@@ -1197,6 +1200,33 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
 
       if (existingRecord.userId !== currentUserId) {
         throw new Error('无权修改当前生成记录')
+      }
+
+      /**
+       * 终态不允许被回退（2026-09-23，真机事故）。
+       *
+       * 事故现场：首页出图，上游 23:42:31 已经成功并写入了 1 张图（日志 `图片任务请求成功 imageCount:1`），
+       * 但同一个记录又被写了一次 `done:false / outputCount:0`，最后变成 STOPPED、0 输出 ——
+       * **图被删掉了**，界面停在「同步中」，用户以为一直没出结果，最后点了停止。
+       *
+       * 成因是丢更新（lost update）：客户端在处理 `progress` 事件时会节流回写整条记录
+       * （它只会带上自己知道的 done/images），这次回写在数据库慢的时候会**比服务端的完成写入更晚落库**，
+       * 于是用一份过期快照覆盖了终态。而 `updateGenerationRecord` 是「全量重建 outputs」，
+       * 过期快照里的 0 张图就把真图删了。
+       *
+       * 这里做服务端兜底：只要库里已经是终态，而这次写入还是非终态，就**整条忽略**。
+       * 不靠前端自觉 —— 前端的定时回写、重试、多标签页都可能把旧快照送上来，数据不能由它决定生死。
+       */
+      const incomingStatus = mapGenerationStatus(payload)
+      if (TERMINAL_RECORD_STATUSES.has(existingRecord.status) && !TERMINAL_RECORD_STATUSES.has(incomingStatus)) {
+        logGenerationRecord('update_generation_record:ignore_stale_terminal_regression', {
+          currentUserId,
+          generationRecordId: id,
+          existingStatus: existingRecord.status,
+          incomingStatus,
+          incomingOutputCount: outputs.length,
+        })
+        return
       }
 
       const session = await resolveGenerationSessionForUser(tx, currentUserId, payload.sessionId || existingRecord.sessionId, payload.source)
@@ -1247,9 +1277,36 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
         lastRecordAtForNewSession = existingRecord.createdAt
       }
 
-      await tx.generationOutput.deleteMany({
+      /**
+       * 输出「只增不减」：本次写入一张输出都没带时，**不要**删掉库里已有的输出。
+       *
+       * 这条比上面的终态兜底更靠底层，防的是同一类事故的另一半：
+       * 完成路径写入了 1 张图之后，停止/失败收尾（以及前端的过期快照）会带着 `images: []`
+       * 再写一次 —— 而这里是「全量删除重建」，空数组就把真图删了。实测事故记录
+       * `cmue9pvy9…` 就是这样从「上游成功、1 张图」变成「STOPPED、0 张图」的。
+       *
+       * 为什么可以这么定：全项目只有这一处会删输出，没有任何「从记录里移除某张图」的功能
+       * （删记录是删整行，不走这里）。所以「空输出不清空」不会挡住任何正当用法，
+       * 却能挡住所有「拿一份不知道输出的快照来覆盖」的写入。
+       */
+      const storedOutputCount = await tx.generationOutput.count({
         where: { generationRecordId: id },
       })
+      const keepExistingOutputs = outputs.length === 0 && storedOutputCount > 0
+      if (keepExistingOutputs) {
+        logGenerationRecord('update_generation_record:keep_existing_outputs', {
+          currentUserId,
+          generationRecordId: id,
+          storedOutputCount,
+          incomingStatus,
+        })
+      }
+
+      if (!keepExistingOutputs) {
+        await tx.generationOutput.deleteMany({
+          where: { generationRecordId: id },
+        })
+      }
 
       const createdOutputs: Array<{
         id: string
