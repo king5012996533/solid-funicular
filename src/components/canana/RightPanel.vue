@@ -1021,14 +1021,15 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
  */
 .agent-composer {
   position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
   z-index: 10;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  /* 行与行之间留够：用户反馈「输入框都快挤在一起了」，原来是 8px */
+  gap: 12px;
+  padding: 14px 16px;
   border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
   border-radius: 14px;
   background: var(--canvas-float-block-default, rgba(24, 24, 27, 0.94));
@@ -1071,8 +1072,9 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 }
 .agent-composer__input {
   width: 100%;
-  max-height: 132px;
-  min-height: 22px;
+  max-height: 176px;
+  /* 至少两行的高度：一行的话点进去光标就贴着边，看着很局促 */
+  min-height: 44px;
   border: 0;
   outline: none;
   resize: none;
@@ -1088,13 +1090,16 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-composer__bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* 这几个控件在 440px 的老宽度下会互相顶，间隔给到 10 并允许模型名收缩 */
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 .agent-composer__attach {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
   border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
   border-radius: 8px;
   background: transparent;
@@ -1110,8 +1115,10 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   flex: 1 1 auto;
 }
 .agent-composer__send {
+  /* 绝不能因为左边变长就被压缩换行 */
   flex: 0 0 auto;
-  padding: 6px 14px;
+  margin-left: auto;
+  padding: 7px 16px;
   border: 0;
   border-radius: 8px;
   background: #4f46e5;
@@ -1127,9 +1134,12 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-composer__model {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 190px;
-  padding: 4px 8px;
+  gap: 5px;
+  /* 可以收缩：模型名很长时先压它，不要挤掉发送按钮 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
+  padding: 5px 9px;
   border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
   border-radius: 8px;
   color: var(--text-secondary, #a1a1aa);

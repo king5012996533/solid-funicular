@@ -35,7 +35,18 @@
   background-color: var(--canvas-bg, #141414);
 }
 
+/**
+ * box-sizing 必须显式写成 border-box。
+ *
+ * 这个项目没有全局的 `* { box-sizing: border-box }`，默认是 content-box ——
+ * 于是下面那条 `padding-right: var(--assistant-panel-width)` 会被加在 `width: 100%` **之外**：
+ * 实测面板 560 宽时，workbench 的盒子宽 2160（视口才 1600），多出来的部分被 .workflow-container
+ * 的 overflow:hidden 裁掉。也就是说「打开面板让画布让出右侧空间」这条规则**从来没生效过**，
+ * 画布一直是满宽、被面板直接盖住右半边 —— 面板越宽，被盖住的越多。
+ * 改成 border-box 之后 padding 才真的在内部留出空间。
+ */
 .workflow-workbench {
+  box-sizing: border-box;
   display: flex;
   height: 100%;
   overflow: hidden;
@@ -95,13 +106,45 @@
   font-weight: 500;
 }
 
-/* 右侧助手面板（复用 canana RightPanel：fixed + translateX 动画） */
+/**
+ * 右侧助手面板（复用 canana RightPanel：fixed + translateX 动画）
+ *
+ * 宽度由 `--assistant-panel-width` 决定（画布页把它绑到 useChatSessions 的 panelWidth 上，
+ * 用户可以拖着改、且会记住）。以前这里和下面「让出右侧空间」的 padding-right 各写一个 440 ——
+ * 改宽度要改两处，漏一处就会出现「面板变宽了、画布还按旧宽度让位」的重叠。
+ */
+/**
+ * 面板左边缘的拖拽条。
+ * 面板是 fixed + translateX 动画的，所以这条也用 fixed，位置跟着同一个宽度变量走。
+ */
+.workflow-assistant-resizer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: var(--assistant-panel-width, 560px);
+  width: 6px;
+  z-index: 101;
+  cursor: col-resize;
+  background: transparent;
+  transition: background-color 0.15s;
+}
+.workflow-assistant-resizer:hover,
+.workflow-resizing-panel .workflow-assistant-resizer {
+  background: rgba(99, 102, 241, 0.45);
+}
+/* 拖动过程中别让鼠标划到画布上变成文本选择/节点拖动 */
+.workflow-resizing-panel,
+.workflow-resizing-panel * {
+  user-select: none !important;
+  cursor: col-resize !important;
+}
+
 .workflow-assistant-aside {
   position: fixed;
   right: 0;
   top: 0;
   bottom: 0;
-  width: 440px;
+  width: var(--assistant-panel-width, 560px);
   display: flex;
   flex-direction: column;
   background-color: var(--canvas-sidebar-bg);
@@ -115,9 +158,9 @@
   transform: translateX(0);
 }
 
-/* 助手面板打开时，画布主区让出右侧 440 让 ContentGenerator 等浮层不被遮 */
+/* 助手面板打开时，画布主区让出右侧空间，免得浮层被面板压住（宽度跟面板同一个变量） */
 .workflow-container.workflow-right-panel-open .workflow-workbench {
-  padding-right: 440px;
+  padding-right: var(--assistant-panel-width, 560px);
   transition: padding-right 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .workflow-workbench {

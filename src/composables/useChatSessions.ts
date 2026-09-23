@@ -43,10 +43,28 @@ export interface ChatSession {
 const sessions = ref<ChatSession[]>([])
 const activeSessionId = ref<string | null>(null)
 const isPanelCollapsed = ref(true)
-const panelWidth = ref(440)
 
-const PANEL_WIDTH_MIN = 320
-const PANEL_WIDTH_MAX = 760
+/**
+ * 助手面板宽度。
+ *
+ * 2026-09-23：默认从 440 加到 560。用户的原话是「整个对话框的宽度可以拉大一点啊，
+ * 还有输入框，你都快挤在一起了」—— 440 宽在放上模型选择器、附图、发送之后确实挤。
+ * 同时把它做成可拖：拖过的宽度记在 localStorage 里，刷新后还是那么宽。
+ */
+const PANEL_WIDTH_STORAGE_KEY = 'canana:assistant:panel-width'
+const PANEL_WIDTH_MIN = 380
+const PANEL_WIDTH_MAX = 900
+
+const readStoredPanelWidth = () => {
+  if (typeof window === 'undefined') return 560
+  const stored = Number(window.localStorage.getItem(PANEL_WIDTH_STORAGE_KEY) || '')
+  return Number.isFinite(stored) && stored > 0 ? stored : 560
+}
+
+const clampPanelWidth = (width: number) =>
+  Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, Math.round(width)))
+
+const panelWidth = ref(clampPanelWidth(readStoredPanelWidth()))
 
 export function useChatSessions() {
   const activeSession = computed<ChatSession | null>(() =>
@@ -136,7 +154,11 @@ export function useChatSessions() {
   }
 
   const setPanelWidth = (width: number) => {
-    panelWidth.value = Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, width))
+    const next = clampPanelWidth(width)
+    panelWidth.value = next
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(PANEL_WIDTH_STORAGE_KEY, String(next))
+    }
   }
 
   return {

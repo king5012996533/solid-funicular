@@ -1291,7 +1291,37 @@ useShortcut('CmdOrCtrl+V', () => {
 })
 
 // 助手面板（复用 canana 视图的 RightPanel）
-const { isPanelCollapsed: isAssistantCollapsed, togglePanel: toggleAssistantPanel } = useChatSessions()
+const {
+  isPanelCollapsed: isAssistantCollapsed,
+  togglePanel: toggleAssistantPanel,
+  panelWidth: assistantPanelWidth,
+  setPanelWidth: setAssistantPanelWidth,
+  PANEL_WIDTH_MIN: ASSISTANT_PANEL_MIN,
+  PANEL_WIDTH_MAX: ASSISTANT_PANEL_MAX,
+} = useChatSessions()
+
+/**
+ * 拖面板左边缘改宽度。
+ *
+ * 用的是面板自带的那份宽度状态（useChatSessions.panelWidth）—— 它本来就在，只是一直没人用，
+ * 面板宽度还被写死在 CSS 里。现在 CSS 只认 `--assistant-panel-width`，由这里绑上去，
+ * 于是「拖多宽」和「画布让出多少」永远是同一个数，不会各走各的。
+ */
+const resizingAssistant = ref(false)
+const startAssistantResize = (event: MouseEvent) => {
+  event.preventDefault()
+  resizingAssistant.value = true
+  const onMove = (moveEvent: MouseEvent) => {
+    setAssistantPanelWidth(window.innerWidth - moveEvent.clientX)
+  }
+  const onUp = () => {
+    resizingAssistant.value = false
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
 
 /**
  * 给画布助手的「工具上下文」（2026-09-23）
@@ -1496,7 +1526,11 @@ watch(canvasSnapshot, () => {
 </script>
 
 <template>
-  <div class="workflow-container" :class="{ 'workflow-right-panel-open': !isAssistantCollapsed }">
+  <div
+    class="workflow-container"
+    :class="{ 'workflow-right-panel-open': !isAssistantCollapsed, 'workflow-resizing-panel': resizingAssistant }"
+    :style="{ '--assistant-panel-width': `${assistantPanelWidth}px` }"
+  >
     <div class="workflow-workbench">
       <div class="workflow-main">
         <div
@@ -1975,6 +2009,22 @@ watch(canvasSnapshot, () => {
           @add-image-to-canvas="handleAssistantAddImage"
         />
       </aside>
+
+      <!--
+        拖这里改面板宽度（只在面板打开时存在）。放 6px 宽的透明条，视觉上不留痕，
+        但鼠标压上去会给 col-resize 光标 —— 用户才知道这里能拖。
+      -->
+      <div
+        v-if="!isAssistantCollapsed"
+        class="workflow-assistant-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="assistantPanelWidth"
+        :aria-valuemin="ASSISTANT_PANEL_MIN"
+        :aria-valuemax="ASSISTANT_PANEL_MAX"
+        title="拖动调整面板宽度"
+        @mousedown="startAssistantResize"
+      ></div>
 
       <!--
         Agent 创作入口。面板收起时常驻显示（面板打开时它本来就该让位给面板本身）。
