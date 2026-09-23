@@ -1,6 +1,6 @@
 import type { GenerationTaskStartPayload } from './shared'
 
-export type GenerationTaskStrategyKey = 'image' | 'agent-chat' | 'agent-workspace' | 'research-report'
+export type GenerationTaskStrategyKey = 'image' | 'video' | 'agent-chat' | 'agent-workspace' | 'research-report'
 
 export interface GenerationTaskStrategy {
   key: GenerationTaskStrategyKey
@@ -21,6 +21,12 @@ const strategies: GenerationTaskStrategy[] = [
   {
     key: 'agent-chat',
     matches: payload => String(payload.type || '').trim() === 'agent',
+  },
+  {
+    // 视频：异步任务制（建单 → 轮询 → 取件）。SceneFlow 那边支持的通道在这里由
+    // video-upstream.ts 的适配层承载（openai 兼容 / 火山 Ark / 通用 task 网关）。
+    key: 'video',
+    matches: payload => String(payload.type || '').trim() === 'video',
   },
   {
     key: 'research-report',

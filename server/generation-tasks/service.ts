@@ -43,6 +43,8 @@ import {
 import { GenerationTaskRequestError } from './shared'
 import { getGenerationTaskExecutionStrategy, type GenerationTaskExecutionStrategyContext, type TaskAbortReason } from './execution-strategies'
 import { executeImageTask } from './image-task-executor'
+import { executeVideoTask } from './video-task-executor'
+import { createVideoTaskRequest, pollVideoTaskRequest } from './video-upstream'
 import { executeAgentChatTaskFlow } from './agent-chat-task-executor'
 import { executeAgentWorkspaceTaskFlow } from './agent-workspace-task-executor'
 import { executeResearchTaskFlow } from '../research/executor'
@@ -153,6 +155,7 @@ const buildGatewayAssociationNo = () => {
 // 统一构造任务执行策略上下文，先把停止/失败收口逻辑从中心 service 中迁出。
 const buildTaskExecutionStrategyContext = () => ({
   executeImageGenerationTask,
+  executeVideoGenerationTask,
   executeAgentChatTask,
   executeAgentWorkspaceTask,
   executeResearchReportTask,
@@ -184,6 +187,33 @@ const buildTaskExecutionStrategyContext = () => ({
   logGenerationTaskError,
 })
 
+
+/**
+ * 视频任务：上游是异步任务制（建单 → 轮询 → 取件），适配层在 video-upstream.ts。
+ * 上下文装配与图片那条完全对称，只是把「一次请求返回结果」换成「建单 + 轮询」。
+ */
+const executeVideoGenerationTask = async (task: RunningGenerationTask, payload: GenerationTaskStartPayload) => {
+  await executeVideoTask(task, payload, {
+    syncSharedTaskRuntime,
+    ensureTaskNotAborted: (runningTask) => ensureTaskNotAborted(runningTask, { abortTaskWithReason }),
+    emitTaskProgressEvent: (recordId, input) => emitTaskProgressEvent(recordId, input, taskEventEmitterContext),
+    markTaskRetryState,
+    createVideoTask: (input) => createVideoTaskRequest(input, {
+      fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
+      onRetry: input.onRetry,
+      log: (stage, detail) => logGenerationTask(stage, detail),
+    }),
+    pollVideoTask: (input) => pollVideoTaskRequest(input, {
+      fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
+      log: (stage, detail) => logGenerationTask(stage, detail),
+    }),
+    buildInitialRecordPayload,
+    updateGenerationRecord: updateGenerationRecord as unknown as Parameters<typeof executeVideoTask>[2]['updateGenerationRecord'],
+    getGenerationRecordById: getGenerationRecordById as unknown as Parameters<typeof executeVideoTask>[2]['getGenerationRecordById'],
+    emitTaskStreamEvent: (recordId, event) => emitTaskStreamEvent(recordId, event, taskEventEmitterContext),
+    logGenerationTask,
+  })
+}
 
 const executeImageGenerationTask = async (task: RunningGenerationTask, payload: GenerationTaskStartPayload) => {
   await executeImageTask(task, payload, {
