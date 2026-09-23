@@ -11,8 +11,8 @@ import {
 import { listGenerationRecords } from '@/api/generation-records'
 import {
   loadPublicModelCatalog,
-  getDefaultImageModelKey,
   getDefaultChatModelKey,
+  getAllChatModels,
 } from '@/config/models'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
@@ -22,6 +22,8 @@ import { useChatSessions } from '@/composables/useChatSessions'
 import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
 import { useCanvasAgentBridge } from '@/views/workflow/agent/use-canvas-agent-bridge'
 import { CANVAS_AGENT_SKILL_KEY } from '@/shared/canvas-agent-tools'
+import SelectPopup from '@/components/generate/common/SelectPopup.vue'
+import { getAgentModel, setAgentModel } from '@/api/agent'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -153,6 +155,8 @@ const cleanupStreams = () => {
 }
 
 onMounted(() => {
+  // 先把对话模型目录拉起来：选择器要有东西可选，runCanvasAgentTurn 也要按用户选的模型走
+  void refreshChatModels()
   // 后台拉取模型清单（getDefault*ModelKey 依赖此调用）
   void loadPublicModelCatalog()
   // 拉取助手会话列表（首次会自动建默认会话），然后加载当前会话历史
@@ -339,6 +343,52 @@ const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value,
  *   2. 把「要不要花这笔钱」的确认卡片弹给用户。
  */
 const { isPanelCollapsed } = useChatSessions()
+/**
+ * Agent 用哪个对话模型 —— 用户自己选。
+ *
+ * 复用的是全站同一个「Agent 模型」偏好（api/agent 的 getAgentModel/setAgentModel，存 localStorage）：
+ * 首页那个 Agent 工具栏改的就是它。两处共用一份，用户不必在两个地方各选一次。
+ *
+ * 关于「权限」：这份清单来自**服务端公开目录**（/api/provider-config/catalog），
+ * 只返回启用中的厂商与模型。以后要按会员等级/角色限制某些模型，在服务端目录那一层过滤即可，
+ * 这里不需要改 —— 目录里没有的模型，选择器里自然也不会出现。
+ */
+const chatModelOptions = ref([])
+const selectedModelKey = ref('')
+const modelSelectOpen = ref(false)
+const modelTriggerRef = ref(null)
+
+const selectedModelLabel = computed(() => (
+  chatModelOptions.value.find((item) => item.value === selectedModelKey.value)?.label
+  || selectedModelKey.value
+  || '对话模型'
+))
+
+const refreshChatModels = async () => {
+  await loadPublicModelCatalog()
+  let list = getAllChatModels().map((item) => ({ value: item.key, label: item.label }))
+  if (!list.length) {
+    // 目录可能是空缓存（后台刚改过配置），强制刷一次再取
+    await loadPublicModelCatalog(true)
+    list = getAllChatModels().map((item) => ({ value: item.key, label: item.label }))
+  }
+  chatModelOptions.value = list
+  const preferred = String(getAgentModel() || '').trim()
+  const usable = list.some((item) => item.value === preferred)
+  selectedModelKey.value = usable ? preferred : (list[0]?.value || '')
+}
+
+const pickChatModel = (key) => {
+  selectedModelKey.value = key
+  setAgentModel(key)
+  modelSelectOpen.value = false
+}
+
+const toggleChatModelSelect = (event) => {
+  event.stopPropagation()
+  modelSelectOpen.value = !modelSelectOpen.value
+}
+
 const turnReferenceImages = ref([])       // 本轮用户附的参考图（Agent 挂图时从这里取）
 const confirmRequest = ref(null)          // { title, summary, items, costPoints, riskLevel, resolve }
 const confirmNote = ref('')
@@ -408,10 +458,11 @@ const agentBridge = useCanvasAgentBridge({
  */
 const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   try {
-    const fallbackKey = getDefaultChatModelKey() || ''
+    // 用用户在面板上选的那个模型（没选过就是全站默认），不再写死「默认对话模型」
+    const preferredKey = String(selectedModelKey.value || getAgentModel() || getDefaultChatModelKey() || '').trim()
     const { providerId, modelKey } = resolveGenerationTaskModel({
-      modelKey: fallbackKey,
-      fallbackModelKey: fallbackKey,
+      modelKey: preferredKey,
+      fallbackModelKey: getDefaultChatModelKey() || preferredKey,
       category: 'CHAT',
       missingModelMessage: '未匹配到有效对话模型，请先在后台配置模型',
     })
@@ -867,9 +918,31 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
           class="agent-composer__input"
           rows="1"
           placeholder="交给 Agent 一件事（建节点、连线、生成、把一条片子串起来…）"
+          title="Enter 发送 · Shift+Enter 换行"
           @keydown="handleKeydown"
         ></textarea>
         <div class="agent-composer__bar">
+          <!-- 用哪个对话模型由用户定：以后配了多个文本模型（能力/价格/权限不同），就在这里选 -->
+          <div
+            ref="modelTriggerRef"
+            class="agent-composer__model"
+            role="combobox"
+            tabindex="0"
+            :aria-expanded="modelSelectOpen"
+            :title="`当前对话模型：${selectedModelLabel}（点击切换）`"
+            @click="toggleChatModelSelect"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M13.25 2.68a2.5 2.5 0 0 0-2.5 0L4.56 6.26a2.5 2.5 0 0 0-1.25 2.16v7.15a2.5 2.5 0 0 0 1.25 2.17l6.19 3.57a2.5 2.5 0 0 0 2.5 0l6.19-3.57a2.5 2.5 0 0 0 1.25-2.17V8.42a2.5 2.5 0 0 0-1.25-2.16L13.25 2.68Z"
+                fill="currentColor"
+              />
+            </svg>
+            <span class="agent-composer__model-name">{{ selectedModelLabel }}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M21.01 7.98A1.2 1.2 0 0 1 21 9.68l-8.16 8.06a1.2 1.2 0 0 1-1.69 0L3 9.68a1.2 1.2 0 0 1 1.69-1.71L12 15.2l7.31-7.23a1.2 1.2 0 0 1 1.7.01Z" fill="currentColor" />
+            </svg>
+          </div>
           <button
             type="button"
             class="agent-composer__attach"
@@ -883,7 +956,9 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             <span v-if="uploadedImages.length">{{ uploadedImages.length }}</span>
             <span v-else>附图</span>
           </button>
-          <span class="agent-composer__hint">Enter 发送 · Shift+Enter 换行</span>
+          <!-- 面板只有 440px 宽，这一行放不下「Enter 发送 · Shift+Enter 换行」这种提示：
+               实测它会把「交给 Agent」按钮挤到换行。提示改挂在输入框的 title 上，不占位置 -->
+          <span class="agent-composer__spacer"></span>
           <button
             type="button"
             class="agent-composer__send"
@@ -892,6 +967,29 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
           >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
         </div>
       </div>
+
+      <!-- 模型选择弹窗：与首页 Agent 工具栏复用同一个弹窗组件与同一份目录数据 -->
+      <SelectPopup
+        v-model:visible="modelSelectOpen"
+        :trigger-ref="modelTriggerRef"
+        placement="top"
+        title="对话模型"
+      >
+        <ul class="lv-select-popup-inner">
+          <li
+            v-for="option in chatModelOptions"
+            :key="option.value"
+            :class="['lv-select-option', { 'lv-select-option-wrapper-selected': option.value === selectedModelKey }]"
+            @click.stop="pickChatModel(option.value)"
+          >
+            <div class="select-option-label">
+              <div class="select-option-label-content">
+                <span>{{ option.label }}</span>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </SelectPopup>
     </div>
 
     <!-- 图片预览弹窗 -->
@@ -1008,10 +1106,8 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   color: #a5b4fc;
   border-color: #6366f1;
 }
-.agent-composer__hint {
+.agent-composer__spacer {
   flex: 1 1 auto;
-  color: var(--text-tertiary, #71717a);
-  font-size: 11px;
 }
 .agent-composer__send {
   flex: 0 0 auto;
@@ -1026,6 +1122,28 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-composer__send:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.agent-composer__model {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 190px;
+  padding: 4px 8px;
+  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-composer__model:hover {
+  color: var(--text-primary, #e5e7eb);
+  border-color: var(--text-secondary, #71717a);
+}
+.agent-composer__model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 输入区变矮了（原来那个生成器高得多），消息列表的底部留白同步收一下 */
