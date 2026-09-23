@@ -52,31 +52,47 @@
   position: relative;
 }
 
-/* 助手面板折叠态的展开把手（贴在画布右边缘） */
+/**
+ * 「Agent 创作」入口（贴在画布右边缘）
+ *
+ * 原来这里是个 24×64 只有一个小箭头的竖条，z-index 80。两个问题（用户反馈「按钮被藏起来了」）：
+ *   1. **被别的浮层压住**。同一个层叠上下文里还有两个更高的：右键菜单 200、
+ *      节点悬停/选中时出现的操作条 `.wf-node-actions` 1000（拖卡片时它一定在）。
+ *      于是「右键的时候」「拖卡片的时候」按钮正好被盖掉 —— 用户说的就是这两件事。
+ *   2. 只有一个箭头、没有文字，本来就不容易被认出来是个入口。
+ * 所以：z-index 提到这些浮层之上（改这里之前先看看上面那两个值），并且写上「Agent创作」。
+ */
 .canvas-assistant-toggle {
   position: absolute;
-  right: 12px;
+  right: 0;
   top: 50%;
   transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 64px;
+  gap: 6px;
+  padding: 9px 12px 9px 10px;
   background: var(--canvas-float-block-default);
   backdrop-filter: blur(var(--canvas-float-backdrop-blur));
   -webkit-backdrop-filter: blur(var(--canvas-float-backdrop-blur));
   border: 0.5px solid var(--stroke-secondary);
-  border-radius: 12px 0 0 12px;
   border-right: 0;
+  border-radius: 12px 0 0 12px;
   color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
-  z-index: 80;
+  /* 必须高于右键菜单（200）与节点操作条（1000），否则「右键/拖卡片时按钮消失」会复发 */
+  z-index: 1100;
   transition: background-color 0.12s, color 0.12s;
 }
 .canvas-assistant-toggle:hover {
   background: var(--canvas-float-block-hover);
   color: var(--text-primary);
+}
+.canvas-assistant-toggle__label {
+  /* 竖排中文在这里不自然，但横排会把按钮撑宽；用 13px 已经足够克制 */
+  font-weight: 500;
 }
 
 /* 右侧助手面板（复用 canana RightPanel：fixed + translateX 动画） */

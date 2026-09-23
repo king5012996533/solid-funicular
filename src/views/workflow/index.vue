@@ -1924,16 +1924,24 @@ watch(canvasSnapshot, () => {
         />
       </aside>
 
-      <!-- 折叠态下的展开把手 -->
+      <!--
+        Agent 创作入口。面板收起时常驻显示（面板打开时它本来就该让位给面板本身）。
+        必须永远压在右键菜单与节点操作条之上 —— 那两样正好在「右键」「拖卡片」时出现。
+      -->
       <button
         v-if="isAssistantCollapsed"
         class="canvas-assistant-toggle"
-        title="展开助手面板"
+        title="打开 Agent 创作（让 Agent 直接改这块画布）"
         @click="toggleAssistantPanel"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M15 18l-6-6 6-6" />
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M12 3.2l1.7 4.9 4.9 1.7-4.9 1.7L12 16.4l-1.7-4.9L5.4 9.8l4.9-1.7L12 3.2z"
+            fill="currentColor"
+          />
+          <path d="M18.6 15.4l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" fill="currentColor" />
         </svg>
+        <span class="canvas-assistant-toggle__label">Agent创作</span>
       </button>
     </div>
   </div>
