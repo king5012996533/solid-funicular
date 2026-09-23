@@ -1,5 +1,4 @@
 import { ref } from 'vue'
-import type { GraphNode } from '@vue-flow/core'
 
 /**
  * 画布对齐辅助线
@@ -17,6 +16,20 @@ import type { GraphNode } from '@vue-flow/core'
 
 /** 吸附阈值（屏幕像素） */
 const SNAP_THRESHOLD_PX = 6
+
+/**
+ * 参与对齐计算的最小节点形状。
+ *
+ * 为什么不用 Vue Flow 的 GraphNode：调用方手上是**本项目的** WorkflowCanvasNode[]
+ * （画布自己的类型），与 GraphNode 结构不完全兼容，硬传会报 TS2345；而这个函数真正用到的
+ * 只有 id / position / dimensions / hidden 四个字段。按需声明形状，两边都能直接传。
+ */
+export interface AlignmentNodeLike {
+  id: string
+  position: { x: number; y: number }
+  dimensions?: { width: number; height: number } | null
+  hidden?: boolean
+}
 
 export interface AlignmentGuides {
   /** 命中的竖向辅助线 x 坐标（画布坐标） */
@@ -56,11 +69,11 @@ export function useCanvasAlignmentGuides() {
    * @param zoom    当前画布缩放
    */
   function computeAlignment(
-    dragged: GraphNode,
-    peers: GraphNode[],
+    dragged: AlignmentNodeLike,
+    peers: AlignmentNodeLike[],
     zoom: number,
   ): AlignmentDelta {
-    const dim = dragged.dimensions ?? ({ width: 0, height: 0 } as GraphNode['dimensions'])
+    const dim = dragged.dimensions ?? { width: 0, height: 0 }
     const width = dim.width || 0
     const height = dim.height || 0
 
