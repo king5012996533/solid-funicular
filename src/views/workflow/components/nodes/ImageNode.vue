@@ -51,6 +51,7 @@ import {
   type GenerationTaskStreamEvent,
 } from '@/api/generation-tasks'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
+import { registerNodeRunner, unregisterNodeRunner } from '@/views/workflow/composables/useCanvasNodeRunner'
 
 const props = defineProps<{
   id: string
@@ -772,6 +773,34 @@ const reconcileInterruptedRun = async () => {
     failRun(err instanceof Error ? err.message : '无法获取任务状态，可以重试')
   }
 }
+
+/**
+ * 供画布助手调用：用节点当前已配置的参数跑一次。
+ *
+ * 为什么单独抽出来：runGeneration 在组件内部，画布这一层原本没有入口 ——
+ * 助手只能说「你可以点一下生成」，做不了「我替你跑」。注册到 useCanvasNodeRunner 后，
+ * Agent 的 run_node 工具就能真的触发它（缺提示词时抛错，由工具层转成可读原因回给模型）。
+ */
+const runOnceForAgent = async () => {
+  const prompt = String(props.data?.prompt || '').trim()
+  if (!prompt) throw new Error('该图片节点还没有提示词，先给它写一个（update_node 的 prompt）')
+  await runGeneration({
+    prompt,
+    refImages: (Array.isArray(props.data?.referenceImages) ? props.data.referenceImages : []).filter(isRasterReferenceUrl),
+    modelKey: String(props.data?.model || '').trim(),
+    ratio: String(props.data?.size || '') || undefined,
+    resolution: String(props.data?.quality || '') || undefined,
+    count: 1,
+  })
+}
+
+onMounted(() => {
+  registerNodeRunner(props.id, runOnceForAgent)
+})
+
+onBeforeUnmount(() => {
+  unregisterNodeRunner(props.id)
+})
 
 /**
  * 失败后重试：用**任务记录里那次真实提交的正文**与参数原样重跑。

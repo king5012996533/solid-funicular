@@ -63,6 +63,8 @@ import {
   type ConnectDirection,
 } from './config/node-suggestions'
 import type { GraphNode } from '@vue-flow/core'
+import type { CanvasAgentContext } from './agent/canvas-agent-tools'
+import { runNodeById } from './composables/useCanvasNodeRunner'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
 
 const router = useRouter()
@@ -1072,7 +1074,7 @@ const onNodeDragStart = () => {
  * 阈值随缩放换算（见 composable），所以放大缩小时手感一致。
  */
 const onNodeDrag = (dragEvent: { node: GraphNode; nodes: GraphNode[] }) => {
-  const { node } = dragEvent
+  const { node, nodes: draggedNodes } = dragEvent
   if (!node?.dragging) return
   /**
    * ⚠️ 这里必须传「画布上的全部节点」，**不能**用 dragEvent.nodes。
@@ -1083,8 +1085,15 @@ const onNodeDrag = (dragEvent: { node: GraphNode; nodes: GraphNode[] }) => {
    * node-drag 触发 23 次、payload 里 peers=1、画布上却有 2 个节点、参考线元素 0 条。
    */
   const { dx, dy } = computeAlignment(node, nodes.value, viewport.value.zoom)
-  if (dx !== null) node.position.x += dx
-  if (dy !== null) node.position.y += dy
+  if (dx === null && dy === null) return
+  /**
+   * 多选拖拽：把主拖拽节点算出来的对齐量**整组平移** —— 组内相对位置不变、组整体吸附。
+   * dragEvent.nodes 在这里正好是「正在被拖拽的那一批」（单选时就是它自己）。
+   */
+  for (const dragged of draggedNodes?.length ? draggedNodes : [node]) {
+    if (dx !== null) dragged.position.x += dx
+    if (dy !== null) dragged.position.y += dy
+  }
 }
 
 const onNodeDragStop = () => {
@@ -1244,6 +1253,87 @@ useShortcut('CmdOrCtrl+V', () => {
 
 // 助手面板（复用 canana 视图的 RightPanel）
 const { isPanelCollapsed: isAssistantCollapsed, togglePanel: toggleAssistantPanel } = useChatSessions()
+
+/**
+ * 给画布助手的「工具上下文」（2026-09-23）
+ *
+ * 助手要能真的动手改画布，就得有一个明确的、可注入的能力面 —— 就是这里。
+ * 面板自己不 import 画布 store：能力从这个对象进来，好处是能力清单一眼可读、
+ * 也能用假上下文单测（scripts/tests/test-canvas-agent-tools.mjs）。
+ */
+const canvasAgentContext: CanvasAgentContext = {
+  snapshotNodes: () => nodes.value.map((node) => ({
+    id: node.id,
+    type: node.type,
+    label: String((node.data as { label?: string })?.label || ''),
+    text: String((node.data as { prompt?: string; content?: string; url?: string })?.prompt
+      || (node.data as { content?: string })?.content
+      || ''),
+    model: String((node.data as { model?: string })?.model || ''),
+    size: String((node.data as { size?: string })?.size || ''),
+    quality: String((node.data as { quality?: string })?.quality || ''),
+    status: (node.data as { loading?: boolean })?.loading ? '生成中' : String((node.data as { error?: string })?.error || ''),
+  })),
+  snapshotEdges: () => edges.value.map((edge) => ({ source: edge.source, target: edge.target })),
+  selectedIds: () => getSelectedNodes.value.map((node) => node.id),
+  defaultPosition: () => screenToFlowCoordinate({
+    x: window.innerWidth / 2,
+    y: window.innerHeight / 2,
+  }),
+  addNode: (type, position, data) => addNode(type as WorkflowNodeType, position, data),
+  updateNode: (id, patch) => {
+    if (!nodes.value.some((node) => node.id === id)) return false
+    updateNode(id, patch as Parameters<typeof updateNode>[1])
+    return true
+  },
+  removeNode: (id) => {
+    if (!nodes.value.some((node) => node.id === id)) return false
+    removeNode(id)
+    return true
+  },
+  addEdge: (source, target) => {
+    if (edges.value.some((edge) => edge.source === source && edge.target === target)) return false
+    addEdge({ source, target })
+    return true
+  },
+  selectNodes: (ids, focus = true) => {
+    const wanted = new Set(ids)
+    setNodes(nodes.value.map((node) => ({ ...node, selected: wanted.has(node.id) })))
+    if (focus && ids.length) {
+      void fitView({ nodes: ids, duration: 300, padding: 0.3 })
+    }
+  },
+  runNode: (id) => runNodeById(id),
+  applyTemplate: (templateId, position) => {
+    const template = WORKFLOW_TEMPLATES.find((item) => item.id === templateId)
+    if (!template) return null
+    const { nodes: createdNodes, edges: createdEdges } = template.createNodes(position)
+    // 模板里的节点 id 是临时的，落画布后要换成真实 id —— 用一张映射表，不去改模板对象本身
+    const idMap = new Map<string, string>()
+    createdNodes.forEach((node) => {
+      const id = addNode(node.type, node.position, node.data)
+      idMap.set(node.id, id)
+    })
+    // 连线要等节点挂载后再加（Vue Flow 需要拿到 handle），与画布上手动套模板同一条路径
+    setTimeout(() => {
+      createdEdges.forEach((edge) => {
+        addEdge({
+          source: idMap.get(edge.source) || edge.source,
+          target: idMap.get(edge.target) || edge.target,
+          sourceHandle: edge.sourceHandle || 'right',
+        })
+      })
+    }, 50)
+    return { nodes: createdNodes.length, edges: createdEdges.length }
+  },
+  listTemplates: () => WORKFLOW_TEMPLATES.map((item) => ({ id: item.id, name: item.name, description: item.description })),
+  nodeTypeHints: () => [
+    { type: 'text', name: '文本输入' },
+    { type: 'image', name: '图片生成' },
+    { type: 'video', name: '视频生成' },
+    { type: 'asset', name: '素材' },
+  ],
+}
 const pendingAssistantMessage = ref('')
 
 // 助手生成的图片落到画布：在视口中心创建 image 节点
@@ -1792,6 +1882,7 @@ watch(canvasSnapshot, () => {
           :visible="!isAssistantCollapsed"
           :initial-message="pendingAssistantMessage"
           :canvas-brief="assistantCanvasBrief"
+          :agent-context="canvasAgentContext"
           @close="toggleAssistantPanel"
           @message-received="pendingAssistantMessage = ''"
           @add-image-to-canvas="handleAssistantAddImage"

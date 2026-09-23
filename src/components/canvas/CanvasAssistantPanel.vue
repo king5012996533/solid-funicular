@@ -8,14 +8,18 @@
  *   - 中部：消息流（user / assistant 区分）
  *   - 底部：选中节点 chip 引用 + textarea + 发送
  *
- * 当前实现是骨架：发送时只 append 用户消息 + 立即 mock 一条助手回复，
- * 真正的 AI 调用接入留给后续工作（接 ai-gateway）。
+ * 2026-09-23：**接真 Agent**。发送后走 useCanvasAgent 的多轮循环：
+ *   模型（后台配置的对话模型，支持 function calling）→ 决定调用哪些画布工具
+ *   → 我们真的在画布上执行（增删节点/连线/选中/触发节点执行/套模板）→ 把结果回给模型 → 直到给出答复。
+ * 画布相关的具体能力由页面通过 :agent-context 注入（面板不直接依赖画布 store）。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Close, Plus, ArrowRight, Right, ChatDotRound } from '@element-plus/icons-vue'
 import { useChatSessions, type ChatMessage, type ChatReference } from '@/composables/useChatSessions'
 import { useCanvasSelection } from '@/composables/useCanvasSelection'
+import { useCanvasAgent } from '@/views/workflow/agent/use-canvas-agent'
+import type { CanvasAgentContext } from '@/views/workflow/agent/canvas-agent-tools'
 import {
   nodes,
   type WorkflowImageNodeData,
@@ -38,6 +42,13 @@ const {
   togglePanel,
   setPanelWidth,
 } = useChatSessions()
+
+const props = defineProps<{
+  /** 画布能力（由页面注入：增删改节点、连线、选中、执行、套模板…） */
+  agentContext?: CanvasAgentContext
+  /** 画布摘要（选中节点、上游上下文），每次请求前现取 */
+  agentBrief?: () => string
+}>()
 
 const { selectedNodeIds } = useCanvasSelection()
 
@@ -104,9 +115,22 @@ const scrollToBottom = async () => {
   }
 }
 
+const agent = useCanvasAgent({
+  // 没注入上下文时（例如别处单独用这个面板）不做假动作，直接说清楚
+  ctx: props.agentContext || (null as unknown as CanvasAgentContext),
+  buildBrief: () => props.agentBrief?.() || '',
+  readHistory: () => (activeSession.value?.messages || [])
+    .filter((item) => item.role === 'user' || item.role === 'assistant')
+    .map((item) => ({ role: item.role as 'user' | 'assistant', content: item.content })),
+})
+
 const handleSend = async () => {
   const text = input.value.trim()
   if (!text || sending.value) return
+  if (!props.agentContext) {
+    ElMessage.warning('画布助手还没接入画布能力（缺少 agent-context 注入）')
+    return
+  }
   const sessionId = activeSessionId.value || ensureSession()
   sending.value = true
   try {
@@ -117,21 +141,26 @@ const handleSend = async () => {
     })
     input.value = ''
     await scrollToBottom()
-    // 真实 AI 调用预留（接 ai-gateway / agent skill），当前 mock 一条回复
-    setTimeout(() => {
-      appendMessage(sessionId, {
-        role: 'assistant',
-        content: '助手能力接入中。后续会基于当前选中节点 + 上游节点上下文调用 AI 网关。',
-      })
-      sending.value = false
-      void scrollToBottom()
-    }, 300)
+    const reply = await agent.run(text)
+    if (reply) {
+      // 工具执行痕迹写进消息正文：历史里也能看出「它当时做了什么」
+      const trace = agent.steps.value.length
+        ? `【已执行 ${agent.steps.value.length} 步】${agent.steps.value.map((step) => step.summary).join('；')}\n\n`
+        : ''
+      appendMessage(sessionId, { role: 'assistant', content: trace + reply })
+    }
   } catch (err) {
-    sending.value = false
-    ElMessage.error('发送失败')
+    ElMessage.error(err instanceof Error ? err.message : '助手调用失败')
     // eslint-disable-next-line no-console
     console.error('[CanvasAssistantPanel] send failed', err)
+  } finally {
+    sending.value = false
+    await scrollToBottom()
   }
+}
+
+const handleStop = () => {
+  agent.stop()
 }
 
 const handleKeydown = (event: KeyboardEvent) => {
@@ -262,6 +291,28 @@ const previewMessage = (msg: ChatMessage): string => {
             <div class="canvas-assistant-panel__msg-meta">{{ formatTime(msg.createdAt) }}</div>
           </article>
         </template>
+      </div>
+
+      <!-- 运行中的工具执行记录：让用户看见 Agent 到底做了什么 -->
+      <div v-if="agent.running.value || agent.steps.value.length" class="canvas-assistant-panel__steps">
+        <div class="canvas-assistant-panel__steps-head">
+          <span>{{ agent.running.value ? '执行中…' : `已执行 ${agent.steps.value.length} 步` }}</span>
+          <button
+            v-if="agent.running.value"
+            class="canvas-assistant-panel__steps-stop"
+            @click="handleStop"
+          >停止</button>
+        </div>
+        <ul class="canvas-assistant-panel__steps-list">
+          <li
+            v-for="step in agent.steps.value"
+            :key="step.index"
+            :class="{ 'is-failed': !step.ok }"
+          >
+            <span class="canvas-assistant-panel__step-index">{{ step.index }}</span>
+            <span class="canvas-assistant-panel__step-text">{{ step.summary }}</span>
+          </li>
+        </ul>
       </div>
 
       <!-- 选中节点 chip 引用 -->
@@ -470,6 +521,62 @@ const previewMessage = (msg: ChatMessage): string => {
   font-size: 11px;
   color: var(--text-tertiary);
   text-align: right;
+}
+
+.canvas-assistant-panel__steps {
+  padding: 8px 16px;
+  border-top: 0.5px solid var(--stroke-secondary);
+  background: var(--canvas-bg-block-default);
+}
+.canvas-assistant-panel__steps-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+.canvas-assistant-panel__steps-stop {
+  padding: 1px 8px;
+  background: transparent;
+  border: 0.5px solid var(--stroke-secondary);
+  border-radius: var(--lv-border-radius-small);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.canvas-assistant-panel__steps-stop:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+.canvas-assistant-panel__steps-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.canvas-assistant-panel__steps-list li {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.canvas-assistant-panel__steps-list li.is-failed {
+  color: #ef4444;
+}
+.canvas-assistant-panel__step-index {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: right;
+  color: var(--text-tertiary);
+}
+.canvas-assistant-panel__step-text {
+  word-break: break-word;
 }
 
 .canvas-assistant-panel__refs {

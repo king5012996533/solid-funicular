@@ -18,6 +18,7 @@ import {
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
 import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
+import { useCanvasAgent } from '@/views/workflow/agent/use-canvas-agent'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -27,7 +28,13 @@ const props = defineProps({
    * 画布状态摘要（由 workflow 页生成的纯文本）。
    * 没有它，助手完全看不见用户眼前有什么节点 —— 只能空对空写提示词。
    */
-  canvasBrief: { type: String, default: '' }
+  canvasBrief: { type: String, default: '' },
+  /**
+   * 画布工具上下文（由页面注入）。给了它，助手才会「真的动手」：
+   * 先走一轮带工具的 Agent 循环（增删节点、连线、选中、触发执行），
+   * 模型没要求调用工具、或这一轮没执行成功时，回退到原来的流式对话。
+   */
+  agentContext: { type: Object, default: null },
 })
 
 const emit = defineEmits(['close', 'message-received', 'add-image-to-canvas'])
@@ -393,6 +400,46 @@ const runImageGeneration = async (prompt, refImages, aiMsg) => {
  */
 const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value, prompt, props.canvasBrief)
 
+const canvasAgent = useCanvasAgent({
+  ctx: props.agentContext,
+  buildBrief: () => props.canvasBrief || '',
+  readHistory: () => (messages.value || [])
+    .filter((item) => item.type === 'user' || item.type === 'ai-text')
+    .map((item) => ({ role: item.type === 'user' ? 'user' : 'assistant', content: String(item.content || '') })),
+})
+
+/**
+ * 先让 Agent 试一轮（带工具）。
+ *
+ * 返回 true 表示「这一轮已经处理完了」：模型既可能直接回答，也可能要求改画布而我们真的改了。
+ * 返回 false 表示应该回退到原来的流式对话 —— 只在**一次工具都没执行**且没有拿到文字时才回退，
+ * 避免「已经改了画布又用流式回答一遍」这种双重回复。
+ */
+const tryCanvasAgentTurn = async (prompt, aiMsg) => {
+  if (!props.agentContext) return false
+  try {
+    const reply = await canvasAgent.run(prompt)
+    const steps = canvasAgent.steps.value
+    const trace = steps.length
+      ? `【已执行 ${steps.length} 步】${steps.map((step) => step.summary).join('；')}\n\n`
+      : ''
+    if (!reply && !steps.length) return false
+    aiMsg.content = trace + reply
+    aiMsg.loading = false
+    scrollToBottom()
+    return true
+  } catch (err) {
+    // 有工具执行过就不能再回退（否则等于重复回答）
+    if (canvasAgent.steps.value.length) {
+      aiMsg.content = `【已执行 ${canvasAgent.steps.value.length} 步】${canvasAgent.steps.value.map((step) => step.summary).join('；')}\n\n执行中断：${err?.message || err}`
+      aiMsg.loading = false
+      scrollToBottom()
+      return true
+    }
+    return false
+  }
+}
+
 const runChatStream = async (prompt, aiMsg) => {
   try {
     const fallbackKey = getDefaultChatModelKey() || ''
@@ -538,7 +585,8 @@ const sendMessage = async () => {
       error: '',
     })
     scrollToBottom()
-    await runChatStream(content, tailMessage())
+    const handled = await tryCanvasAgentTurn(content, tailMessage())
+    if (!handled) await runChatStream(content, tailMessage())
   }
 }
 
