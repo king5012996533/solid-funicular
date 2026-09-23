@@ -37,6 +37,8 @@ type EmitTaskStreamEvent = (recordId: string, event: GenerationTaskStreamEvent) 
 
 export interface GenerationTaskExecutionStrategyContext {
   executeImageGenerationTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
+  /** 视频：异步任务制（建单 → 轮询 → 取件） */
+  executeVideoGenerationTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeAgentChatTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeAgentWorkspaceTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeResearchReportTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
@@ -326,6 +328,25 @@ const agentWorkspaceTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   },
 }
 
+const videoTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
+  key: 'video',
+  execute(task, payload, context) {
+    return context.executeVideoGenerationTask(task, payload)
+  },
+  async handleStopped(task, payload, context) {
+    await context.refundTaskPointsIfNeeded(task, 'task_aborted')
+    await context.markTaskExecutionState(task, {
+      lastErrorAt: new Date().toISOString(),
+      lastErrorMessage: '任务已收到停止指令',
+    })
+    context.emitTaskProgressEvent(task.recordId, {
+      stage: 'stopped',
+      stopped: true,
+      message: '视频生成已停止',
+    })
+  },
+}
+
 const researchReportTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   key: 'research-report',
   execute(task, payload, context) {
@@ -407,6 +428,7 @@ const researchReportTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
 
 const EXECUTION_STRATEGY_REGISTRY: Record<GenerationTaskStrategyKey, GenerationTaskExecutionStrategy> = {
   image: imageTaskExecutionStrategy,
+  video: videoTaskExecutionStrategy,
   'agent-chat': agentChatTaskExecutionStrategy,
   'agent-workspace': agentWorkspaceTaskExecutionStrategy,
   'research-report': researchReportTaskExecutionStrategy,
