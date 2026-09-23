@@ -411,7 +411,14 @@ const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value,
  * 「有个拖拉件，不好找」。这里改成两个常驻按钮，并且**用 hideTypeSelector 把原来那个藏掉**，
  * 不再有两套入口互相打架。默认落在「对话」，因为画布上最常用的就是让 Agent 动手。
  */
-const panelMode = ref('chat')
+/**
+ * 面板只有一种身份：**Agent**。
+ *
+ * 这里原来有个「对话（Agent） / 图片生成」模式开关 —— 用户看到后直接问「为什么会有两个选项」。
+ * 他说得对：这个面板的定位就是「派活给 Agent，由它调工具进生产」，图片生成是 Agent 的一个动作，
+ * 不该是平级的第二个模式。而且那个开关放在文档流里，被绝对定位的输入区盖住了半截。
+ * 所以开关整个去掉，面板只做 Agent 一件事（附件参考图那条路仍然直达图片生成，见 sendMessage）。
+ */
 
 /**
  * 面板里的「Agent 模式」现在跑的是**服务端制片 Agent**（M2 起）。
@@ -631,7 +638,9 @@ const sendMessage = async () => {
   scrollToBottom()
 
   // 路由由面板上的开关决定：带参考图时强制走图片；「对话」模式走画布 Agent（能改画布）
-  const goImage = hasImagesLocal || panelMode.value === 'image'
+  // 只有「附了参考图」才直接走图片生成（Agent 目前还接不住用户附的参考图）；
+  // 纯文本一律交给 Agent —— 它自己会决定要不要建节点、要不要生成
+  const goImage = hasImagesLocal
   if (goImage) {
     messages.value.push({
       id: userId + 1,
@@ -736,6 +745,17 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
           role="button"
           @click="openSessionList"
         >
+          <!-- 面板的身份：这里就是 Agent，它靠调工具干活（原来这个信息靠底部的模式开关传达，
+               而那个开关会被输入区盖住、还容易让人以为「图片生成」是另一条独立的路） -->
+          <span class="right-panel-agent-badge">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M12 3.4l1.6 4.6 4.6 1.6-4.6 1.6L12 15.8l-1.6-4.6L5.8 9.6l4.6-1.6L12 3.4z"
+                fill="currentColor"
+              />
+            </svg>
+            Agent 创作
+          </span>
           <div class="lv-typography title-vBcivv">{{ headerTitleText }}</div>
           <div class="arrow-icon-uG49Bu">
             <svg width="14" height="14" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" fill="none" role="presentation" xmlns="http://www.w3.org/2000/svg">
@@ -953,20 +973,6 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         </div>
       </div>
 
-      <!-- 面板模式开关：常驻可见，不再依赖那个不好找的可拖拽选择器 -->
-      <div class="right-panel-mode-switch">
-        <button
-          type="button"
-          :class="['right-panel-mode-switch__btn', { 'is-active': panelMode === 'chat' }]"
-          @click="panelMode = 'chat'"
-        >对话（Agent）</button>
-        <button
-          type="button"
-          :class="['right-panel-mode-switch__btn', { 'is-active': panelMode === 'image' }]"
-          @click="panelMode = 'image'"
-        >图片生成</button>
-      </div>
-
       <ContentGenerator
         :hide-type-selector="true"
         class="dimension-layout-FUl4Nj canvas-layout content-generator-XxJXPs"
@@ -1003,6 +1009,23 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 </template>
 
 <style scoped>
+/* 面板身份标识（Agent 创作）：放在头部，不会被底部的输入浮层盖住 */
+.right-panel-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--canvas-float-block-default, rgba(79, 70, 229, 0.12));
+  border: 0.5px solid var(--stroke-secondary, rgba(99, 102, 241, 0.4));
+  color: var(--text-secondary, #6366f1);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
 /* 步骤清单与确认卡片（2026-09-23，制片 Agent 的界面部分）
    跟着面板已有的视觉语言走：浅底、细边框、等宽序号，不引入新的色彩体系。 */
 .agent-step-list {
@@ -1311,31 +1334,5 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 
 .preview-close:hover {
   background: rgba(255, 255, 255, 0.2);
-}
-/* 面板模式开关：两个常驻按钮，替代原来那个不好找的可拖拽类型选择器 */
-.right-panel-mode-switch {
-  display: flex;
-  gap: 6px;
-  padding: 8px 16px 0;
-}
-.right-panel-mode-switch__btn {
-  flex: 1;
-  padding: 6px 10px;
-  background: transparent;
-  border: 0.5px solid var(--stroke-secondary, rgba(0, 0, 0, 0.12));
-  border-radius: 6px;
-  color: var(--text-secondary, #6b7280);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.right-panel-mode-switch__btn:hover {
-  color: var(--text-primary, #111827);
-  border-color: var(--text-secondary, #6b7280);
-}
-.right-panel-mode-switch__btn.is-active {
-  background: var(--brand-main-default, #2563eb);
-  border-color: var(--brand-main-default, #2563eb);
-  color: #fff;
 }
 </style>

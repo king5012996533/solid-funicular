@@ -1150,12 +1150,43 @@ const closeCanvasMenus = () => {
 const closeContextMenu = () => {
   contextMenuVisible.value = false
 }
+/**
+ * 「Agent 创作」在右键菜单里的图标（24×24 stroke path）：
+ * 一大一小两颗星芒 —— 与画布右边缘那个入口按钮同一个意象，用户一眼能对上。
+ */
+const AGENT_SPARKLE_PATH =
+  'M12 3.4l1.6 4.6 4.6 1.6-4.6 1.6L12 15.8l-1.6-4.6L5.8 9.6l4.6-1.6L12 3.4z M18.4 15.6l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2z'
+
+/**
+ * 从右键菜单打开 Agent。
+ *
+ * 两条路径（空白处右键 / 卡片上右键）共用：先把面板展开，
+ * 卡片那条再带上一句「针对这个节点」的交代 —— 菜单项写的就是「让 Agent 处理这个节点」，
+ * 用户点了就该真的开始处理，而不是只打开一个空面板让他再打一遍字
+ * （这句话会走既有的 initialMessage 通道，和面板里手打一句话是同一条链路）。
+ */
+const openCanvasAgentFromMenu = (options: { aboutNodeId?: string } = {}) => {
+  if (isAssistantCollapsed.value) {
+    toggleAssistantPanel()
+  }
+  if (options.aboutNodeId) {
+    pendingAssistantMessage.value = `帮我处理画布上的节点 ${options.aboutNodeId}`
+  }
+}
+
 const openPaneContextMenu = (event: MouseEvent) => {
   event.preventDefault()
   closeCanvasMenus()
   const flowPos = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
   // 与拖线落空、双击空白列的是同一批节点，所以共用构造器（图标/文案一致）
   contextMenuItems.value = [
+    {
+      id: 'agent-create',
+      label: 'Agent 创作',
+      iconPath: AGENT_SPARKLE_PATH,
+      onClick: () => openCanvasAgentFromMenu(),
+    },
+    { id: 'divider', label: '', type: 'divider' },
     ...buildNodeTypeMenuItems(
       ['text', 'image', 'video', 'asset'],
       'pane-add',
@@ -1178,6 +1209,13 @@ const openNodeContextMenu = (payload: NodeMouseEvent) => {
   const e = payload.event as unknown as MouseEvent
   closeCanvasMenus()
   contextMenuItems.value = [
+    {
+      id: 'agent-handle-node',
+      label: '让 Agent 处理这个节点',
+      iconPath: AGENT_SPARKLE_PATH,
+      onClick: () => openCanvasAgentFromMenu({ aboutNodeId: payload.node.id }),
+    },
+    { id: 'divider', label: '', type: 'divider' },
     { id: 'duplicate', label: '复制', shortcut: 'Cmd+C', onClick: () => duplicateNode(payload.node.id) },
     { id: 'delete', label: '删除', shortcut: 'Del', danger: true, onClick: () => removeNode(payload.node.id) },
   ]
