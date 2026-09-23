@@ -475,6 +475,11 @@ const handlePromptSend = (
       :style="composerStyle"
       @mousedown.stop
     >
+      <!-- 把节点上已存的提示词同步进输入框（2026-09-23）：
+           提示词一直存在 data.prompt 里（生成、重试、画布助手都在用），但输入框没接它 ——
+           于是「画布助手已经帮你把提示词填好了」在界面上完全看不出来，用户会以为它没干活。
+           ContentGenerator 自带 externalPrompt + promptSyncKey：两者一起变化时写入输入框。
+           注意：模板注释必须放在标签**外面**，塞进属性列表会让整个组件编译失败、页面白屏。 -->
       <ContentGenerator
         layout="sidebar"
         :collapsible="false"
@@ -482,6 +487,8 @@ const handlePromptSend = (
         initial-creation-type="video"
         :hide-type-selector="true"
         :verbose-toolbar="true"
+        :external-prompt="String(data?.prompt || '')"
+        :prompt-sync-key="String(data?.prompt || '')"
         :external-reference-images="upstreamFrameUrls"
         :referenceable-assets="referenceableAssets"
         :initial-params="appliedParams"
