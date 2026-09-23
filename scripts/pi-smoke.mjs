@@ -23,7 +23,9 @@ import {
 } from '@earendil-works/pi-ai'
 
 const API = 'http://localhost:5409'
-const PROVIDER_ID = 'p-sceneflow-deepseek'   // 实测支持 tool_calls 往返的通道（ggwk1 那条每轮都重吐 tool_call）
+// 通道随便选：M2 实测 deepseek-flash 与 gpt-5.6-terra 都支持工具结果往返。
+// （M1 时曾以为 ggwk1「每轮重吐 tool_call」，后来查明那是消息没转成上游形状导致的，与通道无关。）
+const PROVIDER_ID = 'p-sceneflow-deepseek'
 const MODEL_KEY = 'deepseek-flash'
 
 // ---------- 1) 登录拿会话（本地这套用服务端会话表，不是纯 JWT） ----------
