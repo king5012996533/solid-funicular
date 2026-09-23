@@ -1,5 +1,4 @@
 import { getGenerationRecordById, createGenerationRecord, updateGenerationRecord } from '../generation-records/service'
-import type { GenerationRecordPayload } from '../generation-records/shared'
 import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './shared'
 import { resolveGatewayProviderUpstream } from '../provider-config/service'
 import { resolveImageModelMaxImagesPerRequest } from '../provider-config/model-service'
@@ -9,7 +8,7 @@ import {
   refundGenerationPoints,
   resolveGenerationPointCost,
 } from '../marketing-center/service'
-import { resolveGenerationTaskStrategy, type GenerationTaskStrategyKey } from './strategy'
+import { resolveGenerationTaskStrategy } from './strategy'
 import {
   AgentWorkspaceStoppedError,
   getAgentWorkspaceSkillMeta,
@@ -24,22 +23,11 @@ import {
   buildAgentErrorRun,
   buildAgentPendingRun,
   buildAgentStoppedRun,
-  type AgentWorkspaceEvent,
 } from '../../src/shared/agent-workspace'
 import type { AgentImageResult, AgentRunState } from '../../src/types/agent'
 import { normalizeGenerationErrorMessage } from '../../src/shared/generation-error'
-import {
-  deleteLocalRunningTask,
-  getLocalRunningTask,
-  setLocalRunningTask,
-  type LocalRunningGenerationTask,
-} from './local-runtime'
-import {
-  clearSharedTaskAbortRequested,
-  getSharedTaskRuntime,
-  markSharedTaskAbortRequested,
-  setSharedTaskRuntime,
-} from './runtime-store'
+import { deleteLocalRunningTask, getLocalRunningTask, setLocalRunningTask } from './local-runtime'
+import { clearSharedTaskAbortRequested, getSharedTaskRuntime, markSharedTaskAbortRequested } from './runtime-store'
 import {
   buildTaskSubmissionIdempotencyKey,
   claimIdempotencyKey,
@@ -53,7 +41,7 @@ import {
   type RedisConcurrencySlot,
 } from '../redis'
 import { GenerationTaskRequestError } from './shared'
-import { getGenerationTaskExecutionStrategy, type TaskAbortReason } from './execution-strategies'
+import { getGenerationTaskExecutionStrategy, type GenerationTaskExecutionStrategyContext, type TaskAbortReason } from './execution-strategies'
 import { executeImageTask } from './image-task-executor'
 import { executeAgentChatTaskFlow } from './agent-chat-task-executor'
 import { executeAgentWorkspaceTaskFlow } from './agent-workspace-task-executor'
@@ -75,6 +63,7 @@ import {
   getGenerationTaskRecord as getGenerationTaskRecordLifecycle,
   startGenerationTask as startGenerationTaskLifecycle,
   stopGenerationTask as stopGenerationTaskLifecycle,
+  type TaskLifecycleContext,
 } from './task-lifecycle-service'
 import {
   ensureTaskNotAborted,
@@ -97,10 +86,10 @@ import {
   requestAgentWorkspaceModelPlan,
 } from './upstream-helpers'
 import { writeScopedLog } from '../shared/logging'
+import type { RuntimeManagedTask } from './task-runtime-governor'
 
-type RunningGenerationTask = LocalRunningGenerationTask & {
-  strategyKey: GenerationTaskStrategyKey
-}
+// 统一用治理层那一份任务类型（见 task-runtime-governor.ts 的说明）
+type RunningGenerationTask = RuntimeManagedTask
 
 const GENERATION_TASK_STAGE_LABELS: Record<string, string> = {
   task_created: '任务已创建',
@@ -182,8 +171,11 @@ const buildTaskExecutionStrategyContext = () => ({
     emitTaskStreamEvent(recordId, event, taskEventEmitterContext)
   ),
   buildInitialRecordPayload,
-  updateGenerationRecord,
-  getGenerationRecordById,
+  // 记录服务返回的是 any-heavy 的 Prisma 行（例如 agentRun.status 是宽松 string），策略层声明的却是精确
+  // 形状（AgentRunState 的联合类型）。运行时就是同一份数据，在**边界**上按目标类型收口，
+  // 免得为了迁就它把 any 扩散进策略层。
+  updateGenerationRecord: updateGenerationRecord as unknown as GenerationTaskExecutionStrategyContext['updateGenerationRecord'],
+  getGenerationRecordById: getGenerationRecordById as unknown as GenerationTaskExecutionStrategyContext['getGenerationRecordById'],
   syncSharedTaskRuntime,
   buildAgentStoppedRun,
   buildAgentErrorRun,
@@ -496,11 +488,11 @@ const buildTaskLifecycleContext = () => ({
   claimIdempotencyKey,
   completeIdempotencyKey,
   clearPendingIdempotencyKey,
-  getGenerationRecordById,
-  createGenerationRecord: (recordPayload: GenerationRecordPayload, userId: string) => createGenerationRecord(recordPayload, userId),
-  updateGenerationRecord: (recordId: string, recordPayload: GenerationRecordPayload, userId: string) => (
-    updateGenerationRecord(recordId, recordPayload, userId)
-  ),
+  // 同策略上下文：记录服务返回宽松行，这里在边界上按目标类型收口
+  getGenerationRecordById: getGenerationRecordById as unknown as TaskLifecycleContext['getGenerationRecordById'],
+  // createGenerationRecord / updateGenerationRecord 返回的记录形状同样是宽松行（agentRun.status 是 string）
+  createGenerationRecord: createGenerationRecord as unknown as TaskLifecycleContext['createGenerationRecord'],
+  updateGenerationRecord: updateGenerationRecord as unknown as TaskLifecycleContext['updateGenerationRecord'],
   attachGenerationPointRecordId,
   resolveGenerationPointCost,
   consumeGenerationPoints,

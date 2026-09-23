@@ -13,6 +13,7 @@ import {
   ensureDistributedTaskSubscription,
 } from './event-bus'
 import { getReplayEventsAfter } from './task-event-replay'
+import type { GenerationRecordPayload } from '../generation-records/shared'
 
 // SSE 连接最长生命周期（毫秒）：到期强制关闭，防止 TCP 半开连接导致 res 既不 close 也不 error
 // 触发的资源泄漏。客户端通过自动重连 + lastEventId 续上即可。默认与 Redis 任务快照 TTL 一致（30 分钟）。
@@ -46,7 +47,8 @@ export const resolveTaskRecordSnapshot = async (recordId: string, currentUserId:
       done: true,
       stopped: true,
       images: record.images,
-      agentRun: record.agentRun,
+      // 记录服务返回的是宽松行（agentRun.status 是 string），载荷声明的是精确形状
+      agentRun: record.agentRun as GenerationRecordPayload['agentRun'],
     }, currentUserId)
 
     record = await getGenerationRecordById(recordId, currentUserId)

@@ -3,6 +3,7 @@ import { prisma } from '../db/prisma'
 import { getOrSetJsonCache, invalidateRedisCaches, redisKeys } from '../redis'
 import { decryptProviderApiKey } from './crypto'
 import { ensureProviderSeedData, getAdminProviderDetail } from './service'
+import { toNullableJsonInput } from '../shared/json-input'
 
 export interface ProviderModelPayload {
   category?: 'CHAT' | 'IMAGE' | 'VIDEO'
@@ -299,7 +300,12 @@ export const invalidateProviderDiscoverModelsCache = async (providerId?: string)
 export const testProviderConnectivity = async (providerId: string) => {
   const normalizedProviderId = await assertProviderExists(providerId)
   const { baseUrl, apiKey, provider } = await getProviderRuntimeConnection(normalizedProviderId)
-  const supportedTypes = Array.isArray(provider.supportedTypes) ? provider.supportedTypes : []
+  // 字段名是 supportedTypesJson（Prisma 侧）；写成 supportedTypes 会恒为 undefined，
+  // 于是下面两处 `supportedTypes.includes('CHAT'/'IMAGE')` 永远为假 ——
+  // 「测试连通性」只测了模型列表，对话与图片端点根本没测，却仍报「连通正常」。
+  const supportedTypes = Array.isArray(provider.supportedTypesJson)
+    ? provider.supportedTypesJson.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
   const tests: Array<ReturnType<typeof runTimedProviderTest>> = []
 
   tests.push(runTimedProviderTest('models', async (signal) => {
@@ -468,8 +474,8 @@ export const createProviderModel = async (providerId: string, payload: ProviderM
       description: normalizedPayload.description || null,
       sortOrder: normalizedPayload.sortOrder,
       isEnabled: normalizedPayload.isEnabled,
-      capabilityJson: normalizedPayload.capabilityJson,
-      defaultParamsJson: normalizedPayload.defaultParamsJson,
+      capabilityJson: toNullableJsonInput(normalizedPayload.capabilityJson),
+      defaultParamsJson: toNullableJsonInput(normalizedPayload.defaultParamsJson),
     },
   })
 
@@ -505,8 +511,8 @@ export const batchUpsertProviderModels = async (providerId: string, payload: Pro
             description: normalizedPayload.description || null,
             sortOrder: normalizedPayload.sortOrder,
             isEnabled: normalizedPayload.isEnabled,
-            capabilityJson: normalizedPayload.capabilityJson,
-            defaultParamsJson: normalizedPayload.defaultParamsJson,
+            capabilityJson: toNullableJsonInput(normalizedPayload.capabilityJson),
+            defaultParamsJson: toNullableJsonInput(normalizedPayload.defaultParamsJson),
           },
         })
         upsertedItems.push(buildProviderModelItem(updated))
@@ -522,8 +528,8 @@ export const batchUpsertProviderModels = async (providerId: string, payload: Pro
           description: normalizedPayload.description || null,
           sortOrder: normalizedPayload.sortOrder,
           isEnabled: normalizedPayload.isEnabled,
-          capabilityJson: normalizedPayload.capabilityJson,
-          defaultParamsJson: normalizedPayload.defaultParamsJson,
+          capabilityJson: toNullableJsonInput(normalizedPayload.capabilityJson),
+          defaultParamsJson: toNullableJsonInput(normalizedPayload.defaultParamsJson),
         },
       })
       upsertedItems.push(buildProviderModelItem(created))
@@ -569,8 +575,8 @@ export const updateProviderModel = async (providerId: string, id: string, payloa
       description: normalizedPayload.description || null,
       sortOrder: normalizedPayload.sortOrder,
       isEnabled: normalizedPayload.isEnabled,
-      capabilityJson: normalizedPayload.capabilityJson,
-      defaultParamsJson: normalizedPayload.defaultParamsJson,
+      capabilityJson: toNullableJsonInput(normalizedPayload.capabilityJson),
+      defaultParamsJson: toNullableJsonInput(normalizedPayload.defaultParamsJson),
     },
   })
 

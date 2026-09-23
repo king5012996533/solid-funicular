@@ -1,4 +1,6 @@
 import { getSharedTaskRuntime, hasSharedTaskAbortRequested, patchSharedTaskRuntime } from './runtime-store'
+import type { LocalRunningGenerationTask } from './local-runtime'
+import type { GenerationTaskStrategyKey } from './strategy'
 import {
   acquireRedisLock,
   isRedisEnabled,
@@ -8,19 +10,21 @@ import {
   renewRedisLock,
 } from '../redis'
 
-export interface RuntimeManagedTask {
-  recordId: string
-  userId: string
-  type: string
-  strategyKey: string
-  billedProviderId?: string
-  billedModelKey?: string
-  abortController: AbortController
-}
+/**
+ * 运行时任务对象 —— 全链路（治理层 / 策略层 / 各执行器 / 结算）共用这一份。
+ *
+ * 为什么不再自己声明一份最小形状（2026-09-23 清类型债）：
+ *   这里原本是 `{recordId, userId, type, strategyKey, billedProviderId?, billedModelKey?, abortController}`，
+ *   而 service.ts 与 task-lifecycle-service.ts 各自又声明了
+ *   `LocalRunningGenerationTask & { strategyKey }`（多十几个必填字段），执行器们则是
+ *   `{recordId, userId, abortController}` —— 三份形状互不可赋值，上下文对象一传递就报 33 处错。
+ *   运行时本来就是同一个对象，类型跟着它走即可；`strategyKey` 在本地运行时里已有，这里再显式要求一次。
+ */
+export type RuntimeManagedTask = LocalRunningGenerationTask & { strategyKey: GenerationTaskStrategyKey }
 
 type SharedRuntimeSnapshot = Awaited<ReturnType<typeof getSharedTaskRuntime>>
 
-type RetryState = {
+export type RetryState = {
   attempt: number
   waitDurationMs: number
   status: number
@@ -35,7 +39,7 @@ type ExecutionStateInput = {
   lastErrorMessage?: string
 }
 
-type SyncStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped'
+export type SyncStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped'
 
 interface RuntimeGovernorContext {
   abortTaskWithReason: (task: RuntimeManagedTask, reason: 'shared_stop' | 'execution_lock_lost') => void

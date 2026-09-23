@@ -2,6 +2,8 @@ import crypto from 'node:crypto'
 import prisma from '../db/prisma'
 import { AUTH_SESSION_COOKIE_NAME, createUserSession, ensureAuthMethodConfigExists, getSessionCookieMaxAge, hashUserPassword, isValidAdminPassword, isValidAdminUsername, toAuthUserProfile } from '../auth/service'
 import { invalidateSystemConfigCaches, getAdminSystemConfig, saveAdminSystemConfig } from '../system-config/service'
+import { toNullableJsonInput } from '../shared/json-input'
+import type { SystemConfigPayload } from '../system-config/shared'
 
 const SYSTEM_INIT_STATUS_CODE = 'SYSTEM_INIT_STATUS'
 const SYSTEM_INIT_STATUS_NAME = '系统初始化状态'
@@ -54,13 +56,13 @@ const writeStoredSystemInitStatus = async (payload: SystemInitStatus) => {
     },
     update: {
       name: SYSTEM_INIT_STATUS_NAME,
-      configJson: payload,
+      configJson: toNullableJsonInput(payload),
     },
     create: {
       id: crypto.randomUUID(),
       code: SYSTEM_INIT_STATUS_CODE,
       name: SYSTEM_INIT_STATUS_NAME,
-      configJson: payload,
+      configJson: toNullableJsonInput(payload),
     },
   })
 }
@@ -243,7 +245,7 @@ export const initializeSystem = async (payload: {
       ...systemConfig.loginSettings,
       welcomeTitle: systemConfig.loginSettings.welcomeTitle || '欢迎登录',
     },
-  })
+  } as SystemConfigPayload)
 
   await invalidateSystemConfigCaches()
 

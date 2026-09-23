@@ -58,7 +58,7 @@ export const handleGenerationRecordsRequest = async (req: any, res: any) => {
     }
 
     if (req.method === 'GET' && recordId) {
-      const data = await getGenerationRecordById(recordId, currentUser.id)
+      const data = await getGenerationRecordById(String(recordId), String(currentUser.id))
       sendJson(res, 200, { data })
       return
     }
@@ -66,7 +66,7 @@ export const handleGenerationRecordsRequest = async (req: any, res: any) => {
     if (req.method === 'POST' && requestUrl === GENERATION_RECORDS_BASE_PATH) {
       const payload = await readGenerationRecordBody(req)
       payloadSummary = buildPayloadSummary(payload)
-      const data = await createGenerationRecord(payload, currentUser.id)
+      const data = await createGenerationRecord(payload, String(currentUser.id))
       sendJson(res, 200, { data })
       return
     }
@@ -74,7 +74,7 @@ export const handleGenerationRecordsRequest = async (req: any, res: any) => {
     if (req.method === 'PATCH' && recordId) {
       const payload = await readGenerationRecordBody(req)
       payloadSummary = buildPayloadSummary(payload)
-      const data = await updateGenerationRecord(recordId, payload, currentUser.id)
+      const data = await updateGenerationRecord(String(recordId), payload, String(currentUser.id))
       sendJson(res, 200, { data })
       return
     }

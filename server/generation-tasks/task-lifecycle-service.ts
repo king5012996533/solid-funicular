@@ -1,14 +1,13 @@
 import type { GenerationRecordPayload } from '../generation-records/shared'
-import type { LocalRunningGenerationTask } from './local-runtime'
 import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './shared'
 import type { GenerationTaskStrategyKey } from './strategy'
 import type { AgentRunState } from '../../src/types/agent'
 import { GenerationTaskRequestError } from './shared'
 import { readCapabilityFlagsFromRequestBody, type ModelCapabilityFlags } from '../../src/shared/provider-capability'
+import type { RuntimeManagedTask } from './task-runtime-governor'
 
-type RunningGenerationTask = LocalRunningGenerationTask & {
-  strategyKey: GenerationTaskStrategyKey
-}
+// 统一用治理层那一份任务类型（见 task-runtime-governor.ts 的说明）
+type RunningGenerationTask = RuntimeManagedTask
 
 type ConcurrencySlot = {
   scope: 'user' | 'skill' | 'provider'
@@ -41,7 +40,7 @@ type BillingDetail = {
   modelName: string
 }
 
-interface TaskLifecycleContext {
+export interface TaskLifecycleContext {
   resolveGenerationTaskStrategy: (payload: GenerationTaskStartPayload) => {
     key: GenerationTaskStrategyKey
   }
@@ -57,20 +56,25 @@ interface TaskLifecycleContext {
     requestBody: Record<string, unknown> | null
   }) => string
   claimIdempotencyKey: <T>(key: string) => Promise<{
-    state: 'completed' | 'in_progress' | 'claimed'
+    // 与 server/redis/idempotency.ts 的 IdempotencyClaimResult 对齐：实现返回的是 'acquired'
+    // （原声明写成 'claimed'，没有任何地方消费过这个名字，纯属叫法过期）
+    state: 'completed' | 'in_progress' | 'acquired'
     data?: T
-    token: string
+    // 实现里只有 acquired 时才带 token，声明跟着放宽
+    token?: string
   }>
   completeIdempotencyKey: (key: string, token: string, data: { recordId: string }) => Promise<void>
   clearPendingIdempotencyKey: (key: string, token: string) => Promise<void>
   getGenerationRecordById: (recordId: string, currentUserId: string) => Promise<CreatedRecord>
   createGenerationRecord: (payload: GenerationRecordPayload, currentUserId: string) => Promise<CreatedRecord>
-  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<void>
+  // 实现层返回更新后的记录；这里只关心写成功与否
+  updateGenerationRecord: (recordId: string, payload: GenerationRecordPayload, currentUserId: string) => Promise<unknown>
   attachGenerationPointRecordId: (input: {
     associationNo: string
     userId: string
     generationRecordId: string
-  }) => Promise<void>
+    // 实现层返回更新后的积分流水（可能是 null），这里只关心写成功与否
+  }) => Promise<unknown>
   resolveGenerationPointCost: (input: {
     providerId: string
     modelKey: string
@@ -257,14 +261,15 @@ export const startGenerationTask = async (
         userId: currentUserId,
         generationRecordId: createdRecord.id,
       })
-      await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token, {
+      await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token as string, {
         recordId: createdRecord.id,
       })
 
       const task: RunningGenerationTask = {
         recordId: createdRecord.id,
         userId: currentUserId,
-        type: payload.type,
+        // payload.type 是宽松 string，任务对象要求 'image' | 'agent' | 'research'（策略解析时已确定）
+        type: payload.type as RunningGenerationTask['type'],
         strategyKey: strategy.key,
         abortController: new AbortController(),
         associationNo,
@@ -347,7 +352,7 @@ export const startGenerationTask = async (
         userId: currentUserId,
         generationRecordId: createdRecord.id,
       })
-      await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token, {
+      await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token as string, {
         recordId: createdRecord.id,
       })
 
@@ -424,7 +429,7 @@ export const startGenerationTask = async (
       userId: currentUserId,
       generationRecordId: createdRecord.id,
     })
-    await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token, {
+    await context.completeIdempotencyKey(idempotencyKey, idempotencyClaim.token as string, {
       recordId: createdRecord.id,
     })
 
@@ -469,7 +474,7 @@ export const startGenerationTask = async (
     if (concurrencySlots.length) {
       await context.releaseTaskConcurrencySlots(concurrencySlots)
     }
-    await context.clearPendingIdempotencyKey(idempotencyKey, idempotencyClaim.token)
+    await context.clearPendingIdempotencyKey(idempotencyKey, idempotencyClaim.token as string)
     throw error
   }
 }

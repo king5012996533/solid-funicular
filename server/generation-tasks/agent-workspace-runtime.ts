@@ -31,7 +31,23 @@ export interface AgentWorkspaceSkillRuntimeMeta {
   imageModelBinding?: AgentWorkspaceImageModelBinding
 }
 
-export const workspaceTimingProfile = {
+/**
+ * 工作台时序画像。显式给类型是因为：字面量推断出来是 number[]，
+ * 而消费侧（执行器上下文）要求 `readonly [number, number]` —— 两边对不上就报类型错，
+ * 运行时其实是同一份数据。
+ */
+export type WorkspaceTimingProfile = {
+  preAnalyzeDelay: number
+  reasoningChunkDelayRange: readonly [number, number]
+  toolCallDelayRange: readonly [number, number]
+  analyzeDelayRange: readonly [number, number]
+  postPlanDelayRange: readonly [number, number]
+  preSubmitDelay: number
+  betweenImageDelayRange: readonly [number, number]
+  completionDelayRange: readonly [number, number]
+}
+
+export const workspaceTimingProfile: WorkspaceTimingProfile = {
   preAnalyzeDelay: 900,
   analyzeDelayRange: [2400, 3600],
   reasoningChunkDelayRange: [120, 220],

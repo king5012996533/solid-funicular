@@ -930,10 +930,12 @@ export const saveAdminSystemConfigSections = async (
   sections: SystemConfigSectionKey[],
 ) => {
   const current = await getAdminSystemConfig()
+  // payload 的具体形状可能比 SystemConfigPayload 的声明更宽（各调用点自己拼的部分字段），
+  // 这里在边界上收口：下面 normalizeSystemConfig 会逐字段归一化，形状差异不会漏进存储
   const normalized = normalizeSystemConfig({
     ...current,
     ...payload,
-  })
+  } as SystemConfigPayload)
   const uniqueSections = Array.from(new Set(sections))
 
   await prisma.$transaction(async (tx) => {

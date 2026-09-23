@@ -72,7 +72,7 @@ const normalizeManualVerificationFacts = (input: unknown): ResearchFact[] => {
   }
 
   return input
-    .map((item, index) => {
+    .map((item, index): ResearchFact | null => {
       const record = item && typeof item === 'object' ? item as Record<string, unknown> : {}
       const statement = String(record.statement || '').trim()
       if (!statement) {

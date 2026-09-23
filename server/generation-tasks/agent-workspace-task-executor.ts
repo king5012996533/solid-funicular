@@ -2,12 +2,12 @@ import type { GenerationTaskStartPayload } from './shared'
 import type { AgentWorkspaceEvent } from '../../src/shared/agent-workspace'
 import type { AgentRunState } from '../../src/types/agent'
 import { readCapabilityFlagsFromRequestBody } from '../../src/shared/provider-capability'
+import type { RetryState, RuntimeManagedTask } from './task-runtime-governor'
+import type { WorkspaceTimingProfile } from './agent-workspace-runtime'
+import type { ModelCapabilityFlags } from '../../src/shared/provider-capability'
 
-type AgentWorkspaceExecutionTask = {
-  recordId: string
-  userId: string
-  abortController: AbortController
-}
+// 与运行时治理层、策略层统一同一份任务类型（详见 execution-strategies.ts 的说明）
+type AgentWorkspaceExecutionTask = RuntimeManagedTask
 
 type AgentWorkspaceSkillMeta = {
   workspaceSkillKey: string
@@ -35,13 +35,7 @@ type AgentWorkspaceImageModel = {
   defaultParamsJson?: Record<string, unknown> | null
 }
 
-type AgentWorkspaceRetryState = {
-  attempt: number
-  waitDurationMs: number
-  status: number
-  errorPreview: string
-  stage: string
-}
+type AgentWorkspaceRetryState = RetryState
 
 type AgentWorkspacePersistedRecord = Record<string, unknown> | null
 
@@ -81,17 +75,9 @@ export interface AgentWorkspaceTaskExecutorContext {
     message?: string
   }) => void
   sleepWithWorkspaceAbort: (signal: AbortSignal, durationMs: number) => Promise<void>
-  getWorkspaceRandomDelay: (range: [number, number]) => number
-  workspaceTimingProfile: {
-    preAnalyzeDelay: number
-    reasoningChunkDelayRange: [number, number]
-    toolCallDelayRange: [number, number]
-    analyzeDelayRange: [number, number]
-    postPlanDelayRange: [number, number]
-    preSubmitDelay: number
-    betweenImageDelayRange: [number, number]
-    completionDelayRange: [number, number]
-  }
+  getWorkspaceRandomDelay: (range: readonly [number, number]) => number
+  // 与 agent-workspace-runtime 的 workspaceTimingProfile 对齐：那边是 as const 出来的只读值
+  workspaceTimingProfile: WorkspaceTimingProfile
   planAgentWorkspace: (input: {
     prompt: string
     skill: string
@@ -106,6 +92,8 @@ export interface AgentWorkspaceTaskExecutorContext {
     dependencySkillKeys?: string[]
     prompt: string
     referenceImages?: string[]
+    /** 模型能力开关（局部重绘/参考图等）；实现层 readCapabilityFlagsFromRequestBody 的产物，这里声明漏了 */
+    capabilityFlags?: ModelCapabilityFlags | null
   }) => Promise<{
     analysisLines: string[]
     workflowLabel?: string
@@ -153,7 +141,8 @@ export interface AgentWorkspaceTaskExecutorContext {
     prompt: string
     planItems: string[]
   }) => string
-  AgentWorkspaceStoppedError: typeof Error
+  /** 这个类有自己的构造签名（不同于 ErrorConstructor），槽位放宽成「任意入参的 Error 子类构造器」 */
+  AgentWorkspaceStoppedError: new (...args: any[]) => Error
 }
 
 // 承接技能工作台任务的执行主干，先把长流程从 service.ts 中剥离出来。
@@ -440,7 +429,8 @@ export const executeAgentWorkspaceTaskFlow = async (
       type: 'workflow_planned',
       taskId: task.recordId,
       workflowLabel: plan.workflowLabel,
-      workflowParams: plan.workflowParams,
+      // 事件声明里 workflowParams 是必填对象（不是可选），没有就传空对象
+      workflowParams: plan.workflowParams || {},
       expectedImageCount: plan.imageTasks.length,
       planItems: plan.planItems,
     })

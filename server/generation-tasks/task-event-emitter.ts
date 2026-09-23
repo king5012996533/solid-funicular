@@ -46,7 +46,8 @@ export const emitTaskProgressEvent = (
   recordId: string,
   input: {
     stage: string
-    message: string
+    // 可选：不少调用点只报阶段（例如「开始请求上游」），以前这里写死必填，导致上游调用方类型对不上
+    message?: string
     done?: boolean
     stopped?: boolean
     record?: Record<string, unknown> | null
