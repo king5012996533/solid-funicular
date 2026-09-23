@@ -478,6 +478,24 @@ const runTaskInBackground = (task: RunningGenerationTask, payload: GenerationTas
         } else {
           const errorMessage = executionStrategy.resolveFailureMessage(error, abortReason, executionStrategyContext)
           await executionStrategy.handleFailed(task, payload, error, errorMessage, executionStrategyContext)
+          /**
+           * 正常失败路径**也必须**发终态事件。
+           *
+           * 2026-09-23 实测：这一段以前只在「收口处理本身抛错」的 catch 里发 failed 事件，
+           * 于是任务正常失败（上游 4xx、推理模型思考超时被中止、归档失败…）时，订阅事件流的前端
+           * 收不到任何终止信号 —— 界面永远停在「思考中」，用户只能刷新。
+           * 下面的兜底发事件的注释写着「避免前端永远卡在运行中」，但位置放错了：那是异常分支。
+           */
+          // 失败码按原因归类，前端可据此给准确提示（上游错/超时/被中止/内部错）
+          const failureCode = isAbortError
+            ? (abortReason === 'user_stop' || abortReason === 'shared_stop' ? 'task_aborted' : 'upstream_timeout')
+            : (/上游|upstream|HTTP \d{3}|status/i.test(errorMessage) ? 'upstream_error' : 'internal_error')
+          emitTaskFailedEvent(task.recordId, {
+            errorCode: failureCode,
+            errorReason: errorMessage || '任务执行失败',
+            message: errorMessage || '任务执行失败',
+            stage: 'failed',
+          }, taskEventEmitterContext)
         }
       } catch (fallbackError) {
         logGenerationTaskError('task_failure_handler_failed', fallbackError, {
