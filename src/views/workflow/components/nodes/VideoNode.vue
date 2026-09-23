@@ -10,7 +10,7 @@
  *   - 节点外 -56px "+" 按钮
  *   - 选中后下方浮出 CanvasPromptInput（视频模型 + 480p/5s/... chip + ¥3）
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import {
   CopyDocument,
@@ -26,6 +26,8 @@ import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/can
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
+import { createGenerationTask, resolveGenerationTaskModel, subscribeGenerationTaskEvents, type GenerationTaskStreamEvent } from '@/api/generation-tasks'
+import { registerNodeRunner, unregisterNodeRunner } from '@/views/workflow/composables/useCanvasNodeRunner'
 import {
   updateNode,
   removeNode,
@@ -57,6 +59,9 @@ const showActions = ref(false)
 const videoUrl = ref(props.data?.url || '')
 const isLoading = ref(!!props.data?.loading)
 const errorMsg = ref(props.data?.error || '')
+/** 视频是长任务（动辄几分钟），必须把上游状态透出来，否则用户以为卡死了 */
+const progressText = ref('')
+let taskStreamController: AbortController | null = null
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 watch(
@@ -336,18 +341,148 @@ const handlePromptSend = (
   // 上游连线只是「一个 @ 都没敲」时的自动注入，两者不能混着报数
   const explicitRefs = Array.isArray(options?.referenceImages) ? options.referenceImages.filter(Boolean) : []
   const frames = explicitRefs.length ? explicitRefs : upstreamFrameUrls.value
-  const summary = [
-    params.modelKey ? `模型 ${getModelByName(params.modelKey)?.label || params.modelKey}` : '',
-    params.ratio ? `比例 ${describeAspectRatio(params.ratio)}` : '',
-    params.duration ? `${params.duration} 秒` : '',
-    params.resolution ? `分辨率 ${params.resolution}` : '',
-    frames.length ? `首帧 ${frames.length} 张` : '',
-  ].filter(Boolean).join(' · ')
 
-  ElMessage.warning(
-    `视频生成尚未接通：服务端还没有 video 执行策略。\n已按当前参数组装好请求 —— ${summary}\n提示词：${prompt.slice(0, 40)}${prompt.length > 40 ? '…' : ''}`,
-  )
+  // 真的提交（2026-09-23）：服务端已补齐 video 执行策略（异步任务制：建单 → 轮询 → 取件），
+  // 这里不再只弹「尚未接通」，而是走与图片节点同一条客户端链路。
+  void runGeneration({
+    prompt,
+    modelKey: String(params.modelKey || props.data?.model || '').trim(),
+    ratio: params.ratio ? String(params.ratio) : undefined,
+    duration: params.duration ? String(params.duration) : undefined,
+    resolution: params.resolution ? String(params.resolution) : undefined,
+    referenceFrames: frames,
+  })
 }
+
+/**
+ * 提交与重试共用：建任务 → 立刻把 taskId/提示词写回节点 → 订阅事件流。
+ * 与 ImageNode 刻意保持一致（同一套失败/停止/超时处理），差异只在参数与产物字段。
+ */
+const runGeneration = async (input: {
+  prompt: string
+  modelKey: string
+  ratio?: string
+  duration?: string
+  resolution?: string
+  referenceFrames: string[]
+}) => {
+  try {
+    isLoading.value = true
+    errorMsg.value = ''
+    const { providerId, modelKey } = resolveGenerationTaskModel({
+      modelKey: input.modelKey,
+      category: 'VIDEO',
+      missingModelMessage: '未匹配到有效的视频模型，请先在后台配置',
+    })
+    const requestBody: Record<string, unknown> = {
+      providerId,
+      model: modelKey,
+      prompt: input.prompt,
+    }
+    if (input.ratio) requestBody.ratio = input.ratio
+    if (input.resolution) requestBody.resolution = input.resolution
+    if (input.duration) requestBody.duration = Number(input.duration) || input.duration
+    if (input.referenceFrames.length) requestBody.image_urls = [...input.referenceFrames]
+
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'video',
+      prompt: input.prompt,
+      modelKey,
+      ratio: input.ratio,
+      resolution: input.resolution,
+      duration: input.duration,
+      referenceImages: input.referenceFrames,
+      requestBody,
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('视频任务创建失败')
+
+    // 提交时就落库：提示词/参数给「重试」用，taskId 给「刷新后对账」用（与图片节点同一个教训）
+    updateNode(props.id, {
+      prompt: input.prompt,
+      model: modelKey,
+      ratio: input.ratio || '',
+      resolution: input.resolution || '',
+      duration: input.duration ? Number(input.duration) : 0,
+      taskRecordId: taskId,
+      submittedAt: Date.now(),
+      loading: true,
+      error: '',
+    })
+
+    const controller = new AbortController()
+    taskStreamController = controller
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: applyTaskEvent,
+    })
+  } catch (err: unknown) {
+    console.error('[VideoNode] generation failed', err)
+    isLoading.value = false
+    errorMsg.value = err instanceof Error ? err.message : '视频生成失败'
+    updateNode(props.id, { loading: false, error: errorMsg.value })
+  }
+}
+
+/** 事件流：进度写到节点上（视频是长任务，必须让用户看到它在动），完成时把产物落到 url */
+const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
+  if (event.type === 'progress' || event.type === 'snapshot') {
+    const stage = String((event as { message?: string }).message || (event as { stage?: string }).stage || '').trim()
+    if (stage && isLoading.value) progressText.value = stage
+    return
+  }
+  if (event.type === 'completed') {
+    const record = (event.record || {}) as Record<string, unknown>
+    const outputs = Array.isArray(record.outputs) ? record.outputs as Array<Record<string, unknown>> : []
+    const fromOutputs = outputs.map((item) => String(item?.url || '')).filter(Boolean)
+    const fallback = Array.isArray(record.images) ? (record.images as string[]).filter(Boolean) : []
+    const video = fromOutputs[0] || fallback[0] || String(record.url || '')
+    if (video) {
+      isLoading.value = false
+      updateNode(props.id, { url: video, loading: false, error: '', executed: true, submittedAt: 0 })
+    }
+    return
+  }
+  if (event.type === 'failed') {
+    isLoading.value = false
+    errorMsg.value = String((event as { message?: string }).message || (event.record as { error?: string })?.error || '视频生成失败')
+    updateNode(props.id, { loading: false, error: errorMsg.value })
+    return
+  }
+  if (event.type === 'stopped') {
+    isLoading.value = false
+    errorMsg.value = '任务已停止，可以重试'
+    updateNode(props.id, { loading: false, error: errorMsg.value })
+  }
+}
+
+/** 供画布助手调用：用节点当前参数跑一次（注册进 useCanvasNodeRunner，Agent 的 run_node 才能触发） */
+const runOnceForAgent = async () => {
+  // 节点自己存的提示词要当 inline 传进去：composeFinalPrompt 只负责把「上游文本节点的内容」
+  // 与 inline 拼起来，不读 data.prompt —— 直接传 '' 会导致明明有提示词却报「还没有提示词」
+  const stored = String(props.data?.prompt || '').trim()
+  const prompt = composeFinalPrompt(stored) || stored
+  if (!prompt) throw new Error('该视频节点还没有提示词，先给它写一个（update_node 的 prompt）')
+  await runGeneration({
+    prompt,
+    modelKey: String(props.data?.model || '').trim(),
+    ratio: String(props.data?.ratio || '') || undefined,
+    duration: props.data?.duration ? String(props.data.duration) : undefined,
+    resolution: String(props.data?.resolution || '') || undefined,
+    referenceFrames: upstreamFrameUrls.value,
+  })
+}
+
+onMounted(() => {
+  registerNodeRunner(props.id, runOnceForAgent)
+})
+
+onBeforeUnmount(() => {
+  unregisterNodeRunner(props.id)
+  taskStreamController?.abort()
+  taskStreamController = null
+})
 </script>
 
 <template>
@@ -439,7 +574,7 @@ const handlePromptSend = (
 
       <div v-else-if="showLoading" class="video-node-loading">
         <div class="video-node-spinner" />
-        <span>生成中…</span>
+        <span>{{ progressText || '生成中…' }}</span>
       </div>
       <div v-else-if="showError" class="video-node-error" @click.stop="triggerUpload">
         <span>{{ errorMsg }}，点击重新上传</span>
