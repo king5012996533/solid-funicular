@@ -12,7 +12,8 @@ export type { GenerationTaskFailureCode } from '@/shared/generation-task-stream'
 export interface GenerationTaskStartPayload {
   sessionId?: string
   source?: string
-  type: 'image' | 'agent' | 'research'
+  // 服务端已补齐 video 执行策略（异步任务制），这里同步放开
+  type: 'image' | 'video' | 'agent' | 'research'
   requestMode?: 'image-generation' | 'image-edit'
   prompt: string
   model?: string
@@ -36,7 +37,8 @@ interface RequestOptions {
 export interface ResolvedGenerationTaskModelInput {
   modelKey?: string
   fallbackModelKey?: string
-  category: 'CHAT' | 'IMAGE'
+  // 服务端补齐 video 策略后，视频节点也要用这条解析（原来只有 CHAT/IMAGE）
+  category: 'CHAT' | 'IMAGE' | 'VIDEO'
   missingProviderMessage?: string
   missingModelMessage?: string
 }

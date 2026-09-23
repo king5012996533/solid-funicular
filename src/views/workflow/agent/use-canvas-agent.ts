@@ -97,9 +97,17 @@ export const useCanvasAgent = (options: UseCanvasAgentOptions) => {
   const resolveModelKey = async () => {
     const explicit = options.modelKey?.() || "";
     if (explicit) return explicit;
-    await loadPublicModelCatalog(true);
-    const selectionKey = getDefaultChatModelKey();
-    const chatModels = getAllChatModels();
+    // 先读缓存；只有确实为空（首次加载、或后台刚改过配置）才强制刷新 ——
+    // 之前无条件 force 刷新，刷新期间列表是空的，于是「读不到模型」把整轮对话判成了
+    // 「后台还没有配置可用的对话模型」（实测踩到）。
+    await loadPublicModelCatalog();
+    let selectionKey = getDefaultChatModelKey();
+    let chatModels = getAllChatModels();
+    if (!chatModels.length) {
+      await loadPublicModelCatalog(true);
+      selectionKey = getDefaultChatModelKey();
+      chatModels = getAllChatModels();
+    }
     const picked = chatModels.find((item) => item.key === selectionKey)
       || chatModels.find((item) => selectionKey.endsWith(item.modelKey))
       || chatModels[0];
