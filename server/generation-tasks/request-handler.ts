@@ -5,6 +5,8 @@ import { REDIS_CONFIG, consumeFixedWindowRateLimit, getRedisRuntimeSettings } fr
 import { writeScopedLog } from '../shared/logging'
 import { GENERATION_TASKS_BASE_PATH } from './constants'
 import { getGenerationTaskRecord, startGenerationTask, stopGenerationTask, subscribeGenerationTaskStream } from './service'
+import { resolveClientToolResult } from './canvas-agent-bridge'
+import type { AgentToolResultPayload } from '../../src/shared/generation-task-stream'
 import { GenerationTaskRequestError, readGenerationTaskBody, sendGenerationTaskError } from './shared'
 
 // 统一输出生成任务请求异常，便于排查启动、轮询和停止链路。
@@ -22,7 +24,9 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
     ? taskPath.slice(0, -('/stop'.length))
     : taskPath.endsWith('/events')
       ? taskPath.slice(0, -('/events'.length))
-      : taskPath
+      : taskPath.endsWith('/tool-result')
+        ? taskPath.slice(0, -('/tool-result'.length))
+        : taskPath
 
   let currentUser: { id?: string | null } | null = null
   let payloadSummary: Record<string, unknown> | null = null
@@ -82,6 +86,33 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
       }
       const data = await getGenerationTaskRecord(taskId, currentUser.id)
       sendJson(res, 200, { data })
+      return
+    }
+
+    /**
+     * 画布 Agent 的工具回执入口（M2 的桥）。
+     *
+     * 浏览器执行完一个 `requiresClient` 工具后 POST 回来，服务端把挂起的 Promise 兑现，
+     * Agent 继续往下走。**归属校验靠 taskId 本身就够了**：`getGenerationTaskRecord` 会按
+     * currentUser 校验这条记录属不属于他 —— 别人的任务查不到就直接 404，
+     * 不存在「拿别人的 recordId 回执把别人 Agent 带跑」这条路。
+     */
+    if (req.method === 'POST' && requestUrl === `${GENERATION_TASKS_BASE_PATH}/${encodeURIComponent(taskId)}/tool-result`) {
+      await getGenerationTaskRecord(taskId, currentUser.id)
+      const body = await readGenerationTaskBody(req) as unknown as Partial<AgentToolResultPayload>
+      const callId = String(body?.callId || '').trim()
+      if (!callId) {
+        throw new GenerationTaskRequestError(400, '缺少 callId，无法定位要回执的工具调用')
+      }
+      const accepted = resolveClientToolResult(taskId, {
+        callId,
+        name: body?.name ? String(body.name) : undefined,
+        ok: body?.ok !== false,
+        result: String(body?.result || ''),
+        summary: body?.summary ? String(body.summary) : undefined,
+        details: body?.details && typeof body.details === 'object' ? body.details : undefined,
+      })
+      sendJson(res, 200, { data: { accepted } })
       return
     }
 

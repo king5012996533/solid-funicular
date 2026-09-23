@@ -17,6 +17,7 @@ import {
     CANVAS_AGENT_TOOL_SCHEMAS,
     executeCanvasAgentTool,
 } from '../../src/views/workflow/agent/canvas-agent-tools.ts'
+import { CANVAS_AGENT_TOOL_DEFINITIONS } from '../../src/shared/canvas-agent-tools.ts'
 
 let passed = 0
 let failed = 0
@@ -106,6 +107,26 @@ check('暴露给模型的工具名与说明齐全', () => {
     for (const expected of ['get_canvas_state', 'add_node', 'update_node', 'connect_nodes', 'remove_node', 'select_nodes', 'run_node', 'list_workflow_templates', 'apply_workflow_template']) {
         assert(names.includes(expected), `缺少工具 ${expected}`)
     }
+    /**
+     * 前后端不许漂移：模型看到的描述来自服务端那份定义，浏览器执行的是这份 schema。
+     * 两边一旦不一致（改名、改参数、改说明），表现是「模型老调错工具」——不报错、只变笨，
+     * 所以在这里逐字段钉死，让漂移在 CI 就炸出来。
+     */
+    assert(
+        CANVAS_AGENT_TOOL_SCHEMAS.length === CANVAS_AGENT_TOOL_DEFINITIONS.length,
+        `前后端工具数量不一致：前端 ${CANVAS_AGENT_TOOL_SCHEMAS.length}、共享定义 ${CANVAS_AGENT_TOOL_DEFINITIONS.length}`,
+    )
+    for (const definition of CANVAS_AGENT_TOOL_DEFINITIONS) {
+        const schema = CANVAS_AGENT_TOOL_SCHEMAS.find((item) => item.function.name === definition.name)
+        assert(schema, `共享定义里的「${definition.name}」没有派生出 schema`)
+        assert(schema.function.description === definition.description, `${definition.name} 的描述前后端不一致`)
+        assert(schema.function.label === definition.label, `${definition.name} 的展示名前后端不一致`)
+        assert(
+            JSON.stringify(schema.function.parameters) === JSON.stringify(definition.parameters),
+            `${definition.name} 的参数 schema 前后端不一致`,
+        )
+    }
+
     for (const tool of CANVAS_AGENT_TOOL_SCHEMAS) {
         assert(tool.function.description.length > 10, `${tool.function.name} 的 description 太短，模型看不出用途`)
         assert(tool.function.parameters?.type === 'object', `${tool.function.name} 的参数必须是 object schema`)

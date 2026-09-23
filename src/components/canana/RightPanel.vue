@@ -18,7 +18,8 @@ import {
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
 import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
-import { useCanvasAgent } from '@/views/workflow/agent/use-canvas-agent'
+import { useCanvasAgentBridge } from '@/views/workflow/agent/use-canvas-agent-bridge'
+import { CANVAS_AGENT_SKILL_KEY } from '@/shared/canvas-agent-tools'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -409,57 +410,69 @@ const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value,
  */
 const panelMode = ref('chat')
 
-const canvasAgent = useCanvasAgent({
-  ctx: props.agentContext,
-  buildBrief: () => props.canvasBrief || '',
-  readHistory: () => (messages.value || [])
-    .filter((item) => item.type === 'user' || item.type === 'ai-text')
-    .map((item) => ({ role: item.type === 'user' ? 'user' : 'assistant', content: String(item.content || '') })),
+/**
+ * 面板里的「Agent 模式」现在跑的是**服务端制片 Agent**（M2 起）。
+ *
+ * 为什么不再在浏览器里跑模型循环：画布 Agent 要干的活已经从「加几个节点」变成
+ * 「从剧本到分镜图/视频的一整条链路」—— 那是一条几分钟到几十分钟的长任务，
+ * 中间要花钱、要留痕、要能在刷新后继续。浏览器一侧做不了这些：
+ * 一关页面循环就没了，调用记录也没有地方落。所以决策放服务端，这里只做两件事：
+ *   1. 把服务端要的画布操作真的执行掉（就是下面这个桥）；
+ *   2. 把「要不要花这笔钱」的确认卡片弹给用户。
+ */
+const confirmRequest = ref(null)          // { title, summary, items, costPoints, riskLevel, resolve }
+const confirmNote = ref('')
+const confirmRemembered = ref(false)      // 用户勾了「本任务内不再问同类动作」
+
+/** 服务端 Agent 通过桥要确认时调用；返回的 Promise 一直挂到用户点按钮 */
+const requestConfirmation = (request) =>
+  new Promise((resolve) => {
+    // 上一次的卡片还没答复就再来一张：先把上一张按「拒绝」结掉，避免谁也答不了
+    confirmRequest.value?.resolve?.({ approved: false, note: '用户未答复，已跳过' })
+    confirmNote.value = ''
+    confirmRequest.value = { ...request, resolve }
+    scrollToBottom()
+  })
+
+const settleConfirm = (approved) => {
+  const pending = confirmRequest.value
+  if (!pending) return
+  confirmRequest.value = null
+  pending.resolve({
+    approved,
+    note: String(confirmNote.value || '').trim(),
+    remember: Boolean(confirmRemembered.value),
+  })
+  confirmNote.value = ''
+  confirmRemembered.value = false
+}
+
+const agentBridge = useCanvasAgentBridge({
+  // 把「确认」这项能力叠在页面注入的画布操作之上：画布上下文由 workflow 页提供，
+  // 而确认卡片属于这个面板的 UI，两者在这里合体。
+  getContext: () => (props.agentContext
+    ? { ...props.agentContext, requestConfirmation }
+    : null),
+  onStep: (step) => {
+    const target = messages.value[messages.value.length - 1]
+    if (!target || target.type !== 'ai-text') return
+    target.steps = [...(target.steps || []), step]
+    scrollToBottom()
+  },
 })
 
 /**
- * 先让 Agent 试一轮（带工具）。
+ * 跑一轮服务端制片 Agent。
  *
- * 返回 true 表示「这一轮已经处理完了」：模型既可能直接回答，也可能要求改画布而我们真的改了。
- * 返回 false 表示应该回退到原来的流式对话 —— 只在**一次工具都没执行**且没有拿到文字时才回退，
- * 避免「已经改了画布又用流式回答一遍」这种双重回复。
+ * 与浏览器侧循环的关键差别：**这里不再有「模型这一步调了什么工具」的判断逻辑** ——
+ * 模型、工具、步数上限、花钱闸门全在服务端，前端只做三件事：
+ *   把流式文字贴到气泡上、把服务端下发的工具调用执行掉、把终态收口好。
+ * 这样刷新页面、换设备看到的都是同一个任务的同一条事件流。
+ *
+ * 返回 true 表示这一轮已经交给服务端处理（不管成没成），调用方不要再回退到普通对话 ——
+ * 回退用的是同一个模型，只会把同一句错误再报一遍。
  */
-const tryCanvasAgentTurn = async (prompt, aiMsg) => {
-  if (!props.agentContext) return false
-  try {
-    const reply = await canvasAgent.run(prompt)
-    const steps = canvasAgent.steps.value
-    const trace = steps.length
-      ? `【已执行 ${steps.length} 步】${steps.map((step) => step.summary).join('；')}\n\n`
-      : ''
-    if (!reply && !steps.length) return false
-    aiMsg.content = trace + reply
-    aiMsg.loading = false
-    scrollToBottom()
-    return true
-  } catch (err) {
-    /**
-     * 模型侧失败（厂商密钥解不开、上游 4xx/5xx 等）**不再回退**到流式对话：
-     * 那条路用的是同一个模型，只会再报一次同样的错 —— 用户会看到两个错误，却不知道是同一个原因。
-     * 这里直接把原因显示出来（回退只留给「模型没要求调工具、也没给文字」这种正常空轮次）。
-     */
-    aiMsg.content = `模型调用失败：${err?.message || err}`
-    aiMsg.error = aiMsg.content
-    aiMsg.loading = false
-    scrollToBottom()
-    return true
-    // eslint-disable-next-line no-unreachable
-    if (canvasAgent.steps.value.length) {
-      aiMsg.content = `【已执行 ${canvasAgent.steps.value.length} 步】${canvasAgent.steps.value.map((step) => step.summary).join('；')}\n\n执行中断：${err?.message || err}`
-      aiMsg.loading = false
-      scrollToBottom()
-      return true
-    }
-    return false
-  }
-}
-
-const runChatStream = async (prompt, aiMsg) => {
+const runCanvasAgentTurn = async (prompt, aiMsg) => {
   try {
     const fallbackKey = getDefaultChatModelKey() || ''
     const { providerId, modelKey } = resolveGenerationTaskModel({
@@ -468,47 +481,67 @@ const runChatStream = async (prompt, aiMsg) => {
       category: 'CHAT',
       missingModelMessage: '未匹配到有效对话模型，请先在后台配置模型',
     })
+
+    agentBridge.reset()
+    aiMsg.content = ''
+    aiMsg.steps = []
+
     const saved = await createGenerationTask({
       source: ASSISTANT_SOURCE,
       sessionId: activeSessionId.value || undefined,
       type: 'agent',
+      // 这个 skill 键决定服务端走「制片 Agent」策略（而不是普通对话）
+      skill: CANVAS_AGENT_SKILL_KEY,
       prompt,
       modelKey,
       requestBody: {
         model: modelKey,
         providerId,
-        messages: buildChatMessages(prompt),
-        stream: true,
+        // 画布现状：Agent 看不见画布，全靠这段摘要
+        canvasBrief: props.canvasBrief || '',
+        // 最近几轮对话：服务端会把它并进本轮用户消息，保证措辞连贯
+        history: (messages.value || [])
+          .filter((item) => (item.type === 'user' || item.type === 'ai-text') && String(item.content || '').trim())
+          .slice(-6)
+          .map((item) => ({
+            role: item.type === 'user' ? 'user' : 'assistant',
+            content: String(item.content || ''),
+          })),
       },
     })
-    // 聊过就算"用过"：否则 lastUsedAt 一直是 0，新会话永远沉在最下面
+
     touchActiveSession()
 
     const taskId = String(saved?.id || '').trim()
-    if (!taskId) throw new Error('对话任务创建失败')
+    if (!taskId) throw new Error('Agent 任务创建失败')
 
     const controller = new AbortController()
     registerStream(controller)
-    aiMsg.content = ''
 
     await subscribeGenerationTaskEvents(taskId, {
       signal: controller.signal,
       onEvent: (event) => {
+        // 服务端要它执行一个画布操作：交给桥（内部会执行 + 回执）
+        if (agentBridge.handleStreamEvent(taskId, event, controller.signal)) {
+          return
+        }
         if (event.type === 'content_delta') {
           if (typeof event.delta === 'string' && event.delta) {
             aiMsg.content += event.delta
-            scrollToBottom()
           } else if (typeof event.content === 'string') {
             aiMsg.content = event.content
-            scrollToBottom()
           }
+          scrollToBottom()
+          return
+        }
+        if (event.type === 'thinking_delta') {
+          aiMsg.thinking = String(event.thinkingContent || '')
           return
         }
         if (event.type === 'snapshot') {
           const snapshotContent = String(event.record?.content || '')
           if (snapshotContent && snapshotContent.length > aiMsg.content.length) {
             aiMsg.content = snapshotContent
-            scrollToBottom()
           }
           return
         }
@@ -520,7 +553,7 @@ const runChatStream = async (prompt, aiMsg) => {
           return
         }
         if (event.type === 'failed') {
-          aiMsg.error = String(event.message || event.record?.error || '对话失败')
+          aiMsg.error = String(event.message || event.record?.error || 'Agent 执行失败')
           aiMsg.loading = false
           scrollToBottom()
           return
@@ -531,12 +564,17 @@ const runChatStream = async (prompt, aiMsg) => {
         }
       },
     })
+    return true
   } catch (err) {
-    if (err?.name === 'AbortError') return
-    console.error('[RightPanel] chat stream failed', err)
-    aiMsg.error = err?.message || '对话失败'
+    if (err?.name === 'AbortError') return true
+    console.error('[RightPanel] canvas agent failed', err)
+    aiMsg.error = `Agent 调用失败：${err?.message || err}`
     aiMsg.loading = false
     scrollToBottom()
+    return true
+  } finally {
+    // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
+    if (confirmRequest.value) settleConfirm(false)
   }
 }
 
@@ -604,8 +642,10 @@ const sendMessage = async () => {
       error: '',
     })
     scrollToBottom()
-    const handled = await tryCanvasAgentTurn(content, tailMessage())
-    if (!handled) await runChatStream(content, tailMessage())
+    // 对话模式固定走制片 Agent（服务端）：它能真的动画布，也才留得下调用记录。
+    // 原来还有一条「Agent 没动静就回退到普通流式对话」的分支，现在两条路是同一个模型，
+    // 回退只会把同一个错误再报一遍，反而让用户以为问题变了 —— 所以去掉了。
+    await runCanvasAgentTurn(content, tailMessage())
   }
 }
 
@@ -663,7 +703,9 @@ watch(() => props.initialMessage, async (newMessage) => {
     error: '',
   })
   scrollToBottom()
-  await runChatStream(newMessage, tailMessage())
+  // 画布触发的入口也走同一个 Agent：面板只有一条对话链路，
+  // 免得「从这儿问」和「在输入框问」得到两种不同的能力（一个能动画布、一个只会聊天）。
+  await runCanvasAgentTurn(newMessage, tailMessage())
 })
 
 // 计算内容生成器高度（用于任务指示器定位）
@@ -808,6 +850,18 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
           <!-- AI 文本流式回复 -->
           <div v-else-if="msg.type === 'ai-text'" class="message-row ai">
             <div class="ai-text-bubble">
+              <!-- Agent 真的对画布做了什么：一条条列出来，用户能核对，也能看出它是不是在乱改 -->
+              <div v-if="msg.steps?.length" class="agent-step-list">
+                <div
+                  v-for="step in msg.steps"
+                  :key="`${msg.id}-step-${step.index}`"
+                  :class="['agent-step', step.ok ? 'is-ok' : 'is-fail']"
+                >
+                  <span class="agent-step__index">{{ step.index }}</span>
+                  <span class="agent-step__label">{{ step.label }}</span>
+                  <span class="agent-step__summary">{{ step.summary }}</span>
+                </div>
+              </div>
               <div v-if="msg.content" class="ai-text-content">{{ msg.content }}</div>
               <div v-else-if="msg.loading" class="ai-text-typing">
                 <span class="ai-text-dot" />
@@ -858,6 +912,35 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       </div>
 
       <!-- 底部内容生成器 -->
+      <!-- 半自动闸门：Agent 要花钱/交付前必须在这里拿到用户答复，否则那一步做不下去 -->
+      <div v-if="confirmRequest" class="agent-confirm-card">
+        <div class="agent-confirm-card__head">
+          <span class="agent-confirm-card__title">{{ confirmRequest.title }}</span>
+          <span
+            v-if="confirmRequest.riskLevel"
+            :class="['agent-confirm-card__risk', `is-${confirmRequest.riskLevel}`]"
+          >{{ { low: '低风险', medium: '中风险', high: '高风险' }[confirmRequest.riskLevel] || confirmRequest.riskLevel }}</span>
+        </div>
+        <div class="agent-confirm-card__summary">{{ confirmRequest.summary }}</div>
+        <ul v-if="confirmRequest.items?.length" class="agent-confirm-card__items">
+          <li v-for="(item, index) in confirmRequest.items" :key="index">{{ item }}</li>
+        </ul>
+        <div v-if="confirmRequest.costPoints" class="agent-confirm-card__cost">
+          预计消耗 <strong>{{ confirmRequest.costPoints }}</strong> 积分
+        </div>
+        <input
+          v-model="confirmNote"
+          class="agent-confirm-card__note"
+          type="text"
+          placeholder="补充要求（可选），例如：第 3 张不要"
+          @keydown.enter.stop.prevent="settleConfirm(true)"
+        />
+        <div class="agent-confirm-card__actions">
+          <button type="button" class="agent-confirm-card__btn is-reject" @click="settleConfirm(false)">拒绝</button>
+          <button type="button" class="agent-confirm-card__btn is-approve" @click="settleConfirm(true)">同意并继续</button>
+        </div>
+      </div>
+
       <!-- 面板模式开关：常驻可见，不再依赖那个不好找的可拖拽选择器 -->
       <div class="right-panel-mode-switch">
         <button
@@ -908,6 +991,108 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 </template>
 
 <style scoped>
+/* 步骤清单与确认卡片（2026-09-23，制片 Agent 的界面部分）
+   跟着面板已有的视觉语言走：浅底、细边框、等宽序号，不引入新的色彩体系。 */
+.agent-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.4);
+}
+.agent-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #475569;
+}
+.agent-step.is-fail { color: #b91c1c; }
+.agent-step__index {
+  flex: 0 0 auto;
+  min-width: 16px;
+  font-variant-numeric: tabular-nums;
+  color: #94a3b8;
+}
+.agent-step__label { flex: 0 0 auto; font-weight: 600; }
+.agent-step__summary { flex: 1 1 auto; word-break: break-word; }
+
+.agent-confirm-card {
+  margin: 8px 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.08);
+}
+.agent-confirm-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.agent-confirm-card__title { font-size: 13px; font-weight: 700; color: #312e81; }
+.agent-confirm-card__risk {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: #e0e7ff;
+  color: #4338ca;
+}
+.agent-confirm-card__risk.is-high { background: #fee2e2; color: #b91c1c; }
+.agent-confirm-card__risk.is-medium { background: #fef3c7; color: #92400e; }
+.agent-confirm-card__summary {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #3730a3;
+  white-space: pre-wrap;
+}
+.agent-confirm-card__items {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+}
+.agent-confirm-card__cost { margin-top: 8px; font-size: 12px; color: #92400e; }
+.agent-confirm-card__note {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  font-size: 12px;
+  background: #fff;
+  color: #334155;
+}
+.agent-confirm-card__note:focus { outline: none; border-color: #6366f1; }
+.agent-confirm-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.agent-confirm-card__btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-confirm-card__btn.is-reject {
+  background: #fff;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+.agent-confirm-card__btn.is-approve {
+  background: #4f46e5;
+  color: #fff;
+}
+.agent-confirm-card__btn.is-approve:hover { background: #4338ca; }
 /* AI 图片加载/错误态 */
 .ai-images-loading {
   align-items: center;

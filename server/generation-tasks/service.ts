@@ -46,6 +46,7 @@ import { executeImageTask } from './image-task-executor'
 import { executeVideoTask } from './video-task-executor'
 import { createVideoTaskRequest, pollVideoTaskRequest } from './video-upstream'
 import { executeAgentChatTaskFlow } from './agent-chat-task-executor'
+import { executeCanvasAgentTaskFlow } from './canvas-agent-executor'
 import { executeAgentWorkspaceTaskFlow } from './agent-workspace-task-executor'
 import { executeResearchTaskFlow } from '../research/executor'
 import {
@@ -157,6 +158,7 @@ const buildTaskExecutionStrategyContext = () => ({
   executeImageGenerationTask,
   executeVideoGenerationTask,
   executeAgentChatTask,
+  executeCanvasAgentTask,
   executeAgentWorkspaceTask,
   executeResearchReportTask,
   refundTaskPointsIfNeeded,
@@ -299,6 +301,29 @@ const executeAgentChatTask = async (task: RunningGenerationTask, payload: Genera
     getGenerationRecordById,
     emitTaskStreamEvent: (recordId, event) => emitTaskStreamEvent(recordId, event, taskEventEmitterContext),
     logGenerationTask,
+  })
+}
+
+/**
+ * 制片 Agent：与 agent-chat 的上下文装配几乎一样（同一个上游、同一套流式事件），
+ * 多出来的两件事是「思考增量」和「工具桥」——后者完全发生在执行器内部，
+ * 这里只负责把事件出口接对。
+ */
+const executeCanvasAgentTask = async (task: RunningGenerationTask, payload: GenerationTaskStartPayload) => {
+  await executeCanvasAgentTaskFlow(task, payload, {
+    syncSharedTaskRuntime,
+    ensureTaskNotAborted: (runningTask) => ensureTaskNotAborted(runningTask, { abortTaskWithReason }),
+    resolveGatewayProviderUpstream,
+    emitTaskProgressEvent: (recordId, input) => emitTaskProgressEvent(recordId, input, taskEventEmitterContext),
+    emitTaskContentDeltaEvent: (recordId, input) => emitTaskContentDeltaEvent(recordId, input, taskEventEmitterContext),
+    emitTaskThinkingDeltaEvent: (recordId, input) => emitTaskThinkingDeltaEvent(recordId, input, taskEventEmitterContext),
+    emitTaskStreamEvent: (recordId, event) => emitTaskStreamEvent(recordId, event, taskEventEmitterContext),
+    persistAgentTaskContentIfNeeded,
+    buildInitialRecordPayload,
+    updateGenerationRecord,
+    getGenerationRecordById,
+    logGenerationTask,
+    logGenerationTaskError,
   })
 }
 

@@ -40,6 +40,8 @@ export interface GenerationTaskExecutionStrategyContext {
   /** 视频：异步任务制（建单 → 轮询 → 取件） */
   executeVideoGenerationTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeAgentChatTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
+  /** 制片 Agent（画布）：Pi 循环跑在服务端，画布工具经事件流交给浏览器执行 */
+  executeCanvasAgentTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeAgentWorkspaceTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   executeResearchReportTask: (task: SettlementTask, payload: GenerationTaskStartPayload) => Promise<void>
   refundTaskPointsIfNeeded: (task: SettlementTask, reason: string) => Promise<void>
@@ -249,6 +251,27 @@ const agentChatTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   },
 }
 
+/**
+ * 制片 Agent 的收口与 agent-chat 同策：它也是对话型任务，产出落在 record.content 上。
+ * 不同的是**它跑的过程中会改画布**：中途被停止/失败时画布上已经落下的节点不该被回滚
+ * （用户看得见的成果，回滚反而是破坏），所以两边都不做「撤销画布改动」这类动作，
+ * 只在提示里如实说明「本轮没跑完」。
+ */
+const canvasAgentTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
+  ...agentChatTaskExecutionStrategy,
+  key: 'canvas-agent',
+  execute(task, payload, context) {
+    return context.executeCanvasAgentTask(task, payload)
+  },
+  resolveFailureMessage(error, abortReason, context) {
+    if (abortReason === 'execution_lock_lost') {
+      return '任务执行锁已失效，系统已中断本次任务'
+    }
+
+    return context.normalizeGenerationErrorMessage(error, '制片 Agent 执行失败')
+  },
+}
+
 // Agent 工作台任务需要同步 agentRun 的停止态与失败态，因此单独策略化。
 const agentWorkspaceTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   key: 'agent-workspace',
@@ -444,6 +467,7 @@ const EXECUTION_STRATEGY_REGISTRY: Record<GenerationTaskStrategyKey, GenerationT
   image: imageTaskExecutionStrategy,
   video: videoTaskExecutionStrategy,
   'agent-chat': agentChatTaskExecutionStrategy,
+  'canvas-agent': canvasAgentTaskExecutionStrategy,
   'agent-workspace': agentWorkspaceTaskExecutionStrategy,
   'research-report': researchReportTaskExecutionStrategy,
 }

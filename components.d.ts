@@ -31,7 +31,6 @@ declare module 'vue' {
     AssistantSessionList: typeof import('./src/components/canvas/AssistantSessionList.vue')['default']
     BottomMenu: typeof import('./src/components/home/components/BottomMenu.vue')['default']
     CanvasAppearancePanel: typeof import('./src/components/canvas/CanvasAppearancePanel.vue')['default']
-    CanvasAssistantPanel: typeof import('./src/components/canvas/CanvasAssistantPanel.vue')['default']
     CanvasConfigNodeShell: typeof import('./src/components/canvas/CanvasConfigNodeShell.vue')['default']
     CanvasConnectionLine: typeof import('./src/components/canvas/CanvasConnectionLine.vue')['default']
     CanvasContextMenu: typeof import('./src/components/canvas/CanvasContextMenu.vue')['default']

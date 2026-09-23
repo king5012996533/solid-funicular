@@ -10,6 +10,13 @@
  *   3. 只暴露「画布能承受的操作」：新增/改参数/连线/删除/选中/执行/套模板。没有删库、没有改配置。
  */
 
+import {
+  CANVAS_AGENT_TOOL_DEFINITIONS,
+  describeConfirmationDecision,
+  type AgentConfirmationDecision,
+  type AgentConfirmationRequest,
+} from "@/shared/canvas-agent-tools";
+
 export interface CanvasAgentNodeSnapshot {
   id: string;
   type: string;
@@ -51,12 +58,23 @@ export interface CanvasAgentContext {
   listTemplates: () => Array<{ id: string; name: string; description: string }>;
   /** 节点类型说明（让模型知道有哪些 type 可用） */
   nodeTypeHints: () => Array<{ type: string; name: string }>;
+  /**
+   * 向用户要一个确认（半自动闸门）。
+   *
+   * 服务端 Agent 在花钱/交付前会调 request_confirmation，这里负责把卡片弹给用户并等答复。
+   * 不注入它的话，该工具会明确失败 —— 而不是静默「当作同意」，那样闸门就形同虚设了。
+   */
+  requestConfirmation?: (
+    request: AgentConfirmationRequest,
+  ) => Promise<AgentConfirmationDecision>;
 }
 
 export interface CanvasAgentToolSchema {
   type: "function";
   function: {
     name: string;
+    /** 界面展示用中文名 */
+    label: string;
     description: string;
     parameters: Record<string, unknown>;
   };
@@ -78,164 +96,24 @@ const text = (value: unknown, max = 400) => {
 };
 
 /** 工具清单：这是「Agent 能对画布做什么」的唯一来源，模型看到的描述也来自这里 */
-export const CANVAS_AGENT_TOOL_SCHEMAS: CanvasAgentToolSchema[] = [
-  {
+/**
+ * 工具清单：**从共享真源派生**，不再手写一份。
+ *
+ * 2026-09-23 改：这份清单原来和服务端（`src/shared/canvas-agent-tools.ts`）各写一份，
+ * 两边描述/参数已经开始漂移（例如 run_node 的说明一边写「视频没接通」一边写「视频已接通」）。
+ * 漂移的后果是最难查的那种：模型学到的是一套、执行的是另一套，表现为「它老调错工具」。
+ * 现在两边都从共享定义派生，改一处两边同时生效，漂移在结构上不可能发生。
+ */
+export const CANVAS_AGENT_TOOL_SCHEMAS: CanvasAgentToolSchema[] =
+  CANVAS_AGENT_TOOL_DEFINITIONS.map((definition) => ({
     type: "function",
     function: {
-      name: "get_canvas_state",
-      description:
-        "读取当前画布：节点清单（id/类型/提示词/模型/状态）、连线、当前选中的节点。在动手改画布之前先调用它。",
-      parameters: { type: "object", properties: {}, required: [] },
+      name: definition.name,
+      label: definition.label,
+      description: definition.description,
+      parameters: definition.parameters,
     },
-  },
-  {
-    type: "function",
-    function: {
-      name: "add_node",
-      description:
-        "在画布上新增一个节点。type 只能是 text / image / video / asset。可以同时给初始内容（文本节点的 content，图片节点的 prompt、model、size、quality）。",
-      parameters: {
-        type: "object",
-        properties: {
-          type: {
-            type: "string",
-            enum: ["text", "image", "video", "asset"],
-            description: "节点类型",
-          },
-          x: {
-            type: "number",
-            description: "画布横坐标（可选，不填则放在视口中心）",
-          },
-          y: { type: "number", description: "画布纵坐标（可选）" },
-          content: { type: "string", description: "文本节点的内容" },
-          prompt: { type: "string", description: "图片/视频节点的提示词" },
-          model: { type: "string", description: "模型 key（不填用节点默认）" },
-          size: { type: "string", description: "比例/尺寸，如 1:1、16:9" },
-          quality: { type: "string", description: "画质档位，如 低/中/高" },
-        },
-        required: ["type"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "update_node",
-      description:
-        "修改已有节点的内容或参数（提示词、文本内容、模型、尺寸、画质、标题）。只会覆盖显式给出的字段。",
-      parameters: {
-        type: "object",
-        properties: {
-          id: {
-            type: "string",
-            description: "节点 id（来自 get_canvas_state）",
-          },
-          content: { type: "string", description: "文本节点的新内容" },
-          prompt: { type: "string", description: "新的提示词" },
-          label: { type: "string", description: "节点标题" },
-          model: { type: "string" },
-          size: { type: "string" },
-          quality: { type: "string" },
-        },
-        required: ["id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "connect_nodes",
-      description:
-        "把两个节点连起来（source 的输出作为 target 的输入）。连线是有方向的。",
-      parameters: {
-        type: "object",
-        properties: {
-          source: { type: "string", description: "起点节点 id" },
-          target: { type: "string", description: "终点节点 id" },
-        },
-        required: ["source", "target"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "remove_node",
-      description:
-        "删除一个节点（连带它的连线）。删之前先用 get_canvas_state 确认 id。",
-      parameters: {
-        type: "object",
-        properties: { id: { type: "string" } },
-        required: ["id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "select_nodes",
-      description:
-        "在画布上选中若干节点（方便用户看到你在操作哪些），可选把视图对准它们。",
-      parameters: {
-        type: "object",
-        properties: {
-          ids: {
-            type: "array",
-            items: { type: "string" },
-            description: "要选中的节点 id",
-          },
-          focus: {
-            type: "boolean",
-            description: "是否把视图移动过去（默认 true）",
-          },
-        },
-        required: ["ids"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_node",
-      description:
-        "执行某个节点（图片节点会真的去生成；视频节点当前服务端还没接通，会返回失败原因）。耗时较长，执行后如实告知结果。",
-      parameters: {
-        type: "object",
-        properties: { id: { type: "string" } },
-        required: ["id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_workflow_templates",
-      description:
-        "列出可一键套用的工作流模板（多角度分镜、电商全套、文生图、图生视频等）。",
-      parameters: { type: "object", properties: {}, required: [] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "apply_workflow_template",
-      description:
-        "把一个工作流模板整套铺到画布上（会创建多个节点与连线）。适合「帮我把某个流程搭起来」这类需求。",
-      parameters: {
-        type: "object",
-        properties: {
-          templateId: {
-            type: "string",
-            description: "模板 id（先用 list_workflow_templates 拿）",
-          },
-          x: { type: "number", description: "起点横坐标（可选）" },
-          y: { type: "number", description: "起点纵坐标（可选）" },
-        },
-        required: ["templateId"],
-      },
-    },
-  },
-];
+  }));
 
 /**
  * 执行一个工具调用。未知工具、参数缺失、节点不存在都返回 ok:false + 明确原因，
@@ -253,6 +131,44 @@ export const executeCanvasAgentTool = async (
   });
 
   switch (name) {
+    case "request_confirmation": {
+      const request: AgentConfirmationRequest = {
+        title: String(args.title || "请确认"),
+        summary: String(args.summary || ""),
+        items: Array.isArray(args.items)
+          ? args.items.map((item) => String(item))
+          : undefined,
+        costPoints: Number.isFinite(Number(args.costPoints))
+          ? Number(args.costPoints)
+          : undefined,
+        riskLevel: (["low", "medium", "high"] as readonly unknown[]).includes(
+          args.riskLevel,
+        )
+          ? (args.riskLevel as AgentConfirmationRequest["riskLevel"])
+          : "medium",
+      };
+      if (!request.summary.trim()) {
+        return fail("确认事项必须写清 summary（将要做什么）");
+      }
+      if (!ctx.requestConfirmation) {
+        return fail(
+          "当前环境不支持向用户确认（没有注入确认入口），因此不能执行任何花钱或交付类动作。请把计划讲给用户，让他自己决定。",
+        );
+      }
+      const decision = await ctx.requestConfirmation(request);
+      return {
+        ok: decision.approved,
+        // 回执必须是 JSON：服务端要按 approved 字段放行后续付费动作
+        result: JSON.stringify({
+          approved: Boolean(decision.approved),
+          note: decision.note || "",
+          summary: describeConfirmationDecision(request, decision),
+        }),
+        summary: decision.approved
+          ? `用户同意：${request.title}`
+          : `用户拒绝：${request.title}${decision.note ? `（${decision.note}）` : ""}`,
+      };
+    }
     case "get_canvas_state": {
       const nodes = ctx.snapshotNodes();
       const edges = ctx.snapshotEdges();

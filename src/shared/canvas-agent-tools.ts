@@ -12,8 +12,17 @@
  * 参数写的是 JSON Schema（typebox 与 OpenAI function calling 都吃这一套）。
  */
 
+/**
+ * 任务策略的「技能键」：前端提交任务时带 `type: 'agent' + skill: 'canvas-agent'`，
+ * 服务端据此选中制片 Agent 策略。前后端共用同一个常量，避免某一边改字符串导致
+ * 「任务提交成功但走的是普通对话」这种沉默失败。
+ */
+export const CANVAS_AGENT_SKILL_KEY = "canvas-agent";
+
 export interface CanvasAgentToolDefinition {
   name: string;
+  /** 界面展示用的中文名（工具执行记录、确认卡片上都用它，比英文名可读得多） */
+  label: string;
   /** 给模型看的说明：什么时候该用它、用了会怎样 */
   description: string;
   /** JSON Schema */
@@ -28,7 +37,52 @@ export interface CanvasAgentToolDefinition {
 
 export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   {
+    /**
+     * 半自动的闸门（2026-09-23 定的产品规则）。
+     *
+     * 用户要的是「Agent 能干活，但不是让它自己刷卡」：凡是**花钱**（生成图片/视频）和**交付**
+     * （把成果定稿、导出、覆盖已有作品）这两类动作，Agent 必须先停在这里等人点确认。
+     * 所以它不是给模型用的「礼貌询问」，而是这类动作的**唯一合法入口** ——
+     * 模型的系统提示里写明「未取得确认不得触发付费动作」，同时服务端把这条作为审计记录落库。
+     */
+    name: "request_confirmation",
+    label: "向用户确认",
+    description:
+      "【必须先调用】在执行任何**花钱**（生成图片 / 生成视频）或**交付**（定稿、覆盖已有成果、批量删除）的动作之前，用这个工具向用户展示确认卡片并等待答复。用户同意才继续，拒绝就换做法或向他说明。摘要要写清「将要发生什么 + 预计消耗多少积分」。",
+    parameters: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "确认卡片标题，例如「生成 6 张分镜图」",
+        },
+        summary: {
+          type: "string",
+          description: "将要做什么、做几步、产出是什么（给用户看的完整说明）",
+        },
+        items: {
+          type: "array",
+          items: { type: "string" },
+          description: "逐条列出涉及的节点 / 提示词 / 文件，便于用户核对",
+        },
+        costPoints: {
+          type: "number",
+          description: "预计消耗的积分总数（不确定就填可靠上界，不要留空）",
+        },
+        riskLevel: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description:
+            "风险等级：low = 新增内容不影响已有成果；medium = 覆盖部分已有内容；high = 不可逆或大批量消耗",
+        },
+      },
+      required: ["title", "summary"],
+    },
+    requiresClient: true,
+  },
+  {
     name: "get_canvas_state",
+    label: "读取画布",
     description:
       "读取当前画布：节点清单（id / 类型 / 提示词 / 模型 / 状态）、连线、当前选中的节点。动手改画布之前先调用它。",
     parameters: { type: "object", properties: {}, required: [] },
@@ -36,6 +90,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "add_node",
+    label: "新增节点",
     description:
       "在画布上新增一个节点。type 只能是 text / image / video / asset。可以同时给初始内容（文本节点的 content，图片节点的 prompt、model、size、quality）。",
     parameters: {
@@ -63,6 +118,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "update_node",
+    label: "修改节点",
     description:
       "修改已有节点的内容或参数（提示词、文本内容、模型、尺寸、画质、标题）。只会覆盖显式给出的字段。",
     parameters: {
@@ -82,6 +138,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "connect_nodes",
+    label: "连接节点",
     description:
       "把两个节点连起来（source 的输出作为 target 的输入）。连线是有方向的。",
     parameters: {
@@ -96,6 +153,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "remove_node",
+    label: "删除节点",
     description:
       "删除一个节点（连带它的连线）。删之前先用 get_canvas_state 确认 id。",
     parameters: {
@@ -107,6 +165,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "select_nodes",
+    label: "选中节点",
     description:
       "在画布上选中若干节点（方便用户看到你在操作哪些），可选把视图对准它们。",
     parameters: {
@@ -128,6 +187,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "run_node",
+    label: "执行节点",
     description:
       "执行某个节点（图片节点会真的去生成；视频节点当前服务端已接通但仍在验证中）。耗时较长，执行后如实告知结果。",
     parameters: {
@@ -139,6 +199,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "list_workflow_templates",
+    label: "列出模板",
     description:
       "列出可一键套用的工作流模板（多角度分镜、电商全套、文生图、图生视频等）。",
     parameters: { type: "object", properties: {}, required: [] },
@@ -146,6 +207,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "apply_workflow_template",
+    label: "套用模板",
     description:
       "把一个工作流模板整套铺到画布上（会创建多个节点与连线）。适合「帮我把某个流程搭起来」这类需求。",
     parameters: {
@@ -166,3 +228,43 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
 
 export const findCanvasAgentTool = (name: string) =>
   CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === name);
+
+/**
+ * `request_confirmation` 的参数与回执。
+ *
+ * 单独定义类型（而不是让两边各写一份 `any`）：这是**半自动闸门**的数据形状，
+ * 服务端要按它落审计、客户端要按它渲染卡片，任何一侧改字段都必须让另一侧编译失败。
+ */
+export interface AgentConfirmationRequest {
+  title: string;
+  summary: string;
+  items?: string[];
+  costPoints?: number;
+  riskLevel?: "low" | "medium" | "high";
+}
+
+export interface AgentConfirmationDecision {
+  approved: boolean;
+  /** 用户可选补充说明，例如「不要生成第 3 张」 */
+  note?: string;
+  /** 用户是否选择了「本任务内不再询问同类动作」 */
+  remember?: boolean;
+}
+
+/** 把确认回执转成给模型看的文本（服务端与客户端共用，避免措辞漂移） */
+export const describeConfirmationDecision = (
+  request: AgentConfirmationRequest,
+  decision: AgentConfirmationDecision,
+) => {
+  const lines = [
+    `确认项：${request.title}`,
+    `用户答复：${decision.approved ? "同意" : "拒绝"}`,
+  ];
+  if (decision.note) {
+    lines.push(`用户补充：${decision.note}`);
+  }
+  if (!decision.approved) {
+    lines.push("（不要执行该动作；如需继续，请换个方案或先征询用户意见）");
+  }
+  return lines.join("\n");
+};

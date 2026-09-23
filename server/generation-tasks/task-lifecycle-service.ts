@@ -224,7 +224,17 @@ export const startGenerationTask = async (
   let concurrencySlots: ConcurrencySlot[] = []
 
   try {
-    if (strategy.key === 'agent-chat' || strategy.key === 'research-report') {
+    /**
+     * 对话计费 + 按技能占并发槽位的这一类任务：agent-chat（普通对话）、research-report（研究报告）、
+     * canvas-agent（制片 Agent）。三者都是「按 chat 端点计价、产出落在 record.content」的长任务，
+     * 所以共用同一条创建路径 —— 制片 Agent 的特别之处全在执行器里（工具桥 + 花钱闸门），
+     * 创建与结算没有理由再分一套。
+     */
+    if (
+      strategy.key === 'agent-chat'
+      || strategy.key === 'research-report'
+      || strategy.key === 'canvas-agent'
+    ) {
       concurrencySlots = await context.acquireTaskConcurrencySlots({
         userId: currentUserId,
         providerId,

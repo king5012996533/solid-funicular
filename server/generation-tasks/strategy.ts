@@ -1,6 +1,13 @@
+import { CANVAS_AGENT_SKILL_KEY } from '../../src/shared/canvas-agent-tools'
 import type { GenerationTaskStartPayload } from './shared'
 
-export type GenerationTaskStrategyKey = 'image' | 'video' | 'agent-chat' | 'agent-workspace' | 'research-report'
+export type GenerationTaskStrategyKey =
+  | 'image'
+  | 'video'
+  | 'agent-chat'
+  | 'canvas-agent'
+  | 'agent-workspace'
+  | 'research-report'
 
 export interface GenerationTaskStrategy {
   key: GenerationTaskStrategyKey
@@ -11,6 +18,15 @@ const strategies: GenerationTaskStrategy[] = [
   {
     key: 'image',
     matches: payload => String(payload.type || '').trim() === 'image',
+  },
+  {
+    /**
+     * 制片 Agent（画布上的「从零到一」）：与 agent-chat 同样是 type=agent，
+     * 靠 skill 键区分 —— 这样不必新增任务类型，也不必改动前端的 type 联合。
+     */
+    key: 'canvas-agent',
+    matches: payload => String(payload.type || '').trim() === 'agent'
+      && String(payload.skill || '').trim() === CANVAS_AGENT_SKILL_KEY,
   },
   {
     key: 'agent-workspace',
