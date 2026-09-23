@@ -207,6 +207,20 @@ export const executeAgentChatTaskFlow = async (
     return
   }
 
+  /**
+   * 流式读取的两道兜底（2026-09-23 实测踩到：对话一直「思考中」不结束）
+   *
+   * 现场：上游 17:42:29 就回了 `text/event-stream`，之后每隔 1-2 秒写一次记录，
+   * 但记录永远 `done:false`、`outputCount:0` —— 因为下面这个 while 循环只在
+   * `reader.read()` 返回 done 时才退出，而**上游发完 `[DONE]` 之后并不关连接**
+   * （很多中转会继续挂 keep-alive），于是我们一直等、任务永远不结账。
+   *
+   * 对应两处修正：
+   *   ① 读到 `[DONE]` 就正常收尾（那是 SSE 的结束标记，不是「跳到下一行」）；
+   *   ② 空转超过 STREAM_IDLE_TIMEOUT_MS 没有数据 → 带明确原因结束，而不是无限等。
+   */
+  const STREAM_IDLE_TIMEOUT_MS = 90_000
+
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -221,11 +235,26 @@ export const executeAgentChatTaskFlow = async (
     lastPersistContentLength: 0,
   }
 
+  let lastChunkAt = Date.now()
+  let streamFinished = false
   while (!task.abortController.signal.aborted) {
-    const { done, value } = await reader.read()
+    const idleWaitMs = Math.max(1_000, STREAM_IDLE_TIMEOUT_MS - (Date.now() - lastChunkAt))
+    const readResult = await Promise.race([
+      reader.read().then((result) => ({ kind: 'data' as const, result })),
+      new Promise<{ kind: 'idle' }>((resolve) => setTimeout(() => resolve({ kind: 'idle' }), idleWaitMs)),
+    ])
+    if (readResult.kind === 'idle') {
+      if (Date.now() - lastChunkAt >= STREAM_IDLE_TIMEOUT_MS) {
+        streamErrorMessage = `上游 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有继续输出，已中止本次对话`
+        break
+      }
+      continue
+    }
+    const { done, value } = readResult.result
     if (done) {
       break
     }
+    lastChunkAt = Date.now()
 
     const decodedChunk = decoder.decode(value, { stream: true })
     rawResponseText += decodedChunk
@@ -239,7 +268,9 @@ export const executeAgentChatTaskFlow = async (
 
       const chunk = trimmed.slice(5).trim()
       if (chunk === '[DONE]') {
-        continue
+        // SSE 的结束标记：上游可能发完它还挂着连接，这里必须自己收尾（否则永远「思考中」）
+        streamFinished = true
+        break
       }
 
       if (rawDataSamples.length < 5) {
@@ -292,6 +323,7 @@ export const executeAgentChatTaskFlow = async (
         // 跳过无效 SSE 数据块，继续处理后续消息。
       }
     }
+    if (streamFinished) break
 
     if (streamErrorMessage) {
       break
