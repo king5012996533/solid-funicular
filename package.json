@@ -43,6 +43,8 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.917.0",
+    "@earendil-works/pi-agent-core": "^0.87.1",
+    "@earendil-works/pi-ai": "^0.87.1",
     "@element-plus/icons-vue": "^2.3.2",
     "@hookform/resolvers": "^3.9.1",
     "@hugeicons/core-free-icons": "^3.1.1",
