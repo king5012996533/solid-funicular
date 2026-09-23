@@ -141,6 +141,49 @@ npm run dev
 - 前端开发服务：`http://localhost:5010`
 - 本地后端服务：`http://localhost:5409`
 
+### 本地开发数据库
+
+本地开发用**本机 MariaDB**（`127.0.0.1:3306`），不要再走「SSH 隧道连 VPS」那一套。
+
+```env
+DATABASE_URL=mysql://canana:devpass2026@127.0.0.1:3306/canana_mind_dev
+SHADOW_DATABASE_URL=mysql://canana:devpass2026@127.0.0.1:3306/canana_mind_dev_shadow
+```
+
+两点说明：
+
+- **用专用账号 `canana`，不要用 root。** MariaDB 给 root 配的认证插件（gssapi 之类）Node 的
+  MariaDB 驱动不支持，连上去会报 `Client does not support authentication protocol 'auth_gssapi_client'`。
+  建号语句：
+  ```sql
+  CREATE USER 'canana'@'127.0.0.1' IDENTIFIED VIA mysql_native_password USING PASSWORD('devpass2026');
+  GRANT ALL PRIVILEGES ON canana_mind_dev.* TO 'canana'@'127.0.0.1';
+  GRANT ALL PRIVILEGES ON canana_mind_dev_shadow.* TO 'canana'@'127.0.0.1';
+  ```
+- **为什么要从隧道换成本地库**：数据库在隧道另一头时，一次写要 16～23 秒（实测日志），
+  这不只是慢 —— 它会把「并发写同一记录的竞态」放大到必现（我们为此丢过图）。
+  生产上数据库和应用在同一台机器（`127.0.0.1:3306`），本来就没有这个问题，
+  所以这纯粹是开发环境的坑，别让它在本地制造假象。
+
+需要一份「接近生产的数据」时，从 VPS 拉最新快照覆盖本地库：
+
+```bash
+# 1) 拉快照（在 VPS 上用 mysqldump；--single-transaction 不锁表，不动线上数据）
+ssh root@<vps> "MYSQL_PWD=<密码> mysqldump -uroot --single-transaction --routines --triggers \
+  --events --hex-blob --default-character-set=utf8mb4 --set-gtid-purged=OFF canana_mind_dev" > snapshot.sql
+
+# 2) 灌进本地库（先建库，字符集与线上一致）
+mysql -h 127.0.0.1 -u canana -pdevpass2026 -e \
+  "DROP DATABASE IF EXISTS canana_mind_dev; CREATE DATABASE canana_mind_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -h 127.0.0.1 -u canana -pdevpass2026 --default-character-set=utf8mb4 canana_mind_dev < snapshot.sql
+
+# 3) 核对张数/行数应与线上一致，然后重启 dev server（env 只在进程启动时读一次）
+```
+
+> 注意：本地库是**快照**，会与线上漂移；要接近生产的数据就重跑上面三步。
+> 另外 `uploads/` 是本地目录，快照导入不会带图片文件 —— 记录里的图如果指向线上上传的文件，
+> 本地打不开属正常。
+
 ### Redis 可选配置
 
 如果你希望启用任务运行态共享、配置缓存和跨实例事件广播，可以补充以下环境变量：
