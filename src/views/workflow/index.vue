@@ -1072,9 +1072,17 @@ const onNodeDragStart = () => {
  * 阈值随缩放换算（见 composable），所以放大缩小时手感一致。
  */
 const onNodeDrag = (dragEvent: { node: GraphNode; nodes: GraphNode[] }) => {
-  const { node, nodes: allNodes } = dragEvent
+  const { node } = dragEvent
   if (!node?.dragging) return
-  const { dx, dy } = computeAlignment(node, allNodes, viewport.value.zoom)
+  /**
+   * ⚠️ 这里必须传「画布上的全部节点」，**不能**用 dragEvent.nodes。
+   *
+   * dragEvent.nodes 的语义是「正在被拖拽的节点」（多选拖拽时是那一批），不是全部节点。
+   * 之前拿它当 peer 集合，导致 peers 里永远只有被拖的那个节点自己（被 `peer.id === dragged.id`
+   * 跳过）→ 对齐辅助线**一次都算不出来**（等于死功能）。2026-09-23 用 CDP 打点实测：
+   * node-drag 触发 23 次、payload 里 peers=1、画布上却有 2 个节点、参考线元素 0 条。
+   */
+  const { dx, dy } = computeAlignment(node, nodes.value, viewport.value.zoom)
   if (dx !== null) node.position.x += dx
   if (dy !== null) node.position.y += dy
 }
@@ -1322,6 +1330,16 @@ watch(canvasSnapshot, () => {
         >
           <!-- zoom-on-double-click 关掉了 vue-flow 自带的双击缩放：
                双击空白现在改成弹「新建节点」菜单，两者不能同时生效 -->
+          <!-- 网格吸附为什么关掉（2026-09-23）：
+               原来这里开着 :snap-to-grid="true" :snap-grid="[20,20]"，结果是**拖拽不跟手** ——
+               指针在同一个 20px 格子里移动时节点纹丝不动，跨格才跳一下。
+               CDP 实测：59.7% 的帧「指针动了、节点没动」，最长连续 16 帧（≈267ms）白走，
+               然后跳 26px（20 × 当时缩放 1.343）；帧率却一直是满的（93% idle），
+               所以这不是性能问题，是位置被网格量化了。而且 20px 与背景点阵的 16px 对不上，
+               节点会停在看不见的格线上。
+               需要对齐时走我方的对齐辅助线（useCanvasAlignmentGuides：6 屏幕像素阈值、
+               按缩放换算），只在真正接近对齐时吸附、平时完全跟手。
+               将来若还想要网格吸附，建议做成「按住修饰键才生效」或「松手时对齐一次」。 -->
           <VueFlow
             v-model:nodes="nodes"
             v-model:edges="edges"
@@ -1331,8 +1349,6 @@ watch(canvasSnapshot, () => {
             :default-viewport="canvasViewport"
             :min-zoom="0.1"
             :max-zoom="2"
-            :snap-to-grid="true"
-            :snap-grid="[20, 20]"
             :delete-key-code="['Delete', 'Backspace']"
             :selection-key-code="selectionKeyCode"
             :multi-selection-key-code="multiSelectionKeyCode"
