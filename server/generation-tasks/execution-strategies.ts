@@ -333,7 +333,7 @@ const videoTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   execute(task, payload, context) {
     return context.executeVideoGenerationTask(task, payload)
   },
-  async handleStopped(task, payload, context) {
+  async handleStopped(task, _payload, context) {
     await context.refundTaskPointsIfNeeded(task, 'task_aborted')
     await context.markTaskExecutionState(task, {
       lastErrorAt: new Date().toISOString(),
@@ -344,6 +344,20 @@ const videoTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
       stopped: true,
       message: '视频生成已停止',
     })
+  },
+  async handleFailed(task, _payload, _error, errorMessage, context) {
+    // 视频是长任务，失败退款与图片同策（没拿到成品就退）
+    await context.refundTaskPointsIfNeeded(task, 'task_failed')
+    await context.markTaskExecutionState(task, {
+      lastErrorAt: new Date().toISOString(),
+      lastErrorMessage: errorMessage || '视频生成失败',
+    })
+  },
+  resolveFailureMessage(error) {
+    // 上游的原因（超时/内容被拒/额度不足）优先原样透出，便于用户判断能不能重试
+    const message = error instanceof Error ? error.message : String(error)
+    if (!message) return '视频生成失败'
+    return message.length > 200 ? `${message.slice(0, 200)}…` : message
   },
 }
 

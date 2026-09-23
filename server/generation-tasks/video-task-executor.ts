@@ -169,7 +169,7 @@ export const executeVideoTask = async (
       done: true,
       stopped: false,
       // 与图片链路保持一致：产物统一放 outputs，画布节点从记录里取
-      outputs: [{ type: "video", url: videoUrl }],
+      outputs: [{ outputType: "video", url: videoUrl }],
     },
     task.userId,
   );

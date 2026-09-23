@@ -72,7 +72,8 @@ type RetryState = {
 
 type UpstreamLogger = (stage: string, detail: Record<string, unknown>) => void
 
-type FetchWithBurstRateRetryInput = {
+// 导出以便视频适配层复用同一形状（避免各写一份导致调用处类型对不上）
+export type FetchWithBurstRateRetryInput = {
   url: string
   init: RequestInit
   signal: AbortSignal

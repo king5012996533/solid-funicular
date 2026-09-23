@@ -57,6 +57,27 @@ const GENERATION_RECORD_STAGE_LABELS: Record<string, string> = {
   'update_generation_record:update_new_session_last_record_at': '更新记录后写入新会话最近记录时间',
 }
 
+/**
+ * 生成记录的写入事务超时（2026-09-23 实测踩到）。
+ *
+ * 这两条路要在一个事务里插 N 条 output、再同步资产项，默认的 5 秒在**远端/繁忙的数据库**上
+ * 极容易被中止（实测：本地应用连服务器上的库，一次图片结果写入 9 秒仍未完成 → 事务被中止）。
+ * 中止后代码里那句检查 `createdOutput.id` 会命中，抛出「生成输出写入成功，但返回结果异常」——
+ * 看起来像「写进去了但读出来不对」，实际上是**整个事务回滚了，什么都没写**，误导性很强。
+ * 所以：① 给足超时；② 事务类错误单独翻译成人话。
+ */
+const RECORD_WRITE_TRANSACTION_TIMEOUT_MS = 30_000
+const RECORD_WRITE_TRANSACTION_MAX_WAIT_MS = 10_000
+
+const describeRecordWriteError = (error: unknown, action: string) => {
+  const message = error instanceof Error ? error.message : String(error)
+  const isTransactionFailure = /expired transaction|Transaction API error|P2028|Transaction already closed|cannot be executed on an expired/i.test(message)
+  if (!isTransactionFailure) return error
+  const friendly = new Error(`数据库写入超时（事务超过 ${Math.round(RECORD_WRITE_TRANSACTION_TIMEOUT_MS / 1000)} 秒被中止），本次${action}没有保存，请重试`)
+  ;(friendly as Error & { cause?: unknown }).cause = error
+  return friendly
+}
+
 const translateGenerationRecordStage = (stage: string) => {
   return GENERATION_RECORD_STAGE_LABELS[stage] || stage
 }
@@ -1075,7 +1096,7 @@ export const createGenerationRecord = async (payload: GenerationRecordPayload, c
       lastRecordAtForUpdate = createdRecord.createdAt
 
       return createdRecord
-    })
+    }, { timeout: RECORD_WRITE_TRANSACTION_TIMEOUT_MS, maxWait: RECORD_WRITE_TRANSACTION_MAX_WAIT_MS })
   } catch (error) {
     logGenerationRecordError('create_generation_record:transaction', error, {
       currentUserId,
@@ -1401,15 +1422,16 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
         })
         throw error
       }
-    })
+    }, { timeout: RECORD_WRITE_TRANSACTION_TIMEOUT_MS, maxWait: RECORD_WRITE_TRANSACTION_MAX_WAIT_MS })
   } catch (error) {
-    logGenerationRecordError('update_generation_record:transaction', error, {
+    const described = describeRecordWriteError(error, '生成结果')
+    logGenerationRecordError('update_generation_record:transaction', described, {
       currentUserId,
       generationRecordId: id,
       type: payload.type,
       outputCount: outputs.length,
     })
-    throw error
+    throw described
   }
 
   if (oldSessionIdForRefresh) {

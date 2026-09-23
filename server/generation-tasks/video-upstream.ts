@@ -15,6 +15,9 @@
  *      这是 SceneFlow 那边踩出来的经验，照搬。
  */
 
+import { resolveGatewayProviderUpstream } from "../provider-config/service";
+import type { FetchWithBurstRateRetryInput } from "./upstream-helpers";
+
 export type VideoDialect = "openai-videos" | "ark-seedance" | "task-generic";
 
 export interface VideoUpstreamConfig {
@@ -255,16 +258,8 @@ const authHeaders = (config: VideoUpstreamConfig) => {
 }
 
 export interface VideoRequestDeps {
-    fetchWithBurstRateRetry: (input: {
-        url: string
-        method?: string
-        headers?: Record<string, string>
-        body?: unknown
-        signal: AbortSignal
-        stage: string
-        timeoutMs?: number
-        detail?: Record<string, unknown>
-    }) => Promise<Response>
+    /** 与图片链路同一套（logGenerationTask 由调用方注入） */
+    fetchWithBurstRateRetry: (input: Omit<FetchWithBurstRateRetryInput, "logGenerationTask">) => Promise<Response>
     onRetry?: (retryState: { attempt: number; waitDurationMs: number; status: number; errorPreview: string; stage: string }) => Promise<void> | void
     log?: (stage: string, detail: Record<string, unknown>) => void
 }
@@ -284,9 +279,7 @@ export const createVideoTaskRequest = async (
     })
     const response = await deps.fetchWithBurstRateRetry({
         url,
-        method: 'POST',
-        headers: authHeaders(config),
-        body,
+        init: { method: 'POST', headers: authHeaders(config), body: JSON.stringify(body) },
         signal: input.signal,
         stage: 'video_create',
         timeoutMs: 60_000,
@@ -339,8 +332,7 @@ export const pollVideoTaskRequest = async (
         if (input.signal.aborted) throw new Error('任务已取消')
         const response = await deps.fetchWithBurstRateRetry({
             url,
-            method: 'GET',
-            headers: authHeaders(config),
+            init: { method: 'GET', headers: authHeaders(config) },
             signal: input.signal,
             stage: 'video_poll',
             timeoutMs: 30_000,

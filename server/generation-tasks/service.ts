@@ -201,7 +201,6 @@ const executeVideoGenerationTask = async (task: RunningGenerationTask, payload: 
     createVideoTask: (input) => createVideoTaskRequest(input, {
       fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
       onRetry: input.onRetry,
-      log: (stage, detail) => logGenerationTask(stage, detail),
     }),
     pollVideoTask: (input) => pollVideoTaskRequest(input, {
       fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
