@@ -14,6 +14,9 @@
  * 需要连库，所以不放进 `npm test`，手动跑：
  *   npx tsx --env-file=.env.development scripts/verify-terminal-sticky.mjs
  */
+import fs from 'node:fs'
+import path from 'node:path'
+
 import { prisma } from '../server/db/prisma.ts'
 import { updateGenerationRecord } from '../server/generation-records/service.ts'
 
@@ -134,10 +137,68 @@ try {
     assert(after.status === 'COMPLETED', `应完成，实际 ${after.status}`)
     assert(after.outputs.length === 1, `结果没写进去，输出 ${after.outputs.length} 张`)
   })
+  /**
+   * 并发写：完成写入与「滞后快照」同时打进来。
+   *
+   * 这是 2026-09-24 00:18 真机事故的形状 —— 服务端记下 done:true/1 张图，
+   * 同一秒另一个写者落成 done:false/0 张图，库里最终是 RUNNING、0 输出，
+   * 而用户界面上已经有图（刷新即消失）。
+   * 加了行锁之后，两个写者会被串行化，无论谁先谁后，**终态都必须是「已完成且有图」**。
+   */
+  await check('并发写入（完成 + 滞后快照）无论谁先落库，结果都是已完成且有图', async () => {
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    for (let round = 1; round <= 5; round += 1) {
+      const record = await makeRecord({ status: 'RUNNING' })
+      const stale = staleSnapshot(record)
+      const completion = {
+        sessionId: record.sessionId,
+        source: 'generate',
+        type: 'image',
+        prompt: record.prompt,
+        content: '[[completed]]已完成：图片生成完成',
+        done: true,
+        images: [dataUrl],
+      }
+      // 滞后快照先发一拍，再让完成写入进场 —— 复现「旧快照最后落库」的时序
+      const stalePromise = updateGenerationRecord(record.id, stale, record.userId)
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      const completionPromise = updateGenerationRecord(record.id, completion, record.userId)
+      await Promise.allSettled([stalePromise, completionPromise])
+
+      const after = await readBack(record.id)
+      assert(after.status === 'COMPLETED', `第 ${round} 轮：status=${after.status}（应为 COMPLETED）`)
+      assert(after.outputs.length === 1, `第 ${round} 轮：输出 ${after.outputs.length} 张（应为 1）`)
+    }
+  })
 } finally {
+  /**
+   * 收尾要把**落盘产物**也删掉。
+   *
+   * 写记录时会把 data URL 落盘成真文件（这里用的是 1×1 占位图，70 字节），
+   * 临时记录删了、文件还留在 uploads 里 —— 我第一版忘了清，用户的素材目录里就多了 7 个 70 字节的垃圾。
+   */
+  const scratchOutputs = scratchIds.length
+    ? await prisma.generationOutput.findMany({
+        where: { generationRecordId: { in: scratchIds } },
+        select: { url: true },
+      })
+    : []
+  let removedFiles = 0
+  for (const output of scratchOutputs) {
+    const url = String(output.url || '')
+    if (!url.startsWith('/uploads/')) continue
+    const filePath = path.resolve(process.cwd(), 'uploads', url.replace('/uploads/', ''))
+    try {
+      await fs.promises.unlink(filePath)
+      removedFiles += 1
+    } catch {
+      // 文件可能因为「已本地托管」被复用而没新建，删不到不算错
+    }
+  }
+
   if (scratchIds.length) {
     await prisma.generationRecord.deleteMany({ where: { id: { in: scratchIds } } })
-    console.log(`\n（已清理 ${scratchIds.length} 条临时记录）`)
+    console.log(`\n（已清理 ${scratchIds.length} 条临时记录、${removedFiles} 个落盘文件）`)
   }
   await prisma.$disconnect()
 }

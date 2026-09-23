@@ -1189,6 +1189,21 @@ export const updateGenerationRecord = async (id: string, payload: GenerationReco
   let lastRecordAtForNewSession: Date | null = null
   try {
     await prisma.$transaction(async (tx) => {
+      /**
+       * 先锁住这条记录，把「同一记录的并发写入」串行化。
+       *
+       * 为什么必须有这一步：下面那段「终态兜底」是「先读现状、再决定写不写」。
+       * 没有行锁时，两个并发写者各自在事务快照里读到的都是**对方提交之前**的状态 ——
+       * 完成写入（done:true、1 张图）和滞后快照（done:false、0 张图）会双双通过检查，
+       * 谁最后提交谁说了算。2026-09-24 00:18 的真机日志正是如此：
+       * 服务端 00:18:19 记下 `done:true / outputCount:1`，同一秒另一个写者落成 `done:false / outputCount:0`，
+       * 结果库里是 RUNNING、0 输出，而用户界面上明明已经有图了 —— 一刷新就会消失。
+       *
+       * 加了行锁之后，后到的写者必须等前一个提交，于是它读到的必然是**已提交的最新状态**，
+       * 兜底判断才真的成立。（锁的是本记录这一行，与既有代码里会话行的更新顺序一致，不引入新的锁序。）
+       */
+      await tx.$queryRaw`SELECT id FROM generation_records WHERE id = ${id} FOR UPDATE`
+
       const existingRecord = await tx.generationRecord.findUnique({
         where: { id },
         select: { id: true, userId: true, sessionId: true, createdAt: true, metaJson: true, status: true },

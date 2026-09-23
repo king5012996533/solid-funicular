@@ -29,6 +29,12 @@ const RECOVERIES = [
     evidence: '落盘 23:45:47；23:46:04 服务端报「图片任务请求成功 imageCount:1」',
   },
   {
+    recordId: 'cmueaz4db0001uk92ubqk2h2y',
+    file: '1790180277858-cf12dcf0-1ae1-4586-bb3f-fcdd08a84027.png',
+    bytes: 2168474,
+    evidence: '00:17:58 落盘；00:18:19 服务端报「图片任务请求成功 imageCount:1」，随后被 done:false/0 张的滞后快照覆盖',
+  },
+  {
     recordId: 'cmue9u9hi005bkc92avl0o10p',
     file: '1790178406561-53818d42-9278-451c-81b9-0a06c13ebdb4.png',
     bytes: 1977506,

@@ -2033,10 +2033,17 @@ const handleGenerationTaskStreamEvent = (recordId: string, streamEvent: Generati
         mapTaskStageToProgressPercent(event.stage),
     )
     if (isImageTaskRecord) {
+      /**
+       * 文案只放服务端给的那句话，**不要再拼一次标签**。
+       *
+       * 阶段行渲染时本来就会显示 `resolveStageTitle(stageKey)` 作为标题，
+       * 再拼一遍就变成「已完成 / 已完成：图片生成完成，结果已写入记录」——
+       * 用户看到的「已完成：图片生成已完成：图片生成完成，结果已写入记录」就是这个重复。
+       */
       stageConversationChanged = upsertRecordStageConversation(
           targetRecord,
           targetRecord.progressStage || event.stage || 'queued',
-          `${targetRecord.progressMessage}：${event.message}`,
+          String(event.message || ''),
       ) || stageConversationChanged
     }
   }
@@ -2332,10 +2339,11 @@ const handleGenerationTaskStreamEvent = (recordId: string, streamEvent: Generati
       targetRecord.thinkingEndedAt = Date.now()
     }
     if (isImageTaskRecord) {
+      // 同上：标题已经写了「已完成」，正文只留服务端的原话
       stageConversationChanged = upsertRecordStageConversation(
           targetRecord,
           'completed',
-          `${targetRecord.progressMessage}：${event.message || '图片生成完成'}`,
+          String(event.message || '图片生成完成'),
       ) || stageConversationChanged
     }
     if (isResearchTaskRecord) {
@@ -2356,7 +2364,7 @@ const handleGenerationTaskStreamEvent = (recordId: string, streamEvent: Generati
       stageConversationChanged = upsertRecordStageConversation(
           targetRecord,
           'failed',
-          `${targetRecord.progressMessage}：${event.message || '任务执行失败'}`,
+          String(event.message || '任务执行失败'),
       ) || stageConversationChanged
     }
     if (isResearchTaskRecord) {
@@ -2377,7 +2385,7 @@ const handleGenerationTaskStreamEvent = (recordId: string, streamEvent: Generati
       stageConversationChanged = upsertRecordStageConversation(
           targetRecord,
           'stopped',
-          `${targetRecord.progressMessage}：${event.message || '任务已停止'}`,
+          String(event.message || '任务已停止'),
       ) || stageConversationChanged
     }
     if (isResearchTaskRecord) {
