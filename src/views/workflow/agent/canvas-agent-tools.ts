@@ -59,6 +59,16 @@ export interface CanvasAgentContext {
   /** 节点类型说明（让模型知道有哪些 type 可用） */
   nodeTypeHints: () => Array<{ type: string; name: string }>;
   /**
+   * 用户本轮上传的参考图（地址）。Agent 的 attach_reference_images 默认取这里。
+   * 由面板注入 —— 只有它知道用户这一轮附了什么。
+   */
+  referenceImages?: () => string[];
+  /**
+   * 把参考图写到某个图片节点上。由画布页实现（只有它拿得到节点）。
+   * 返回 false 表示节点不存在。
+   */
+  attachReferenceImages?: (id: string, images: string[]) => boolean;
+  /**
    * 向用户要一个确认（半自动闸门）。
    *
    * 服务端 Agent 在花钱/交付前会调 request_confirmation，这里负责把卡片弹给用户并等答复。
@@ -284,6 +294,33 @@ export const executeCanvasAgentTool = async (
         ok: true,
         result: JSON.stringify({ selected: ids }),
         summary: `选中 ${ids.length} 个节点${focus ? "并把视图移过去" : ""}`,
+      };
+    }
+    case "attach_reference_images": {
+      const id = String(args.id || "").trim();
+      if (!id) return fail("缺少节点 id");
+      if (!ctx.snapshotNodes().some((node) => node.id === id)) {
+        return fail(`找不到节点 ${id}（先用 get_canvas_state 确认 id）`);
+      }
+      const explicit = Array.isArray(args.images)
+        ? args.images.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      const images = explicit.length ? explicit : ctx.referenceImages?.() || [];
+      if (!images.length) {
+        return fail(
+          "没有任何参考图可用：用户这一轮没有上传参考图，也没有在 images 里给地址。直接用提示词生成，或先请用户上传。",
+        );
+      }
+      if (!ctx.attachReferenceImages) {
+        return fail("当前环境不支持把参考图挂到节点上");
+      }
+      if (!ctx.attachReferenceImages(id, images)) {
+        return fail(`挂参考图失败：找不到节点 ${id}`);
+      }
+      return {
+        ok: true,
+        result: JSON.stringify({ id, referenceImageCount: images.length }),
+        summary: `给节点 ${id} 挂了 ${images.length} 张参考图（执行该节点会走图生图）`,
       };
     }
     case "run_node": {

@@ -1377,6 +1377,20 @@ const canvasAgentContext: CanvasAgentContext = {
     }
   },
   runNode: (id) => runNodeById(id),
+  /**
+   * 把参考图挂到图片节点上。
+   *
+   * 参考图存在 `data.referenceImages` 上 —— 这是节点自己读的字段（ImageNode 的 runGeneration
+   * 会拿它决定走图生图还是文生图，Agent 的 run_node 也会读同一份）。所以这里只需要写数据，
+   * 不必再发明一条「参考图」通道，两边天然一致。
+   */
+  attachReferenceImages: (id, images) => {
+    const target = nodes.value.find((node) => node.id === id)
+    if (!target) return false
+    if (target.type !== 'image') return false
+    updateNode(id, { referenceImages: [...images] })
+    return true
+  },
   applyTemplate: (templateId, position) => {
     const template = WORKFLOW_TEMPLATES.find((item) => item.id === templateId)
     if (!template) return null

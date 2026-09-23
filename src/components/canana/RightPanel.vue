@@ -1,7 +1,6 @@
 <script setup>
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
-import ContentGenerator from '@/components/generate/ContentGenerator.vue'
 import SidebarEmptyState from '@/components/canana/SidebarEmptyState.vue'
 import AssistantSessionList from '@/components/canvas/AssistantSessionList.vue'
 import {
@@ -136,13 +135,8 @@ const toggleCollapse = (msg) => { msg.collapsed = !msg.collapsed }
 // 图片上传
 const uploadedImages = ref([])
 const fileInputRef = ref(null)
-const imagesExpanded = ref(false)
-const hoveredImageId = ref(null)
 
-// 最近一次发送时 ContentGenerator 选择的创建类型（image/agent/video...）
-const lastCreationType = ref('agent')
-// 最近一次 ContentGenerator 透传过来的图片生成参数（count/model/ratio/quality 等）
-const lastImageOptions = ref({})
+
 
 // 跟踪进行中的流式请求，用于卸载时统一 abort
 const activeStreams = []
@@ -305,92 +299,6 @@ const handleAddImageToCanvas = (url) => {
 // 参考图格式校验统一放在 config/reference-validation.ts ——
 // 这里原来另写了一份，且和 ImageNode 那份行为不一致（漏了 SVG 的 data URL）
 // 调用图片生成 API（写入到指定 aiMsg.images）
-const runImageGeneration = async (prompt, refImages, aiMsg) => {
-  try {
-    const opts = lastImageOptions.value || {}
-    const rawRefs = Array.isArray(refImages) ? refImages : []
-    const filteredRefs = rawRefs.filter(isRasterReferenceUrl)
-    if (rawRefs.length > filteredRefs.length) {
-      aiMsg.error = '已忽略非栅格格式（SVG 等）的参考图，图生图模型不支持'
-    }
-    // ContentGenerator 把张数放在 options.count，缺省给 1（与底部输入框的默认一致）
-    const count = Math.max(1, Math.min(8, Number(opts.count) || 1))
-    const fallbackKey = String(opts.modelKey || opts.model || '').trim() || getDefaultImageModelKey() || ''
-    const { providerId, modelKey } = resolveGenerationTaskModel({
-      modelKey: fallbackKey,
-      fallbackModelKey: fallbackKey,
-      category: 'IMAGE',
-      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
-    })
-    const requestBody = {
-      model: modelKey,
-      prompt: prompt || '',
-      n: count,
-      providerId,
-    }
-    // 透传 size/quality（ContentGenerator 里 ratio 对应 size、resolution 对应 quality）
-    const sizeValue = String(opts.size || opts.ratio || '').trim()
-    if (sizeValue) requestBody.size = sizeValue
-    const qualityValue = String(opts.quality || opts.resolution || '').trim()
-    if (qualityValue) requestBody.quality = qualityValue
-
-    const hasRef = filteredRefs.length > 0
-    const normalizedBody = hasRef
-      ? appendImageReferencesToRequestBody(requestBody, filteredRefs)
-      : requestBody
-
-    const saved = await createGenerationTask({
-      source: ASSISTANT_SOURCE,
-      sessionId: activeSessionId.value || undefined,
-      type: 'image',
-      requestMode: hasRef ? 'image-edit' : 'image-generation',
-      prompt: prompt || '',
-      modelKey,
-      ratio: sizeValue || undefined,
-      resolution: qualityValue || undefined,
-      referenceImages: hasRef ? [...filteredRefs] : [],
-      requestBody: normalizedBody,
-    })
-
-    const taskId = String(saved?.id || '').trim()
-    if (!taskId) throw new Error('图片任务创建失败')
-
-    const controller = new AbortController()
-    registerStream(controller)
-
-    await subscribeGenerationTaskEvents(taskId, {
-      signal: controller.signal,
-      onEvent: (event) => {
-        if (event.type === 'snapshot' || event.type === 'completed') {
-          const urls = Array.isArray(event.record?.images)
-            ? event.record.images.filter(Boolean)
-            : []
-          if (urls.length) {
-            aiMsg.images = urls
-            aiMsg.totalCount = urls.length
-            aiMsg.loading = false
-            scrollToBottom()
-          }
-        }
-        if (event.type === 'failed') {
-          aiMsg.error = String(event.message || event.record?.error || '图片生成失败')
-          aiMsg.loading = false
-          scrollToBottom()
-        }
-        if (event.type === 'stopped') {
-          aiMsg.error = aiMsg.error || '任务已停止'
-          aiMsg.loading = false
-        }
-      },
-    })
-  } catch (err) {
-    console.error('[RightPanel] image generation failed', err)
-    aiMsg.error = err?.message || '图片生成失败'
-    aiMsg.loading = false
-    scrollToBottom()
-  }
-}
-
 // 调用流式对话 API（走 createGenerationTask({ type:'agent' }) + SSE 订阅，后端持久化 record，刷新可恢复）
 
 /**
@@ -431,6 +339,7 @@ const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value,
  *   2. 把「要不要花这笔钱」的确认卡片弹给用户。
  */
 const { isPanelCollapsed } = useChatSessions()
+const turnReferenceImages = ref([])       // 本轮用户附的参考图（Agent 挂图时从这里取）
 const confirmRequest = ref(null)          // { title, summary, items, costPoints, riskLevel, resolve }
 const confirmNote = ref('')
 const confirmRemembered = ref(false)      // 用户勾了「本任务内不再问同类动作」
@@ -470,7 +379,13 @@ const agentBridge = useCanvasAgentBridge({
   // 把「确认」这项能力叠在页面注入的画布操作之上：画布上下文由 workflow 页提供，
   // 而确认卡片属于这个面板的 UI，两者在这里合体。
   getContext: () => (props.agentContext
-    ? { ...props.agentContext, requestConfirmation }
+    ? {
+        ...props.agentContext,
+        requestConfirmation,
+        // 参考图只有面板知道（用户是在这里上传的），节点操作只有画布页知道，
+        // 两边各出一半，工具层在中间把它们拼起来
+        referenceImages: () => turnReferenceImages.value,
+      }
     : null),
   onStep: (step) => {
     const target = messages.value[messages.value.length - 1]
@@ -491,7 +406,7 @@ const agentBridge = useCanvasAgentBridge({
  * 返回 true 表示这一轮已经交给服务端处理（不管成没成），调用方不要再回退到普通对话 ——
  * 回退用的是同一个模型，只会把同一句错误再报一遍。
  */
-const runCanvasAgentTurn = async (prompt, aiMsg) => {
+const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   try {
     const fallbackKey = getDefaultChatModelKey() || ''
     const { providerId, modelKey } = resolveGenerationTaskModel({
@@ -502,6 +417,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg) => {
     })
 
     agentBridge.reset()
+    // 这一轮的参考图存下来：Agent 调 attach_reference_images 时由桥从这里取
+    turnReferenceImages.value = Array.isArray(referenceImages) ? [...referenceImages] : []
     aiMsg.content = ''
     aiMsg.steps = []
 
@@ -518,6 +435,9 @@ const runCanvasAgentTurn = async (prompt, aiMsg) => {
         providerId,
         // 画布现状：Agent 看不见画布，全靠这段摘要
         canvasBrief: props.canvasBrief || '',
+        // 本轮附的参考图：服务端会告诉 Agent「用户附了 N 张图」，
+        // 它再决定要不要用 attach_reference_images 挂到某个节点上
+        referenceImages: turnReferenceImages.value,
         // 最近几轮对话：服务端会把它并进本轮用户消息，保证措辞连贯
         history: (messages.value || [])
           .filter((item) => (item.type === 'user' || item.type === 'ai-text') && String(item.content || '').trim())
@@ -597,12 +517,14 @@ const runCanvasAgentTurn = async (prompt, aiMsg) => {
   }
 }
 
-// 发送消息
+// 发送消息：面板只有一条路 —— 交给 Agent
+const runningAgent = computed(() => messages.value.some((msg) => msg.type === 'ai-text' && msg.loading))
+
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
-  const hasImagesLocal = uploadedImages.value.length > 0
+  const refImages = uploadedImages.value.map((img) => img.src)
 
-  if (!content && !hasImagesLocal) return
+  if (!content && !refImages.length) return
 
   // 确保有活跃会话（首次发送会自动定位到默认会话）
   try {
@@ -615,74 +537,27 @@ const sendMessage = async () => {
   hasMessages.value = true
 
   const userId = Date.now()
-  const refImages = uploadedImages.value.map(img => img.src)
+  messages.value.push(
+    refImages.length
+      ? { id: userId, type: 'user-with-ref', referenceImages: refImages, content: content || '（附了参考图）' }
+      : { id: userId, type: 'user', content },
+  )
 
-  if (hasImagesLocal) {
-    messages.value.push({
-      id: userId,
-      type: 'user-with-ref',
-      referenceImages: refImages,
-      content: content || '请根据图片生成',
-    })
-  } else {
-    messages.value.push({
-      id: userId,
-      type: 'user',
-      content,
-    })
-  }
-
-  // 清空输入
+  // 清空输入；参考图交给这一轮的 Agent（挂到节点上是它的活），不再由面板直接拿去生成
   inputMessage.value = ''
   uploadedImages.value = []
   scrollToBottom()
 
-  // 路由由面板上的开关决定：带参考图时强制走图片；「对话」模式走画布 Agent（能改画布）
-  // 只有「附了参考图」才直接走图片生成（Agent 目前还接不住用户附的参考图）；
-  // 纯文本一律交给 Agent —— 它自己会决定要不要建节点、要不要生成
-  const goImage = hasImagesLocal
-  if (goImage) {
-    messages.value.push({
-      id: userId + 1,
-      type: 'ai-images',
-      summary: (content || '图片生成').slice(0, 10) + (content.length > 10 ? '...' : ''),
-      collapsed: false,
-      images: [],
-      totalCount: 0,
-      loading: true,
-      error: '',
-    })
-    scrollToBottom()
-    await runImageGeneration(content || '请根据参考图生成', refImages, tailMessage())
-  } else {
-    messages.value.push({
-      id: userId + 1,
-      type: 'ai-text',
-      content: '',
-      loading: true,
-      error: '',
-    })
-    scrollToBottom()
-    // 对话模式固定走制片 Agent（服务端）：它能真的动画布，也才留得下调用记录。
-    // 原来还有一条「Agent 没动静就回退到普通流式对话」的分支，现在两条路是同一个模型，
-    // 回退只会把同一个错误再报一遍，反而让用户以为问题变了 —— 所以去掉了。
-    await runCanvasAgentTurn(content, tailMessage())
-  }
-}
+  messages.value.push({
+    id: userId + 1,
+    type: 'ai-text',
+    content: '',
+    loading: true,
+    error: '',
+  })
+  scrollToBottom()
 
-// 处理 ContentGenerator 发送事件
-const handlePromptSend = (message, type, options) => {
-  inputMessage.value = message
-  lastCreationType.value = type || 'agent'
-  lastImageOptions.value = options && typeof options === 'object' ? options : {}
-  uploadedImages.value = Array.isArray(options?.referenceImages)
-    ? options.referenceImages.map((src, index) => ({
-        id: Date.now() + index + Math.random(),
-        src,
-        name: `reference-${index + 1}`,
-      }))
-    : []
-  void sendMessage()
+  await runCanvasAgentTurn(content || '我上传了参考图，帮我把它用起来', tailMessage(), refImages)
 }
 
 // 回车发送
@@ -973,23 +848,50 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         </div>
       </div>
 
-      <ContentGenerator
-        :hide-type-selector="true"
-        class="dimension-layout-FUl4Nj canvas-layout content-generator-XxJXPs"
-        style="--content-generator-collapse-transition-duration:350ms;--content-generator-collapse-transition-timing-function:cubic-bezier(0.15,0.75,0.3,1)"
-        layout="sidebar"
-        :collapsible="false"
-        :default-expanded="true"
-        popup-placement="top"
-        @send="handlePromptSend"
-      />
-
-      <!-- 任务指示器容器 -->
-      <div
-        data-task-indicator-container="true"
-        class="task-indicator-container-m3Oy09"
-        :style="`--content-generator-collapse-transition-duration:350ms;--content-generator-collapse-transition-timing-function:cubic-bezier(0.15,0.75,0.3,1);--content-generator-height:${contentGeneratorHeight}px`"
-      ></div>
+      <!--
+        Agent 输入区（2026-09-23 换掉了 ContentGenerator）
+        用户的反馈很直接：「这个画布Agent还是一个生成器」。
+        原来这里复用的是图片生成的输入组件 —— 带着张数、比例、画质、参考图、高级设置那一整套控件，
+        面板看上去当然就是个生成器。而这些参数在这里根本不该由用户填：它们是 Agent 调工具时自己决定的。
+        所以换成一个朴素的任务输入框：交办一件事，附带图，剩下的它自己来。
+      -->
+      <div class="agent-composer">
+        <div v-if="uploadedImages.length" class="agent-composer__refs">
+          <div v-for="img in uploadedImages" :key="img.id" class="agent-composer__ref">
+            <img :src="img.src" :alt="img.name" @click="openPreview(img.src)" />
+            <button type="button" class="agent-composer__ref-remove" title="移除" @click="removeUploadedImage(img.id)">×</button>
+          </div>
+        </div>
+        <textarea
+          v-model="inputMessage"
+          class="agent-composer__input"
+          rows="1"
+          placeholder="交给 Agent 一件事（建节点、连线、生成、把一条片子串起来…）"
+          @keydown="handleKeydown"
+        ></textarea>
+        <div class="agent-composer__bar">
+          <button
+            type="button"
+            class="agent-composer__attach"
+            :class="{ 'is-active': uploadedImages.length > 0 }"
+            title="附参考图（Agent 会把它们挂到节点上用起来）"
+            @click="triggerUpload"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20.4 12.6 12.6 20.4a5 5 0 0 1-7.1-7.1l8-8a3.4 3.4 0 0 1 4.8 4.8l-8 8a1.8 1.8 0 0 1-2.5-2.5l7.2-7.2" />
+            </svg>
+            <span v-if="uploadedImages.length">{{ uploadedImages.length }}</span>
+            <span v-else>附图</span>
+          </button>
+          <span class="agent-composer__hint">Enter 发送 · Shift+Enter 换行</span>
+          <button
+            type="button"
+            class="agent-composer__send"
+            :disabled="runningAgent || (!inputMessage.trim() && !uploadedImages.length)"
+            @click="sendMessage"
+          >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
+        </div>
+      </div>
     </div>
 
     <!-- 图片预览弹窗 -->
@@ -1009,6 +911,128 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 </template>
 
 <style scoped>
+/**
+ * Agent 输入区。
+ *
+ * 与它替换掉的 ContentGenerator 的关系：那个组件是图片生成的输入区（张数/比例/画质/高级设置），
+ * 放进这个面板会让它看上去像个生成器 —— 用户的反馈正是这一句。这里只留「交办一件事」需要的三样：
+ * 文字、附带的参考图、发送。生成参数由 Agent 调工具时自己决定。
+ *
+ * 定位沿用原来那套（absolute 贴底 + 盖在消息之上），因为它已经验证过不会被消息列表压住；
+ * `.chat-messages-list` 的底部内边距同步调小，否则消息和输入框之间会空一大截。
+ */
+.agent-composer {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
+  border-radius: 14px;
+  background: var(--canvas-float-block-default, rgba(24, 24, 27, 0.94));
+  backdrop-filter: blur(var(--canvas-float-backdrop-blur, 12px));
+  -webkit-backdrop-filter: blur(var(--canvas-float-backdrop-blur, 12px));
+}
+.agent-composer__refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agent-composer__ref {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
+}
+.agent-composer__ref img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+.agent-composer__ref-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 8px 0 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.agent-composer__input {
+  width: 100%;
+  max-height: 132px;
+  min-height: 22px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text-primary, #e5e7eb);
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.agent-composer__input::placeholder {
+  color: var(--text-tertiary, #71717a);
+}
+.agent-composer__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-composer__attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-composer__attach.is-active {
+  color: #a5b4fc;
+  border-color: #6366f1;
+}
+.agent-composer__hint {
+  flex: 1 1 auto;
+  color: var(--text-tertiary, #71717a);
+  font-size: 11px;
+}
+.agent-composer__send {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #4f46e5;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-composer__send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 输入区变矮了（原来那个生成器高得多），消息列表的底部留白同步收一下 */
+.chat-messages-list {
+  padding-bottom: 170px;
+}
+
 /* 面板身份标识（Agent 创作）：放在头部，不会被底部的输入浮层盖住 */
 .right-panel-agent-badge {
   display: inline-flex;
@@ -1066,7 +1090,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   position: absolute;
   left: 12px;
   right: 12px;
-  bottom: 130px;
+  bottom: 160px;
   z-index: 20;
   max-height: 46%;
   overflow-y: auto;

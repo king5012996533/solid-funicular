@@ -174,6 +174,21 @@ export const buildPromptWithHistory = (
   prompt: string,
   requestBody: Record<string, unknown> | null | undefined,
 ) => {
+  /**
+   * 用户这一轮附的参考图。
+   *
+   * 必须显式告诉 Agent —— 它看不见浏览器里上传了什么。不说的话，用户附了图、Agent 却当没有，
+   * 于是它要么凭空生成（图白附了），要么反问用户「你要我参考什么」。
+   * 顺带把「用哪个工具」一起点名，省得它去猜。
+   */
+  const referenceImages = Array.isArray(requestBody?.referenceImages)
+    ? (requestBody?.referenceImages as unknown[]).filter((item) => typeof item === "string" && item)
+    : []
+  const referenceNotice = referenceImages.length
+    ? `\n\n【用户本轮附了 ${referenceImages.length} 张参考图】`
+      + "需要用到它们时，用 attach_reference_images 把图挂到对应的图片节点上（默认就是取这几张），"
+      + "再用 run_node 执行该节点 —— 挂上图之后那次生成会走图生图。不要假装用了图。"
+    : ""
   const history = Array.isArray(requestBody?.history)
     ? (requestBody?.history as Array<{ role?: string; content?: string }>)
     : [];
@@ -192,9 +207,9 @@ export const buildPromptWithHistory = (
     );
 
   if (!lines.length) {
-    return prompt;
+    return `${prompt}${referenceNotice}`;
   }
-  return `（以下是本轮之前我们说过的话，供你保持连贯，不必复述）\n${lines.join("\n")}\n\n【用户现在的要求】\n${prompt}`;
+  return `（以下是本轮之前我们说过的话，供你保持连贯，不必复述）\n${lines.join("\n")}\n\n【用户现在的要求】\n${prompt}${referenceNotice}`;
 };
 
 export const executeCanvasAgentTaskFlow = async (
@@ -486,6 +501,9 @@ export const executeCanvasAgentTaskFlow = async (
           recordId: task.recordId,
           userId: task.userId,
           stopReason: message.stopReason || "",
+          // 失败原因必须记下来：否则上游 502 / 超时 全都只表现为「没有产出任何内容」，
+          // 排查时完全看不出是通道挂了还是模型不肯说话
+          errorMessage: String((message as { errorMessage?: string }).errorMessage || "").slice(0, 300),
           partTypes: parts
             .map((part) => (part as { type?: string }).type || "?")
             .join(","),
@@ -546,7 +564,19 @@ export const executeCanvasAgentTaskFlow = async (
 
   const finalText = fullText.trim();
   if (!finalText) {
-    throw new Error("制片 Agent 没有产出任何内容（模型既没回答也没调用工具）");
+    /**
+     * 没产出内容时，优先把**上游/模型的真实原因**抛出去。
+     *
+     * 之前无论什么原因都是同一句「没有产出任何内容」—— 用户看不懂，我也查不出。
+     * Pi 会把失败原因放在那条失败 assistant 消息的 errorMessage 上（例如「上游对话接口返回 HTTP 502」），
+     * 那才是要给人看的东西；实在没有才退回这句兜底。
+     */
+    const failureReason = agent.state?.messages
+      ?.filter((message) => (message as { role?: string }).role === "assistant")
+      .map((message) => String((message as { errorMessage?: string }).errorMessage || "").trim())
+      .filter(Boolean)
+      .pop();
+    throw new Error(failureReason || "制片 Agent 没有产出任何内容（模型既没回答也没调用工具）");
   }
 
   context.emitTaskProgressEvent(task.recordId, {

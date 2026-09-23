@@ -186,6 +186,32 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     requiresClient: true,
   },
   {
+    /**
+     * 让用户附的参考图真正进入生产（2026-09-23）。
+     *
+     * 之前参考图只有一条路：直接走图片生成，Agent 完全接不住 —— 于是「附了图」就绕开了 Agent，
+     * 面板也就一直像个生成器。有了这个工具，参考图可以挂到任意图片节点上，
+     * 之后 Agent 用 run_node 跑那个节点时，节点会以这些图做参考（图生图）。
+     */
+    name: "attach_reference_images",
+    label: "挂参考图",
+    description:
+      "把参考图挂到某个图片节点上：挂上之后执行该节点会用这些图做参考（图生图）。默认用用户本轮上传的参考图；也可以显式给 images（图片地址）以引用别的素材。节点上已有参考图时会被替换。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "图片节点 id" },
+        images: {
+          type: "array",
+          items: { type: "string" },
+          description: "要挂的图片地址（可选；不填则用用户本轮上传的参考图）",
+        },
+      },
+      required: ["id"],
+    },
+    requiresClient: true,
+  },
+  {
     name: "run_node",
     label: "执行节点",
     description:
