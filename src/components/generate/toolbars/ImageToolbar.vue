@@ -55,7 +55,6 @@ const readStoredImageToolbarState = () => {
 }
 
 const storedToolbarState = readStoredImageToolbarState()
-const validImageModelValues = modelVersions.value.map(item => item.value)
 
 const IMAGE_COUNT_MIN = 1
 // 模型未配置 maxImagesPerRequest 时的最保守上限：1。
@@ -64,8 +63,20 @@ const IMAGE_COUNT_FALLBACK_MAX = 1
 const IMAGE_COUNT_DEFAULT = 1
 
 // 当前选中的模型
+/**
+ * 首选模型：信本地存的值，**不要在首屏就拿目录校验它**。
+ *
+ * 目录（`getAllImageModels()`）是异步加载的，首屏渲染时 `validImageModelValues` 还是空数组，
+ * 于是任何存过的模型都会被判为「不在目录里」而静默回落到默认模型 ——
+ * 2026-09-24 我为验证把模型切到打桩模型，结果被这条回落成了真实默认模型，白花了两张真图的钱。
+ * 对用户的危害是同一个：**他选过的模型，刷新后可能被悄悄换掉**，而且界面上会显示成默认模型，
+ * 看起来「就是那样的」，没有任何提示。
+ *
+ * 改成：先原样采用存值（没有存值才用默认）；目录真的到了之后，由下面那个 watch 做一次真正的校验
+ * —— 它已经在目录为空时提前返回，所以顺序是安全的。
+ */
 const currentModelVersion = ref(
-  validImageModelValues.includes(storedToolbarState?.model) ? storedToolbarState.model : getDefaultImageModelKey(),
+  String(storedToolbarState?.model || '').trim() || getDefaultImageModelKey(),
 )
 
 const currentModel = computed<ImageModel | null>(() => {
@@ -193,8 +204,8 @@ watch(
 watch(
   [qualityOptions, currentModelVersion],
   () => {
+    // 目录还没到：先别动（原来会把存值清空，等于用户选的画质一刷新就没了）
     if (!qualityOptions.value.length) {
-      currentQuality.value = ''
       return
     }
     if (!findChoice(qualityOptions.value, currentQuality.value)) {
@@ -209,8 +220,8 @@ watch(
 watch(
   [sizeOptions, currentQuality, currentModelVersion],
   () => {
+    // 同上：目录未就绪时保留存值，等选项到了再校验
     if (!sizeOptions.value.length) {
-      currentSize.value = ''
       return
     }
     if (!findChoice(sizeOptions.value, currentSize.value)) {

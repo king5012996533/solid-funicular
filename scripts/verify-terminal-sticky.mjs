@@ -183,6 +183,16 @@ try {
         select: { url: true },
       })
     : []
+  /**
+   * 先清资产行，再删记录。
+   *
+   * AssetItem 与记录是 `onDelete: SetNull` —— 直接删记录的话，资产行会留下来、
+   * 而它引用的文件已经被下面删掉了，于是用户的资产库里多出一张破图。
+   * 我第一次跑这个脚本时就是这么给资产库塞了 6 张破图的。
+   */
+  const scratchAssets = scratchIds.length
+    ? await prisma.assetItem.deleteMany({ where: { generationRecordId: { in: scratchIds } } })
+    : { count: 0 }
   let removedFiles = 0
   for (const output of scratchOutputs) {
     const url = String(output.url || '')
@@ -198,7 +208,7 @@ try {
 
   if (scratchIds.length) {
     await prisma.generationRecord.deleteMany({ where: { id: { in: scratchIds } } })
-    console.log(`\n（已清理 ${scratchIds.length} 条临时记录、${removedFiles} 个落盘文件）`)
+    console.log(`\n（已清理 ${scratchIds.length} 条临时记录、${scratchAssets.count} 条资产、${removedFiles} 个落盘文件）`)
   }
   await prisma.$disconnect()
 }
