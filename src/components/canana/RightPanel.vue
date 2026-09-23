@@ -17,6 +17,9 @@ import {
 } from '@/config/models'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
+// 折叠状态与画布页共用同一份（useChatSessions 是模块级单例）：
+// 确认卡片长在这个面板里，面板收起来用户就看不见卡片 —— 而那是「不给答复就走不下去」的闸门。
+import { useChatSessions } from '@/composables/useChatSessions'
 import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
 import { useCanvasAgentBridge } from '@/views/workflow/agent/use-canvas-agent-bridge'
 import { CANVAS_AGENT_SKILL_KEY } from '@/shared/canvas-agent-tools'
@@ -420,6 +423,7 @@ const panelMode = ref('chat')
  *   1. 把服务端要的画布操作真的执行掉（就是下面这个桥）；
  *   2. 把「要不要花这笔钱」的确认卡片弹给用户。
  */
+const { isPanelCollapsed } = useChatSessions()
 const confirmRequest = ref(null)          // { title, summary, items, costPoints, riskLevel, resolve }
 const confirmNote = ref('')
 const confirmRemembered = ref(false)      // 用户勾了「本任务内不再问同类动作」
@@ -427,6 +431,14 @@ const confirmRemembered = ref(false)      // 用户勾了「本任务内不再�
 /** 服务端 Agent 通过桥要确认时调用；返回的 Promise 一直挂到用户点按钮 */
 const requestConfirmation = (request) =>
   new Promise((resolve) => {
+    /**
+     * 先把面板弹出来。
+     *
+     * 面板块的折叠状态默认是「收起」，而 Agent 现在正卡在这一步等服务端的答复 ——
+     * 卡片被藏在屏幕外，用户只会看到画布一动不动，然后十分钟后收到「没等到答复」。
+     * 闸门必须让人看得见，否则它就不是闸门，是个坑。
+     */
+    isPanelCollapsed.value = false
     // 上一次的卡片还没答复就再来一张：先把上一张按「拒绝」结掉，避免谁也答不了
     confirmRequest.value?.resolve?.({ approved: false, note: '用户未答复，已跳过' })
     confirmNote.value = ''
@@ -1019,13 +1031,27 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-step__label { flex: 0 0 auto; font-weight: 600; }
 .agent-step__summary { flex: 1 1 auto; word-break: break-word; }
 
+/**
+ * 卡片浮在输入框上方。
+ *
+ * 为什么不能用普通文档流：面板底部的输入区（ContentGenerator）是 `position: absolute; bottom: 0;
+ * z-index: 10`，文档流里的东西会被它盖住 —— 实测确认卡片的两个按钮正好被输入框压掉，
+ * 用户看得到卡片却点不到按钮，Agent 于是白等十分钟。
+ * 所以这里脱离文档流、放到 z-index 20，并留出输入区的高度。
+ */
 .agent-confirm-card {
-  margin: 8px 12px 0;
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 130px;
+  z-index: 20;
+  max-height: 46%;
+  overflow-y: auto;
   padding: 12px 14px;
   border: 1px solid #c7d2fe;
   border-radius: 12px;
   background: #eef2ff;
-  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.08);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
 }
 .agent-confirm-card__head {
   display: flex;
