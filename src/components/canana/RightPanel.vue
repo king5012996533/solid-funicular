@@ -400,6 +400,15 @@ const runImageGeneration = async (prompt, refImages, aiMsg) => {
  */
 const buildChatMessages = (prompt) => buildAssistantChatMessages(messages.value, prompt, props.canvasBrief)
 
+/**
+ * 面板模式开关（2026-09-23 重写）。
+ *
+ * 原来切「Agent 模式」要靠 ContentGenerator 顶部那个可拖拽的类型选择器 —— 用户反馈
+ * 「有个拖拉件，不好找」。这里改成两个常驻按钮，并且**用 hideTypeSelector 把原来那个藏掉**，
+ * 不再有两套入口互相打架。默认落在「对话」，因为画布上最常用的就是让 Agent 动手。
+ */
+const panelMode = ref('chat')
+
 const canvasAgent = useCanvasAgent({
   ctx: props.agentContext,
   buildBrief: () => props.canvasBrief || '',
@@ -429,7 +438,17 @@ const tryCanvasAgentTurn = async (prompt, aiMsg) => {
     scrollToBottom()
     return true
   } catch (err) {
-    // 有工具执行过就不能再回退（否则等于重复回答）
+    /**
+     * 模型侧失败（厂商密钥解不开、上游 4xx/5xx 等）**不再回退**到流式对话：
+     * 那条路用的是同一个模型，只会再报一次同样的错 —— 用户会看到两个错误，却不知道是同一个原因。
+     * 这里直接把原因显示出来（回退只留给「模型没要求调工具、也没给文字」这种正常空轮次）。
+     */
+    aiMsg.content = `模型调用失败：${err?.message || err}`
+    aiMsg.error = aiMsg.content
+    aiMsg.loading = false
+    scrollToBottom()
+    return true
+    // eslint-disable-next-line no-unreachable
     if (canvasAgent.steps.value.length) {
       aiMsg.content = `【已执行 ${canvasAgent.steps.value.length} 步】${canvasAgent.steps.value.map((step) => step.summary).join('；')}\n\n执行中断：${err?.message || err}`
       aiMsg.loading = false
@@ -561,8 +580,8 @@ const sendMessage = async () => {
   uploadedImages.value = []
   scrollToBottom()
 
-  // 路由到对应模型 API：有参考图 / 显式选 image → 图片生成；否则走文本对话
-  const goImage = hasImagesLocal || lastCreationType.value === 'image'
+  // 路由由面板上的开关决定：带参考图时强制走图片；「对话」模式走画布 Agent（能改画布）
+  const goImage = hasImagesLocal || panelMode.value === 'image'
   if (goImage) {
     messages.value.push({
       id: userId + 1,
@@ -839,7 +858,22 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       </div>
 
       <!-- 底部内容生成器 -->
+      <!-- 面板模式开关：常驻可见，不再依赖那个不好找的可拖拽选择器 -->
+      <div class="right-panel-mode-switch">
+        <button
+          type="button"
+          :class="['right-panel-mode-switch__btn', { 'is-active': panelMode === 'chat' }]"
+          @click="panelMode = 'chat'"
+        >对话（Agent）</button>
+        <button
+          type="button"
+          :class="['right-panel-mode-switch__btn', { 'is-active': panelMode === 'image' }]"
+          @click="panelMode = 'image'"
+        >图片生成</button>
+      </div>
+
       <ContentGenerator
+        :hide-type-selector="true"
         class="dimension-layout-FUl4Nj canvas-layout content-generator-XxJXPs"
         style="--content-generator-collapse-transition-duration:350ms;--content-generator-collapse-transition-timing-function:cubic-bezier(0.15,0.75,0.3,1)"
         layout="sidebar"
@@ -1066,5 +1100,31 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 
 .preview-close:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+/* 面板模式开关：两个常驻按钮，替代原来那个不好找的可拖拽类型选择器 */
+.right-panel-mode-switch {
+  display: flex;
+  gap: 6px;
+  padding: 8px 16px 0;
+}
+.right-panel-mode-switch__btn {
+  flex: 1;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0.5px solid var(--stroke-secondary, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  color: var(--text-secondary, #6b7280);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.right-panel-mode-switch__btn:hover {
+  color: var(--text-primary, #111827);
+  border-color: var(--text-secondary, #6b7280);
+}
+.right-panel-mode-switch__btn.is-active {
+  background: var(--brand-main-default, #2563eb);
+  border-color: var(--brand-main-default, #2563eb);
+  color: #fff;
 }
 </style>
