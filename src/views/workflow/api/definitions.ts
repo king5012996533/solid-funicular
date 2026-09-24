@@ -215,14 +215,67 @@ export const deleteWorkflowDefinition = async (workflowId: string) => {
   })
 }
 
+/**
+ * 画布正被流水线占用（服务端 409）。
+ *
+ * 单独一个错误类型、并且**走自己的 fetch** 而不是复用 requestWorkflowApi：
+ * 后者把错误统一成一条 message，前端就分不出「保存失败」和「被 Agent 占用」——
+ * 而这两件事对用户的意义完全不同（后者要暂存编辑、等锁释放后重发，绝不能丢）。
+ */
+export class WorkflowCanvasLockedError extends Error {
+  readonly holder?: { acquiredAt: number; expiresAt: number }
+  constructor(message: string, holder?: { acquiredAt: number; expiresAt: number }) {
+    super(message)
+    this.name = 'WorkflowCanvasLockedError'
+    this.holder = holder
+  }
+}
+
 export const autosaveWorkflowDefinitionDraft = async (
   workflowId: string,
   payload: WorkflowDefinitionVersionPayload,
+  options: { pipelineToken?: string } = {},
 ) => {
-  return await requestWorkflowApi<WorkflowDefinitionVersionDetail>({
-    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/draft`,
+  const response = await fetch(buildApiUrl(`${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/draft`), {
     method: 'PUT',
-    data: payload,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    // token 跟着业务载荷一起走：服务端从 body 里取（它同时也接受 x-pipeline-token 头）
+    body: JSON.stringify({ ...payload, pipelineToken: options.pipelineToken || undefined }),
+  })
+
+  handleUnauthorizedResponse(response.status, 'workflow-definitions')
+
+  if (response.status === 409) {
+    const body = await response.json().catch(() => null)
+    if (body?.code === 'canvas_locked_by_pipeline') {
+      throw new WorkflowCanvasLockedError(body?.message || '这块画布正在被 Agent 的这轮执行占用', body?.data?.holder)
+    }
+  }
+
+  return await readApiData<WorkflowDefinitionVersionDetail>(response)
+}
+
+/**
+ * 取/放「流水线锁」。
+ *
+ * 画布页在制片 Agent 开跑前取锁（服务端会顺带留一份快照），跑完释放；
+ * 持锁期间，**不带 token 的保存会被 409 拦下** —— 那条路走的是
+ * WorkflowCanvasLockedError，前端据此暂存编辑而不是丢掉。
+ */
+export const acquireWorkflowPipelineLock = async (workflowId: string, label?: string) => {
+  return await requestWorkflowApi<{ token: string; snapshotVersionId: string; expiresAt: number }>({
+    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock`,
+    method: 'POST',
+    data: { label },
+  })
+}
+
+export const releaseWorkflowPipelineLock = async (workflowId: string, token: string) => {
+  return await requestWorkflowApi<{ released: boolean }>({
+    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock/release`,
+    method: 'POST',
+    data: { token },
   })
 }
 

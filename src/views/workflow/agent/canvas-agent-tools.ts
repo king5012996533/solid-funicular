@@ -65,6 +65,14 @@ export interface CanvasAgentContext {
   removeNode: (id: string) => boolean;
   addEdge: (source: string, target: string) => boolean;
   selectNodes: (ids: string[], focus?: boolean) => void;
+  /**
+   * 开始/结束一轮流水线（可选）。
+   *
+   * 由助手面板在跑 Agent 前后调用：画布页据此取得「流水线锁」并留存快照，
+   * 持锁期间只有本轮自己的保存能写进画布 —— 避免 Agent 手里的节点/参考图引用被外部改动顶掉。
+   */
+  beginPipelineRun?: (label?: string) => Promise<{ ok: boolean; reason?: string; message?: string; snapshotVersionId?: string }>;
+  endPipelineRun?: () => Promise<void>;
   /** 执行某个节点（node 组件注册进来的 runGeneration） */
   runNode: (id: string) => Promise<{ ok: boolean; reason?: string }>;
   /**

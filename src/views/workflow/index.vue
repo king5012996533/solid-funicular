@@ -22,7 +22,7 @@ import {
 import { WORKFLOW_TEMPLATES } from './config/workflows'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
 import type { WorkflowDefinitionSummary } from './api/definitions'
-import { updateWorkflowDefinition } from './api/definitions'
+import { acquireWorkflowPipelineLock, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
 import type { WorkflowCanvasPosition } from './composables/workflow-orchestrator-types'
 
 // 节点组件
@@ -161,7 +161,16 @@ const selectedLibraryWorkflowDetail = ref<null | {
   }>
 }>(null)
 const autosaveTimer = ref<ReturnType<typeof setTimeout> | null>(null)
-const autosaveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
+const autosaveState = ref<'idle' | 'saving' | 'saved' | 'error' | 'locked'>('idle')
+/**
+ * 流水线锁（制片 Agent 本轮执行期间持有）。
+ *
+ * 持锁期间**只有带这个 token 的保存**能写进画布。前端自己的自动保存也要带上它 ——
+ * Agent 的改动本来就是在浏览器里改节点、再由这条自动保存写下去的，不带 token 会把自己的写入拦掉。
+ */
+const pipelineToken = ref('')
+const pipelineSnapshotVersionId = ref('')
+const pipelineRetryTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 const autosaveErrorMessage = ref('')
 const autosaveReady = ref(false)
 const autosaveInFlight = ref<Promise<void> | null>(null)
@@ -209,6 +218,9 @@ const autosaveStatusText = computed(() => {
     return '已自动保存'
   }
 
+  if (autosaveState.value === 'locked') {
+    return autosaveErrorMessage.value || 'Agent 正在改这块画布'
+  }
   if (autosaveState.value === 'error') {
     return autosaveErrorMessage.value || '保存失败'
   }
@@ -848,6 +860,7 @@ const performAutosave = async () => {
   autosaveErrorMessage.value = ''
 
   const detail = await autosaveWorkflow({
+    pipelineToken: pipelineToken.value || undefined,
     workflowId: currentWorkflowId.value || undefined,
     name: workflowName.value || `未命名工作流 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`,
     code: workflowCode.value || undefined,
@@ -875,6 +888,15 @@ const scheduleAutosave = () => {
   }, 1500)
 }
 
+/** 锁释放后自动重试那次被拦下的保存（只挂一个定时器，避免失败风暴） */
+const schedulePipelineRetry = () => {
+  if (pipelineRetryTimer.value) return
+  pipelineRetryTimer.value = setTimeout(() => {
+    pipelineRetryTimer.value = null
+    void flushAutosave()
+  }, 4000)
+}
+
 const flushAutosave = async () => {
   clearAutosaveTimer()
 
@@ -891,6 +913,20 @@ const flushAutosave = async () => {
     try {
       await performAutosave()
     } catch (error: any) {
+      /**
+       * 画布被流水线占用：**这不是失败，是稍后会重试的暂存**。
+       *
+       * 关键三点：① 不清 isCanvasDirty（编辑器里的改动还在、也不标记为已保存）；
+       * ② 明确告诉用户发生了什么，而不是丢一句「保存失败」；
+       * ③ 自动重试 —— 等 Agent 那轮结束（锁释放）就会写进去。
+       * 不做这些，症状会是「我改了半天，刷新一看全没了」—— 比不加锁更糟。
+       */
+      if (error?.name === 'WorkflowCanvasLockedError') {
+        autosaveState.value = 'locked'
+        autosaveErrorMessage.value = 'Agent 正在改这块画布，你的改动已暂存，等它这轮结束会自动保存'
+        schedulePipelineRetry()
+        return
+      }
       autosaveState.value = 'error'
       autosaveErrorMessage.value = error?.message || '自动保存失败'
     } finally {
@@ -1408,6 +1444,39 @@ const canvasAgentContext: CanvasAgentContext = {
     if (focus && ids.length) {
       void fitView({ nodes: ids, duration: 300, padding: 0.3 })
     }
+  },
+  /**
+   * 开始/结束一轮流水线（由助手面板在跑 Agent 前后来调）。
+   *
+   * 放这里而不是面板里：只有画布页知道自己的 workflowId、也只有它管着自动保存。
+   * 面板负责「什么时候开始/结束」，画布页负责「锁与保存怎么配合」。
+   */
+  beginPipelineRun: async (label?: string) => {
+    const workflowId = currentWorkflowId.value
+    if (!workflowId) return { ok: false, reason: 'no_workflow' as const }
+    try {
+      const lock = await acquireWorkflowPipelineLock(workflowId, label)
+      pipelineToken.value = lock.token
+      pipelineSnapshotVersionId.value = lock.snapshotVersionId
+      await flushAutosave()
+      return { ok: true as const, snapshotVersionId: lock.snapshotVersionId }
+    } catch (error: any) {
+      return { ok: false, reason: 'locked' as const, message: error?.message || '画布已被占用' }
+    }
+  },
+  endPipelineRun: async () => {
+    const workflowId = currentWorkflowId.value
+    const token = pipelineToken.value
+    pipelineToken.value = ''
+    if (workflowId && token) {
+      try {
+        await releaseWorkflowPipelineLock(workflowId, token)
+      } catch {
+        // 释放失败不影响本轮结果：锁有 30 分钟 TTL 兜底，不会永久占着
+      }
+    }
+    // 锁一放掉，把本轮期间被拦下的编辑补写回去
+    void flushAutosave()
   },
   runNode: (id) => runNodeById(id),
   /**

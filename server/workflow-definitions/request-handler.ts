@@ -1,4 +1,5 @@
 import { acquirePipelineLock, releasePipelineLock } from './pipeline-lock'
+import { WorkflowLockedByPipelineError } from './service'
 import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
 import { isPrismaConfigured } from '../db/prisma'
@@ -194,9 +195,17 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
     }
 
     if (req.method === 'PUT' && workflowDraftMatch) {
-      const payload = await readWorkflowDefinitionBody<WorkflowDefinitionVersionPayload>(req)
+      const payload = await readWorkflowDefinitionBody<WorkflowDefinitionVersionPayload & { pipelineToken?: string }>(req)
+      /**
+       * token 从 body 或请求头取（body 优先）。
+       *
+       * 用请求头是给「同一轮里 Agent 自己的保存」用的：前端不必把它混进业务载荷里，
+       * 也不容易在序列化时被漏掉。body 里的字段则方便手工调试。
+       */
+      const pipelineToken = String(payload?.pipelineToken || req.headers?.['x-pipeline-token'] || '')
       const data = await autosaveWorkflowDefinitionDraft(workflowDraftMatch.workflowId, payload, {
         currentUserId: currentUser.id,
+        pipelineToken,
       })
       sendJson(res, 200, { data, message: '工作流草稿已自动保存' })
       return
@@ -213,6 +222,20 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
 
     sendWorkflowDefinitionError(res, 405, 'Method Not Allowed')
   } catch (error: any) {
+    /**
+     * 画布被流水线占用 → 409，并把持锁时间一并告诉前端。
+     *
+     * 前端要据此做两件事：① 明确提示「Agent 正在改这块画布」；② 把这次编辑暂存在本地、
+     * 等锁释放后重发 —— 而不是让用户的改动静默消失（那比不加锁还糟）。
+     */
+    if (error instanceof WorkflowLockedByPipelineError) {
+      sendJson(res, 409, {
+        code: 'canvas_locked_by_pipeline',
+        message: error.message,
+        data: { holder: error.holder },
+      })
+      return
+    }
     sendWorkflowDefinitionError(res, 500, error?.message || '处理工作流请求失败')
   }
 }

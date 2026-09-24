@@ -6,6 +6,7 @@ import type {
   WorkflowVersionStatus,
 } from '@prisma/client'
 import { prisma } from '../db/prisma'
+import { getActivePipelineLock } from './pipeline-lock'
 import type {
   WorkflowDefinitionCreatePayload,
   WorkflowDefinitionListQuery,
@@ -589,10 +590,25 @@ export const createWorkflowDefinitionVersion = async (
   return serializeWorkflowRecord(result)
 }
 
+/**
+ * 画布被流水线占用的专用错误。
+ *
+ * 单独一个类型而不是就地 send 409：autosave 是服务层，不该知道 HTTP；
+ * 由 request-handler 捕获它映射成 409，前端再据此暂存编辑（不吞用户改动）。
+ */
+export class WorkflowLockedByPipelineError extends Error {
+  readonly holder: { acquiredAt: number; expiresAt: number }
+  constructor(holder: { acquiredAt: number; expiresAt: number }) {
+    super('这块画布正在被制片 Agent 的一轮执行占用，本次保存没有写入。')
+    this.name = 'WorkflowLockedByPipelineError'
+    this.holder = holder
+  }
+}
+
 export const autosaveWorkflowDefinitionDraft = async (
   workflowId: string,
   payload: WorkflowDefinitionVersionPayload,
-  context: WorkflowAccessContext,
+  context: WorkflowAccessContext & { pipelineToken?: string },
 ) => {
   const workflow = await prisma.workflowDefinition.findUnique({
     where: { id: workflowId },
@@ -617,6 +633,21 @@ export const autosaveWorkflowDefinitionDraft = async (
   }
 
   ensureWorkflowEditable(workflow, context.currentUserId)
+
+  /**
+   * 流水线持锁期间，只有带对 token 的写入才放行。
+   *
+   * 为什么要卡这个口：Agent 一轮改动画布时，**它自己的改动也是走这条自动保存**写下来的
+   * （工具在浏览器里改节点 → 防抖回写 draft）。所以这里必须区分「本轮流水线自己的保存」
+   * 和「别人/别的标签页的保存」：前者放行，后者 409 拦下并由前端暂存 ——
+   * 否则 Agent 手里的节点 id、参考图引用随时可能被外部改动顶掉，表现就是「母版图找不到、分镜人物崩坏」。
+   *
+   * 无锁时整段跳过：**没跑流水线的时候，这条判断不该对任何人产生任何影响**。
+   */
+  const activeLock = getActivePipelineLock(workflowId)
+  if (activeLock && activeLock.token !== String(context.pipelineToken || '')) {
+    throw new WorkflowLockedByPipelineError(activeLock)
+  }
 
   const result = await prisma.$transaction(async (tx) => {
     if (workflow.currentVersion?.id && workflow.currentVersion.status === 'DRAFT') {

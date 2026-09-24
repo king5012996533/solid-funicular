@@ -52,6 +52,8 @@ export interface SaveWorkflowOptions {
 }
 
 export interface AutosaveWorkflowOptions {
+  /** 流水线（制片 Agent 本轮执行）的锁 token；带它保存才不会被自己的锁拦下 */
+  pipelineToken?: string
   workflowId?: string
   name?: string
   code?: string
@@ -278,6 +280,9 @@ export const useWorkflowPersistence = () => {
         changeSummary: '系统自动保存草稿',
         status: 'DRAFT',
         ...snapshot,
+      }, {
+        // 流水线持锁期间，前端自己的保存要带上 token，否则会被服务端当成「外部改动」拦下
+        pipelineToken: options.pipelineToken,
       })
 
       const detail = await getWorkflowDefinitionDetail(targetWorkflowId)

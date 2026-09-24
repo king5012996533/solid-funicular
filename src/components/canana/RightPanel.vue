@@ -467,6 +467,14 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
       missingModelMessage: '未匹配到有效对话模型，请先在后台配置模型',
     })
 
+    // 占住画布：这一轮里只有我们自己（带 token）的保存能写进去，外部改动会被 409 拦下
+    const lockResult = await props.agentContext?.beginPipelineRun?.('制片 Agent 本轮')
+    if (lockResult && !lockResult.ok && lockResult.reason === 'locked') {
+      aiMsg.error = lockResult.message || '这块画布正在被另一个流水线执行占用，请等它结束或先停止它。'
+      aiMsg.loading = false
+      return true
+    }
+
     agentBridge.reset()
     // 这一轮的参考图存下来：Agent 调 attach_reference_images 时由桥从这里取
     turnReferenceImages.value = Array.isArray(referenceImages) ? [...referenceImages] : []
@@ -565,6 +573,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   } finally {
     // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
     if (confirmRequest.value) settleConfirm(false)
+    // 释放画布锁（成功/失败都要放，否则用户会被自己的锁挡在外面）
+    await props.agentContext?.endPipelineRun?.()
   }
 }
 
