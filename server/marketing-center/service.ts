@@ -163,6 +163,14 @@ const parsePlanPurchaseSelection = (value: string) => {
   }
 }
 
+/**
+ * 读取用户当前可用积分（对外导出，供 /api/points/balance 使用）。
+ *
+ * 导出而不是让余额接口自己查一遍：口径只有一处 —— PointAccountLog 最新一条的 balanceAfter，
+ * 与扣费/退款用的是同一个算法。两份实现迟早会算出两个数字。
+ */
+export const getPointBalance = async (userId: string) => readCurrentPointBalance(userId)
+
 const readCurrentPointBalance = async (userId: string, tx: typeof prisma | any = prisma) => {
   const latestLog = await tx.pointAccountLog.findFirst({
     where: { userId },

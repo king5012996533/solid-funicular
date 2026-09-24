@@ -23,6 +23,8 @@ import { isAdminDashboardPath } from './admin-dashboard/constants'
 import { handleAdminDashboardRequest } from './admin-dashboard/request-handler'
 import { isAdminMarketingPath } from './admin-marketing/constants'
 import { handleAdminMarketingRequest } from './admin-marketing/request-handler'
+import { isPointsPath } from './points/constants'
+import { handlePointsRequest } from './points/request-handler'
 import { isMarketingCenterPath } from './marketing-center/constants'
 import { handleMarketingCenterRequest } from './marketing-center/request-handler'
 import { isSystemConfigPath } from './system-config/constants'
@@ -508,6 +510,14 @@ const REQUEST_ROUTE_STRATEGIES: RequestRouteStrategy[] = [
     match: isAdminMarketingPath,
     handle: async (req, res) => {
       await handleAdminMarketingRequest(req, res)
+      return true
+    },
+  },
+  {
+    key: 'points',
+    match: isPointsPath,
+    handle: async (req: any, res: any) => {
+      await handlePointsRequest(req, res)
       return true
     },
   },
