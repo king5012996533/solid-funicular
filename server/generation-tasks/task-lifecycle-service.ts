@@ -111,7 +111,24 @@ export interface TaskLifecycleContext {
     pointCost: number
     sourceId: string
     associationNo: string
-    endpointType: 'chat' | 'image'
+    endpointType: 'chat' | 'image' | 'video'
+    providerId: string
+    modelKey: string
+    modelName: string
+    metaJson: Record<string, unknown>
+  }) => Promise<unknown>
+  /**
+   * 退回已扣但任务没建起来的积分（见 startGenerationTask 的 catch）。
+   *
+   * 「扣分」与「建单」分属两个事务（consumeGenerationPoints 自己提交），建单失败时
+   * 扣费不会自动回滚 —— 必须显式退，否则用户被白扣且无记录可查。
+   */
+  refundGenerationPoints: (input: {
+    userId: string
+    pointCost: number
+    sourceId: string
+    associationNo: string
+    endpointType: 'chat' | 'image' | 'video'
     providerId: string
     modelKey: string
     modelName: string
@@ -247,6 +264,21 @@ export const startGenerationTask = async (
   }
 
   let concurrencySlots: ConcurrencySlot[] = []
+  /**
+   * 「扣分」与「建单」不在同一个事务：consumeGenerationPoints 先自己提交了扣费，
+   * 之后的建单（createGenerationRecord）、回写流水、写幂等键任一步抛错，都会走到下面的 catch，
+   * 而已提交的扣费**不会**自动回滚。所以这里记下这笔扣费，失败时原路退回 ——
+   * 杜绝「分数已扣、任务却不存在」（审计 P1-1）。
+   * 任务成功交接给 runTaskInBackground 后置空：那之后的失败由任务自己的退款收口负责。
+   */
+  let committedConsume: {
+    associationNo: string
+    pointCost: number
+    endpointType: 'chat' | 'image' | 'video'
+    providerId: string
+    modelKey: string
+    modelName: string
+  } | null = null
 
   try {
     /**
@@ -289,6 +321,18 @@ export const startGenerationTask = async (
           },
         })
         : null
+
+      // 记下这笔已提交的扣费：建单失败要退回（见函数头 committedConsume 说明）。
+      if (pointLog) {
+        committedConsume = {
+          associationNo,
+          pointCost: billingDetail.pointCost,
+          endpointType: 'chat',
+          providerId,
+          modelKey,
+          modelName: billingDetail.modelName,
+        }
+      }
 
       const createdRecord = await context.createGenerationRecord(buildInitialRecordPayload(payload), currentUserId)
       await context.attachGenerationPointRecordId({
@@ -336,6 +380,7 @@ export const startGenerationTask = async (
         providerId,
         modelKey,
       })
+      committedConsume = null
       context.runTaskInBackground(task, payload)
       return createdRecord
     }
@@ -371,6 +416,18 @@ export const startGenerationTask = async (
           },
         })
         : null
+
+      // 同 chat 分支：记下已提交的扣费，建单失败要退回。
+      if (pointLog) {
+        committedConsume = {
+          associationNo,
+          pointCost: billingDetail.pointCost,
+          endpointType: 'chat',
+          providerId,
+          modelKey,
+          modelName: billingDetail.modelName,
+        }
+      }
 
       const initialPayload = {
         ...buildInitialRecordPayload(payload),
@@ -426,6 +483,7 @@ export const startGenerationTask = async (
         skill: payload.skill,
         modelKey: payload.modelKey,
       })
+      committedConsume = null
       context.runTaskInBackground(task, payload)
       return createdRecord
     }
@@ -457,15 +515,30 @@ export const startGenerationTask = async (
         pointCost: billingDetail.pointCost,
         sourceId: associationNo,
         associationNo,
-        endpointType: 'image',
+        // 必须按任务真实类型落流水：之前写死 'image'，视频任务的备注/筛选全被当成图片
+        // （备注变成「图片生成消耗积分」，后台按 endpointType=video 筛不到）。
+        endpointType: billingEndpointType,
         providerId,
         modelKey,
         modelName: billingDetail.modelName,
         metaJson: {
           source: 'generation-task',
+          taskType: strategy.key,
         },
       })
       : null
+
+    // 记下已提交的扣费：建单失败要退回（见函数头 committedConsume 说明）。
+    if (pointLog) {
+      committedConsume = {
+        associationNo,
+        pointCost: billingDetail.pointCost,
+        endpointType: billingEndpointType,
+        providerId,
+        modelKey,
+        modelName: billingDetail.modelName,
+      }
+    }
 
     const createdRecord = await context.createGenerationRecord(buildInitialRecordPayload(payload), currentUserId)
     await context.attachGenerationPointRecordId({
@@ -484,7 +557,8 @@ export const startGenerationTask = async (
       strategyKey: strategy.key,
       abortController: new AbortController(),
       associationNo,
-      billedEndpointType: 'image',
+      // 退款也按真实类型记：视频任务失败要写「视频…」，不能跟着写死成 "image"。
+      billedEndpointType: billingEndpointType,
       billedPointCost: pointLog ? billingDetail.pointCost : 0,
       billedProviderId: providerId,
       billedModelKey: modelKey,
@@ -512,6 +586,7 @@ export const startGenerationTask = async (
       providerId,
       modelKey,
     })
+    committedConsume = null
     context.runTaskInBackground(task, payload)
     return createdRecord
   } catch (error) {
@@ -519,6 +594,32 @@ export const startGenerationTask = async (
       await context.releaseTaskConcurrencySlots(concurrencySlots)
     }
     await context.clearPendingIdempotencyKey(idempotencyKey, idempotencyClaim.token as string)
+    // 扣费已提交、任务却没建起来 → 原路退回，避免「分数已扣、任务不存在」。
+    // 退款本身失败只记日志，绝不覆盖原始异常（原始异常才是调用方要看到的）。
+    if (committedConsume) {
+      try {
+        await context.refundGenerationPoints({
+          userId: currentUserId,
+          pointCost: committedConsume.pointCost,
+          sourceId: committedConsume.associationNo,
+          associationNo: committedConsume.associationNo,
+          endpointType: committedConsume.endpointType,
+          providerId: committedConsume.providerId,
+          modelKey: committedConsume.modelKey,
+          modelName: committedConsume.modelName,
+          metaJson: {
+            refundReason: 'task_create_failed',
+          },
+        })
+      } catch (refundError) {
+        context.logGenerationTask('task_create_refund_failed', {
+          userId: currentUserId,
+          associationNo: committedConsume.associationNo,
+          pointCost: committedConsume.pointCost,
+          errorMessage: refundError instanceof Error ? refundError.message : String(refundError || ''),
+        })
+      }
+    }
     throw error
   }
 }

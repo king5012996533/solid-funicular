@@ -381,7 +381,7 @@ export const consumeGenerationPoints = async (input: {
     return null
   }
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     // 行锁优先：锁住用户主表行，串行化该用户的积分账本写入。
     await lockUserBillingRow(tx, input.userId)
 
@@ -422,6 +422,12 @@ export const consumeGenerationPoints = async (input: {
       },
     })
   })
+
+  // 扣费也要失效余额缓存：退款一直有这一步，扣费之前漏了 ——
+  // 用户侧总览（/api/marketing/overview）缓存 120 秒，扣费后不失效就会在这段时间里
+  // 返回旧余额，看起来像「没扣分 / 扣错数」。口径与 refundGenerationPoints 保持一致。
+  await invalidateMarketingCenterOverviewCache(input.userId)
+  return result
 }
 
 // 上游请求失败时自动退回本次生成消耗，避免用户为失败结果付费。

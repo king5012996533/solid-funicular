@@ -54,7 +54,8 @@ export interface BatchUpsertProviderModelsPayload {
   items: AdminProviderModelPayload[]
 }
 
-const buildProviderModelsApiPath = (providerId: string) => `/api/provider-config/providers/${encodeURIComponent(providerId)}/models`
+const buildProviderModelsApiPath = (providerId: string) =>
+  `/api/provider-config/providers/${encodeURIComponent(providerId)}/models`
 
 // 查询指定厂商下的模型列表。
 export const listAdminProviderModels = async (providerId: string) => {
@@ -142,5 +143,107 @@ export const deleteAdminProviderModel = async (providerId: string, id: string) =
   return readApiData<{ id: string }>(response, {
     showSuccessMessage: true,
     successMessage: '模型已删除',
+  })
+}
+
+/**
+ * 模型定价（model_pricing）管理端接口。
+ *
+ * 图片/视频的真实扣费与预估只认这张表；模型配置里的「计费规则」对它们无效，
+ * 所以改价 / 补录新模型定价必须走这里。
+ */
+export interface AdminModelPricingPreview {
+  pointCost: number
+  usingDraft: boolean
+  detail: string
+  params: Record<string, any>
+}
+
+export interface AdminModelPricingItem {
+  modelId: string
+  providerId: string
+  category: AdminModelCategory
+  modelName: string
+  modelKey: string
+  hasPricing: boolean
+  /** 是否正在走代码草案兜底价（无定价 / 定价不合法）—— 后台要标出来提醒补录 */
+  usingDraft: boolean
+  draftReason: string
+  updatedAt: string | null
+  spec: Record<string, any> | null
+  preview: AdminModelPricingPreview
+}
+
+export interface AdminModelPricingOverviewResult {
+  items: AdminModelPricingItem[]
+  summary: { modelCount: number; pricedCount: number; draftCount: number }
+}
+
+export interface AdminModelPricingSaveResult {
+  saved: boolean
+  item: AdminModelPricingItem
+  spec?: Record<string, any>
+}
+
+const buildModelPricingApiPath = (providerId: string, modelId: string) =>
+  `${buildProviderModelsApiPath(providerId)}/${encodeURIComponent(modelId)}/pricing`
+
+// 定价总览：列出（可指定厂商）全部模型及其定价状态、草案兜底标记与试算价。
+export const listAdminModelPricing = async (query: { providerId?: string; category?: AdminModelCategory } = {}) => {
+  const params = new URLSearchParams()
+  if (query.providerId) params.set('providerId', query.providerId)
+  if (query.category) params.set('category', query.category)
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  const response = await fetch(buildApiUrl(`/api/provider-config/model-pricing${suffix}`), {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store',
+  })
+
+  return readApiData<AdminModelPricingOverviewResult>(response)
+}
+
+// 读取单个模型的定价。
+export const getAdminModelPricing = async (providerId: string, modelId: string) => {
+  const response = await fetch(buildApiUrl(buildModelPricingApiPath(providerId, modelId)), {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store',
+  })
+
+  return readApiData<AdminModelPricingItem>(response)
+}
+
+// 保存单个模型的定价；服务端会用 validateModelPricing 校验，非法配置返回 400。
+export const saveAdminModelPricing = async (
+  providerId: string,
+  modelId: string,
+  payload: { spec: Record<string, any>; dryRun?: boolean },
+) => {
+  const response = await fetch(buildApiUrl(buildModelPricingApiPath(providerId, modelId)), {
+    method: 'PUT',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  return readApiData<AdminModelPricingSaveResult>(response, {
+    showSuccessMessage: true,
+    successMessage: '模型定价已保存',
+  })
+}
+
+// 删除单个模型的定价（删掉后回落草案兜底价）。
+export const deleteAdminModelPricing = async (providerId: string, modelId: string) => {
+  const response = await fetch(buildApiUrl(buildModelPricingApiPath(providerId, modelId)), {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+
+  return readApiData<{ modelId: string; deleted: boolean }>(response, {
+    showSuccessMessage: true,
+    successMessage: '模型定价已删除',
   })
 }

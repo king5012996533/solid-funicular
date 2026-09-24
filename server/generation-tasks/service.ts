@@ -583,6 +583,8 @@ const buildTaskLifecycleContext = () => ({
   resolveGenerationPointCost,
   resolveModelPricingCost,
   consumeGenerationPoints,
+  // 建单失败时把已扣的积分退回（见 task-lifecycle-service 的 committedConsume）
+  refundGenerationPoints,
   acquireTaskConcurrencySlots: async ({ userId, providerId, skillKey }: {
     userId: string
     providerId: string

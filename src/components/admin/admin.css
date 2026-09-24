@@ -333,6 +333,12 @@
   font-size: 13px;
 }
 
+/* 模型列表里「未定价 / 走草案兜底」的标红提示，提醒运营补录定价 */
+.admin-chip--danger {
+  background: rgba(255, 77, 79, 0.12);
+  color: #d9363e;
+}
+
 .admin-list {
   display: flex;
   flex-direction: column;

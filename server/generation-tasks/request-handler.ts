@@ -4,10 +4,21 @@ import { isPrismaConfigured } from '../db/prisma'
 import { REDIS_CONFIG, consumeFixedWindowRateLimit, getRedisRuntimeSettings } from '../redis'
 import { writeScopedLog } from '../shared/logging'
 import { GENERATION_TASKS_BASE_PATH } from './constants'
-import { getGenerationTaskRecord, startGenerationTask, stopGenerationTask, subscribeGenerationTaskStream } from './service'
+import {
+  getGenerationTaskRecord,
+  startGenerationTask,
+  stopGenerationTask,
+  subscribeGenerationTaskStream,
+} from './service'
 import { resolveClientToolResult } from './canvas-agent-bridge'
 import type { AgentToolResultPayload } from '../../src/shared/generation-task-stream'
-import { GenerationTaskRequestError, readGenerationTaskBody, sendGenerationTaskError } from './shared'
+import {
+  GenerationTaskRequestError,
+  readGenerationTaskBody,
+  sendGenerationTaskError,
+  isInsufficientPointsError,
+  resolveGenerationTaskErrorStatus,
+} from './shared'
 
 // 统一输出生成任务请求异常，便于排查启动、轮询和停止链路。
 const logGenerationTaskRequestError = (detail: Record<string, unknown>) => {
@@ -21,11 +32,11 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
     ? decodeURIComponent(requestUrl.slice(GENERATION_TASKS_BASE_PATH.length + 1))
     : ''
   const taskId = taskPath.endsWith('/stop')
-    ? taskPath.slice(0, -('/stop'.length))
+    ? taskPath.slice(0, -'/stop'.length)
     : taskPath.endsWith('/events')
-      ? taskPath.slice(0, -('/events'.length))
+      ? taskPath.slice(0, -'/events'.length)
       : taskPath.endsWith('/tool-result')
-        ? taskPath.slice(0, -('/tool-result'.length))
+        ? taskPath.slice(0, -'/tool-result'.length)
         : taskPath
 
   let currentUser: { id?: string | null } | null = null
@@ -97,9 +108,12 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
      * currentUser 校验这条记录属不属于他 —— 别人的任务查不到就直接 404，
      * 不存在「拿别人的 recordId 回执把别人 Agent 带跑」这条路。
      */
-    if (req.method === 'POST' && requestUrl === `${GENERATION_TASKS_BASE_PATH}/${encodeURIComponent(taskId)}/tool-result`) {
+    if (
+      req.method === 'POST' &&
+      requestUrl === `${GENERATION_TASKS_BASE_PATH}/${encodeURIComponent(taskId)}/tool-result`
+    ) {
       await getGenerationTaskRecord(taskId, currentUser.id)
-      const body = await readGenerationTaskBody(req) as unknown as Partial<AgentToolResultPayload>
+      const body = (await readGenerationTaskBody(req)) as unknown as Partial<AgentToolResultPayload>
       const callId = String(body?.callId || '').trim()
       if (!callId) {
         throw new GenerationTaskRequestError(400, '缺少 callId，无法定位要回执的工具调用')
@@ -133,9 +147,26 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
       errorMessage: error?.message || '处理生成任务失败',
       errorStack: error?.stack || null,
     })
-    const statusCode = error instanceof GenerationTaskRequestError
-      ? error.statusCode
-      : 500
+    const statusCode = resolveGenerationTaskErrorStatus(error)
+    /**
+     * 余额不足是**可预期的业务结果**，不是服务器错误。
+     *
+     * consumeGenerationPoints 余额不够时抛 code='INSUFFICIENT_POINTS'，之前这里一律按 500 返回，
+     * 前端只能提示「服务器错误」，用户不知道该去充值。这里单独给 402，并带上当前余额/所需积分，
+     * 口径与 /api/ai/request 网关的 402 完全一致（同一份扣费函数抛出的同一个错误）。
+     */
+    if (isInsufficientPointsError(error)) {
+      sendJson(res, statusCode, {
+        message: error?.message || '积分不足',
+        error: {
+          type: 'insufficient_points',
+          message: error?.message || '积分不足',
+          currentBalance: Number(error?.currentBalance || 0),
+          requiredPoints: Number(error?.requiredPoints || 0),
+        },
+      })
+      return
+    }
     sendGenerationTaskError(res, statusCode, error?.message || '处理生成任务失败')
   }
 }

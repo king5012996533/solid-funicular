@@ -303,6 +303,8 @@
                 <span v-if="readCapabilityFlag(model.capabilityJson, 'supportsReasoning')" class="admin-chip">推理</span>
                 <span v-if="readCapabilityFlag(model.capabilityJson, 'supportsStructuredOutput')" class="admin-chip">结构化</span>
                 <span v-if="readModelPrice(model) === 0" class="admin-chip">免费</span>
+                <span v-if="modelPricingMap[model.id]?.usingDraft" class="admin-chip admin-chip--danger">{{ getModelPricingBadge(model) }}</span>
+                <span v-else-if="getModelPricingBadge(model)" class="admin-chip">{{ getModelPricingBadge(model) }}</span>
               </div>
             </div>
             <div class="admin-model-row__right">
@@ -531,6 +533,65 @@
           </div>
         </div>
 
+        <div v-show="activeModelTab === 'pricing'" class="admin-form__grid admin-model-tab-panel">
+          <div class="admin-form__field admin-form__field--full">
+            <label class="admin-form__label">计费定价（图片 / 视频真实生效）</label>
+            <div class="admin-form__hint">
+              图片 / 视频的扣费与预估只认这里的定价（model_pricing）；上面的「计费规则」只对对话链路生效。
+            </div>
+          </div>
+
+          <div v-if="pricingCurrent?.usingDraft" class="admin-form__field admin-form__field--full">
+            <div class="admin-form__hint" style="color: #d9363e">
+              当前正在走代码草案兜底价：{{ pricingCurrent?.draftReason || '未配置定价' }}
+            </div>
+          </div>
+
+          <div v-if="pricingLoading" class="admin-empty">正在读取定价...</div>
+
+          <template v-else>
+            <div class="admin-form__field">
+              <label class="admin-form__label" for="model-pricing-match-mode">匹配模式</label>
+              <select id="model-pricing-match-mode" v-model="pricingForm.matchMode" class="admin-input">
+                <option v-for="option in pricingMatchModes" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+
+            <div v-if="pricingForm.matchMode === 'label'" class="admin-form__field">
+              <label class="admin-form__label" for="model-pricing-label-axis">档位标签轴</label>
+              <select id="model-pricing-label-axis" v-model="pricingForm.labelAxis" class="admin-input">
+                <option v-for="option in pricingLabelAxes" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+
+            <div class="admin-form__field admin-form__field--full">
+              <label class="admin-form__label" for="model-pricing-tiers">档位 JSON（tiers）</label>
+              <textarea id="model-pricing-tiers" v-model="pricingForm.tiersJson" class="admin-textarea" rows="8" placeholder='[{"resolutionLabel":"每次请求","price":{"perTask":6}}]'></textarea>
+              <div class="admin-form__hint">
+                每档必须有 resolutionLabel；perImage / perTask / perSecond 只能选一种且 &gt; 0；label 模式必须有 upstreamLabel 且不重复；边归档模式区间不能重叠。保存时服务端会校验。
+              </div>
+            </div>
+
+            <div v-if="pricingCurrent?.preview" class="admin-form__field admin-form__field--full">
+              <label class="admin-form__label">按当前配置试算</label>
+              <div class="admin-form__hint">预计扣 {{ pricingCurrent.preview.pointCost }} 分 · {{ pricingCurrent.preview.detail }}</div>
+            </div>
+
+            <div v-if="!editingModelId" class="admin-form__field admin-form__field--full">
+              <div class="admin-form__hint">新模型还没有 ID，请先保存模型，再回到本页签配置定价。</div>
+            </div>
+
+            <div v-if="editingModelId" class="admin-form__field admin-form__field--full">
+              <button class="admin-button admin-button--primary" type="button" :disabled="pricingSaving" @click="handleSaveModelPricing">
+                {{ pricingSaving ? '保存中...' : '保存定价' }}
+              </button>
+              <button class="admin-button admin-button--secondary" type="button" :disabled="pricingSaving" style="margin-left: 10px" @click="handleDeleteModelPricing">
+                删除定价
+              </button>
+            </div>
+          </template>
+        </div>
+
         <div class="admin-form__footer">
           <button class="admin-button admin-button--secondary" type="button" @click="closeModelDialog">取消</button>
           <button class="admin-button admin-button--primary" type="submit" :disabled="modelSaving">
@@ -568,11 +629,16 @@ import {
 import {
   batchUpsertAdminProviderModels,
   createAdminProviderModel,
+  deleteAdminModelPricing,
   deleteAdminProviderModel,
   discoverAdminProviderModels,
+  getAdminModelPricing,
+  listAdminModelPricing,
   listAdminProviderModels,
+  saveAdminModelPricing,
   updateAdminProviderModel,
   type AdminModelCategory,
+  type AdminModelPricingItem,
   type DiscoveredProviderModelItem,
   type AdminProviderModelItem,
   type AdminProviderModelPayload,
@@ -621,11 +687,13 @@ const selectedProvider = ref<AdminProviderItem | null>(null)
 const providerDialogVisible = ref(false)
 const modelManagerVisible = ref(false)
 const modelDialogVisible = ref(false)
-type ModelDialogTab = 'basic' | 'capability' | 'advanced'
+type ModelDialogTab = 'basic' | 'capability' | 'advanced' | 'pricing'
 const modelDialogTabs: Array<{ key: ModelDialogTab; label: string; hint: string }> = [
   { key: 'basic', label: '基础信息', hint: '名称 / 计费 / 会员' },
   { key: 'capability', label: '能力配置', hint: '联网 / 思考 / 工具' },
   { key: 'advanced', label: '高级参数', hint: '上下文 / 默认参数' },
+  // 图 / 视频的真实扣费只认 model_pricing；这个页签才是改价与补录定价的入口
+  { key: 'pricing', label: '计费定价', hint: '图 / 视频 · 生效' },
 ]
 const activeModelTab = ref<ModelDialogTab>('basic')
 const discoverDialogVisible = ref(false)
@@ -691,6 +759,144 @@ const modelForm = reactive({
   // 不同上游限制不同：gpt-image-2 = 4，dall-e-3 = 1，dall-e-2 = 10。
   maxImagesPerRequest: 1,
 })
+
+/**
+ * 模型定价表单（model_pricing）。
+ *
+ * 图 / 视频的真实扣费与预估只认这张表 —— 上面的 billingPower 对它们无效，
+ * 所以这里单独给运营一个读 / 写结构化定价的入口。
+ */
+const pricingLoading = ref(false)
+const pricingSaving = ref(false)
+const pricingCurrent = ref<AdminModelPricingItem | null>(null)
+const pricingForm = reactive({
+  matchMode: 'none' as 'none' | 'label' | 'longEdge' | 'shortEdge',
+  labelAxis: 'size' as 'size' | 'quality',
+  tiersJson: '',
+})
+// 模型列表里的定价状态（有没有正式定价 / 是否还在走草案兜底）
+const modelPricingMap = ref<Record<string, AdminModelPricingItem>>({})
+
+const buildDefaultTiersJson = (category: AdminModelCategory) =>
+  JSON.stringify(
+    category === 'VIDEO'
+      ? [{ resolutionLabel: '每条', price: { perTask: 60 } }]
+      : [{ resolutionLabel: '每次请求', price: { perTask: 6 } }],
+    null,
+    2,
+  )
+
+const resetPricingState = () => {
+  pricingCurrent.value = null
+  pricingForm.matchMode = 'none'
+  pricingForm.labelAxis = 'size'
+  pricingForm.tiersJson = buildDefaultTiersJson(modelForm.category)
+}
+
+const pricingLabelAxes: Array<{ label: string; value: 'size' | 'quality' }> = [
+  { label: 'size（尺寸字符串）', value: 'size' },
+  { label: 'quality（质量档）', value: 'quality' },
+]
+
+const pricingMatchModes: Array<{ label: string; value: 'none' | 'label' | 'longEdge' | 'shortEdge' }> = [
+  { label: 'none（一口价，不分档）', value: 'none' },
+  { label: 'label（按上游档位标签，如 size / quality）', value: 'label' },
+  { label: 'longEdge（按长边区间归档）', value: 'longEdge' },
+  { label: 'shortEdge（按短边区间归档）', value: 'shortEdge' },
+]
+
+const applyPricingItemToForm = (item: AdminModelPricingItem | null) => {
+  pricingCurrent.value = item
+  const spec = (item?.spec || null) as Record<string, any> | null
+  if (spec && typeof spec === 'object') {
+    const matchMode = String(spec.matchMode || 'none')
+    const validModes = ['none', 'label', 'longEdge', 'shortEdge']
+    pricingForm.matchMode = (validModes.includes(matchMode) ? matchMode : 'none') as typeof pricingForm.matchMode
+    pricingForm.labelAxis = spec.labelAxis === 'quality' ? 'quality' : 'size'
+    pricingForm.tiersJson = JSON.stringify(spec.tiers || [], null, 2)
+    return
+  }
+  resetPricingState()
+}
+
+const loadModelPricingIntoForm = async (model: AdminProviderModelItem) => {
+  const providerId = selectedProvider.value?.id || model.providerId
+  if (!providerId) {
+    return
+  }
+  pricingLoading.value = true
+  try {
+    const item = await getAdminModelPricing(providerId, model.id)
+    applyPricingItemToForm(item)
+    modelPricingMap.value = { ...modelPricingMap.value, [model.id]: item }
+  } catch (error: any) {
+    ElMessage.error(error?.message || '读取模型定价失败')
+    resetPricingState()
+  } finally {
+    pricingLoading.value = false
+  }
+}
+
+const handleSaveModelPricing = async () => {
+  if (!selectedProvider.value) {
+    ElMessage.error('请先选择厂商')
+    return
+  }
+  if (!editingModelId.value) {
+    ElMessage.error('请先保存模型，再配置定价')
+    return
+  }
+
+  let tiers: unknown
+  try {
+    tiers = JSON.parse(pricingForm.tiersJson || '[]')
+  } catch {
+    ElMessage.error('档位 JSON 解析失败，请检查格式')
+    return
+  }
+  if (!Array.isArray(tiers) || !tiers.length) {
+    ElMessage.error('至少要有一个档位')
+    return
+  }
+
+  const spec: Record<string, any> = {
+    matchMode: pricingForm.matchMode,
+    tiers,
+    ...(pricingForm.matchMode === 'label' ? { labelAxis: pricingForm.labelAxis } : {}),
+  }
+
+  try {
+    pricingSaving.value = true
+    const result = await saveAdminModelPricing(selectedProvider.value.id, editingModelId.value, { spec })
+    applyPricingItemToForm(result.item)
+    modelPricingMap.value = { ...modelPricingMap.value, [editingModelId.value]: result.item }
+  } catch (error: any) {
+    ElMessage.error(error?.message || '保存模型定价失败')
+  } finally {
+    pricingSaving.value = false
+  }
+}
+
+const handleDeleteModelPricing = async () => {
+  if (!selectedProvider.value || !editingModelId.value) {
+    return
+  }
+  if (!window.confirm('确认删除该模型的定价吗？删除后将回落代码草案兜底价。')) {
+    return
+  }
+  try {
+    pricingSaving.value = true
+    await deleteAdminModelPricing(selectedProvider.value.id, editingModelId.value)
+    const item = await getAdminModelPricing(selectedProvider.value.id, editingModelId.value)
+    applyPricingItemToForm(item)
+    modelPricingMap.value = { ...modelPricingMap.value, [editingModelId.value]: item }
+  } catch (error: any) {
+    ElMessage.error(error?.message || '删除模型定价失败')
+  } finally {
+    pricingSaving.value = false
+  }
+}
+
 
 const discoverBatchSettings = reactive({
   category: 'CHAT' as AdminModelCategory,
@@ -837,6 +1043,8 @@ const resetModelForm = () => {
   modelForm.maxContext = 3
   modelForm.isDefault = false
   modelForm.maxImagesPerRequest = 1
+  // 定价状态一起清空（category 已重置为 CHAT，模板价跟着走）
+  resetPricingState()
 }
 
 // 编辑模型时统一回填，避免能力字段和默认参数丢失。
@@ -896,9 +1104,32 @@ const loadModels = async (providerId?: string) => {
     models.value = result.models
     selectedProvider.value = result.provider
     resetModelPage()
+    // 顺带拉定价状态，列表里标出「未定价 / 走草案兜底」的模型
+    void loadModelPricingMap(targetProviderId)
   } finally {
     modelLoading.value = false
   }
+}
+
+const loadModelPricingMap = async (providerId: string) => {
+  try {
+    const result = await listAdminModelPricing({ providerId })
+    modelPricingMap.value = Object.fromEntries(result.items.map((item) => [item.modelId, item]))
+  } catch {
+    // 定价总览拉取失败不影响模型管理主流程，只是列表里不显示定价标记
+    modelPricingMap.value = {}
+  }
+}
+
+const getModelPricingBadge = (model: AdminProviderModelItem) => {
+  const item = modelPricingMap.value[model.id]
+  if (!item) {
+    return ''
+  }
+  if (item.usingDraft) {
+    return item.hasPricing ? '定价不合法' : '未定价·走草案兜底'
+  }
+  return `已定价 ${item.preview?.pointCost ?? 0} 分`
 }
 
 const getProviderInitial = (name: string) => String(name || '').trim().slice(0, 1).toUpperCase() || 'A'
@@ -1159,6 +1390,7 @@ const openEditModelDialog = (model: AdminProviderModelItem) => {
   applyModelForm(model)
   activeModelTab.value = 'basic'
   modelDialogVisible.value = true
+  void loadModelPricingIntoForm(model)
 }
 
 const closeModelDialog = () => {

@@ -58,3 +58,27 @@ export const sendGenerationTaskError = (res: any, statusCode: number, message: s
     },
   })
 }
+
+/**
+ * 余额不足错误码：由 marketing-center 的 consumeGenerationPoints 抛出。
+ * 它是**可预期的业务结果**，不是服务器错误 —— 接口层据此返回 402 而不是 500。
+ */
+export const INSUFFICIENT_POINTS_CODE = 'INSUFFICIENT_POINTS'
+
+export const isInsufficientPointsError = (error: any) => error?.code === INSUFFICIENT_POINTS_CODE
+
+/**
+ * 生成任务接口异常 → HTTP 状态码。
+ *
+ * 单独抽出来是为了可测：402（余额不足）与 500（真·服务器错误）的边界必须钉死，
+ * 否则前端只能把「去充值」提示成「服务器错误」。
+ */
+export const resolveGenerationTaskErrorStatus = (error: any): number => {
+  if (error instanceof GenerationTaskRequestError) {
+    return error.statusCode
+  }
+  if (isInsufficientPointsError(error)) {
+    return 402
+  }
+  return 500
+}
