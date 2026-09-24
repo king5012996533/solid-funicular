@@ -11,7 +11,9 @@ import {
   findCanvasAgentTool,
   type AgentConfirmationDecision,
   type AgentConfirmationRequest,
+  type CanvasPreflightQuotaCheck,
 } from "../../src/shared/canvas-agent-tools";
+import { describePreflightQuotaTelemetry } from "./canvas-agent-quota-telemetry";
 import { Agent, Type, type AgentTool } from "./pi-runtime";
 import { createGatewayStreamFn } from "./pi-gateway-stream";
 import { createSpendGuard } from "./canvas-agent-guard";
@@ -123,6 +125,31 @@ export interface CanvasAgentTaskExecutorContext {
     detail: Record<string, unknown>,
   ) => void;
 }
+
+/**
+ * 预校验的配额检查埋点。
+ *
+ * 为什么必须落在服务端：客户端（浏览器）拿不到余额/预估时会**静默跳过**配额校验，
+ * 而这件事只发生在浏览器里 —— 不埋点的话，服务端只看到「预校验通过」，完全不知道
+ * 配额这一条规则其实没跑（这正是「闸门是死的」当初没被发现的根因）。
+ * 客户端把结论挂在工具结果的 `details.quotaCheck` 上回执过来，这里翻译成两条稳定日志：
+ *   · checked  → `preflight_quota_checked`（带 available / totalEstimated）
+ *   · skipped  → `preflight_quota_check_skipped`（带 reason，例如 balance_api_error）
+ */
+const logPreflightQuotaTelemetry = (
+  context: CanvasAgentTaskExecutorContext,
+  task: CanvasAgentExecutionTask,
+  result: { details?: Record<string, unknown> },
+) => {
+  const quotaCheck = result.details?.quotaCheck as CanvasPreflightQuotaCheck | undefined;
+  const telemetry = describePreflightQuotaTelemetry(quotaCheck);
+  if (!telemetry) return;
+  context.logGenerationTask(telemetry.stage, {
+    recordId: task.recordId,
+    userId: task.userId,
+    ...telemetry.detail,
+  });
+};
 
 /**
  * 制片 Agent 的工作手册。
@@ -440,6 +467,11 @@ export const executeCanvasAgentTaskFlow = async (
             timeoutMs,
             signal,
           });
+
+          // 预校验的配额检查结论回执过来时落服务端日志：闸门到底有没有生效，服务端必须看得见
+          if (definition.name === "preflight_check") {
+            logPreflightQuotaTelemetry(context, task, result);
+          }
 
           context.logGenerationTask("canvas_agent:tool_result", {
             recordId: task.recordId,

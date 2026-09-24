@@ -112,7 +112,9 @@ export const useCanvasAgentBridge = (options: UseCanvasAgentBridgeOptions) => {
         ok: outcome.ok,
         result: outcome.result,
         summary: outcome.summary,
-        details: { toolName: call.name, args: call.args || {} },
+        // 工具自己产出的结构化细节（例如 preflight_check 的配额检查结论）要一起回执给服务端，
+        // 服务端据此埋点 —— 只发 toolName/args 的话，这类结论在服务端就彻底丢了。
+        details: { ...(outcome.details || {}), toolName: call.name, args: call.args || {} },
       });
     } catch (error) {
       // 回执发不出去（断网/服务端已收口）只记日志：服务端会超时收口，界面也会收到终态事件

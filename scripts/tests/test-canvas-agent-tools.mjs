@@ -45,7 +45,11 @@ const createFakeContext = () => {
     const ctx = {
         snapshotNodes: () => state.nodes.map((node) => ({
             id: node.id, type: node.type, label: node.label || '', text: node.prompt || node.content || '',
+            // 必须分开给 prompt/content 与参考图/出图地址：预校验按节点类型分派字段，
+            // 只给合并后的 text 会把有提示词的节点误报成「没有提示词」。
+            prompt: node.prompt, content: node.content,
             model: node.model, size: node.size, quality: node.quality, status: node.status,
+            imageUrl: node.imageUrl, referenceImages: node.referenceImages,
         })),
         snapshotEdges: () => state.edges.map((edge) => ({ source: edge.source, target: edge.target })),
         selectedIds: () => [...state.selected],
@@ -238,6 +242,130 @@ await (async () => {
     assert(Array.isArray(parsed.availableNodeTypes) && parsed.availableNodeTypes.length > 0, '快照应带上可用节点类型，否则模型会瞎猜')
     passed += 1
     console.log('  ok   快照含定位字段、长文本已截断')
+})()
+
+console.log('== 预校验：余额/预估接入（充足 / 不足 / 降级）==')
+
+// 屏蔽真实网络：预校验里的余额、预估、参考图探测都走这个假 fetch
+const originalFetch = globalThis.fetch
+const installFetch = (routes) => {
+    globalThis.fetch = async (url, options = {}) => {
+        const target = String(url)
+        const method = String(options.method || 'GET').toUpperCase()
+        const hit = routes.find((route) => target.includes(route.match) && (!route.method || route.method === method))
+        if (hit) {
+            if (hit.throw) throw new Error('模拟网络故障')
+            const status = hit.status ?? (hit.ok === false ? 500 : 200)
+            return { ok: hit.ok !== false && status < 400, status, json: async () => hit.body ?? {} }
+        }
+        // 未命中的请求（例如参考图 HEAD 探测）当作可达
+        return { ok: true, status: 200, json: async () => ({}) }
+    }
+    return () => { globalThis.fetch = originalFetch }
+}
+
+// 建一批带提示词/模型/画幅的图片节点（预校验要有可预估的节点）
+const makeImageCtx = async (prompts) => {
+    const { ctx, state } = createFakeContext()
+    const ids = []
+    for (const prompt of prompts) {
+        const res = await run(ctx, 'add_node', { type: 'image', prompt, model: 'prov::IMAGE::m1', size: '16:9' })
+        ids.push(JSON.parse(res.result).id)
+    }
+    return { ctx, state, ids }
+}
+
+await (async () => {
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', body: { success: true, totalEstimated: 30 } },
+        { match: '/api/points/balance', method: 'GET', body: { success: true, available: 100 } },
+    ])
+    try {
+        const { ctx, ids } = await makeImageCtx(['镜头一', '镜头二', '镜头三'])
+        const res = await run(ctx, 'preflight_check', { ids })
+        const parsed = JSON.parse(res.result)
+        assert(res.ok === true, `余额充足应通过，实际：${res.summary}`)
+        assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '余额充足不该报配额问题')
+        assert(parsed.validators.includes('quota'), '配额校验器应参与本次校验')
+        assert(res.details?.quotaCheck?.status === 'checked', `埋点应为 checked：${JSON.stringify(res.details)}`)
+        assert(res.details.quotaCheck.available === 100 && res.details.quotaCheck.totalEstimated === 30, '埋点应带 available/totalEstimated')
+        passed += 1
+        console.log('  ok   余额充足：预校验通过、配额已校验（checked 且带数字）')
+    } finally { restore() }
+})()
+
+await (async () => {
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', body: { success: true, totalEstimated: 30 } },
+        { match: '/api/points/balance', method: 'GET', body: { success: true, available: 5 } },
+    ])
+    try {
+        const { ctx, ids } = await makeImageCtx(['镜头一', '镜头二', '镜头三'])
+        const res = await run(ctx, 'preflight_check', { ids })
+        const parsed = JSON.parse(res.result)
+        assert(res.ok === false, '余额不足应被拦下')
+        const quotaHit = parsed.findings.find((f) => f.code === 'quota.insufficient_for_batch')
+        assert(quotaHit, `应给出整批配额不足：${JSON.stringify(parsed.findings)}`)
+        assert(quotaHit.message.includes('30') && quotaHit.message.includes('5'), `要说清预估与现状：${quotaHit.message}`)
+        assert(quotaHit.hint.includes('充值') && quotaHit.hint.includes('节点'), `修复信号要可执行：${quotaHit.hint}`)
+        assert(res.details?.quotaCheck?.status === 'checked', '埋点应为 checked')
+        passed += 1
+        console.log('  ok   余额不足：拦下并给出「预估 X / 当前 Y / 可减少节点或充值」')
+    } finally { restore() }
+})()
+
+await (async () => {
+    // 预估接口 404 → 降级；同时留一个空提示词节点，验证「配额跳过了，其余规则照常」
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', ok: false, status: 404, body: { success: false } },
+        { match: '/api/points/balance', method: 'GET', body: { success: true, available: 999 } },
+    ])
+    try {
+        const { ctx, ids } = await makeImageCtx(['正常镜头', '', '正常镜头三'])
+        const res = await run(ctx, 'preflight_check', { ids })
+        const parsed = JSON.parse(res.result)
+        assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '拿不到预估就不该报配额问题')
+        assert(parsed.findings.some((f) => f.code === 'prompt.empty'), '其余校验规则必须照常执行（空提示词要被抓到）')
+        assert(res.details?.quotaCheck?.status === 'skipped', '埋点应为 skipped')
+        assert(res.details.quotaCheck.reason.includes('estimate_api_error'), `跳过原因应指向预估接口：${res.details.quotaCheck.reason}`)
+        passed += 1
+        console.log('  ok   预估接口失败：配额静默跳过、其余规则照常（埋点 skipped/estimate_api_error）')
+    } finally { restore() }
+})()
+
+await (async () => {
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', body: { success: true, totalEstimated: 30 } },
+        { match: '/api/points/balance', method: 'GET', throw: true },
+    ])
+    try {
+        const { ctx, ids } = await makeImageCtx(['正常镜头', '正常镜头二'])
+        const res = await run(ctx, 'preflight_check', { ids })
+        const parsed = JSON.parse(res.result)
+        assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '拿不到余额就不该报配额问题')
+        assert(res.details?.quotaCheck?.reason.includes('balance_api_error'), `跳过原因应指向余额接口：${res.details.quotaCheck.reason}`)
+        passed += 1
+        console.log('  ok   余额接口失败：配额静默跳过（埋点 skipped/balance_api_error）')
+    } finally { restore() }
+})()
+
+await (async () => {
+    // 两个接口都失败 → 报告里不含配额事实；run_nodes 的运行期 gate 不该因此误拦
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', ok: false, status: 500, body: { success: false } },
+        { match: '/api/points/balance', method: 'GET', ok: false, status: 500, body: { success: false } },
+    ])
+    try {
+        const { ctx, state, ids } = await makeImageCtx(['镜头一', '镜头二'])
+        const pre = await run(ctx, 'preflight_check', { ids })
+        assert(pre.ok === true, `降级且无其它问题时预校验应通过：${pre.summary}`)
+        assert(pre.details.quotaCheck.status === 'skipped', '应为降级跳过')
+        const ran = await run(ctx, 'run_nodes', { ids })
+        assert(ran.ok === true, `降级后 run_nodes 不该被配额误拦：${ran.result}`)
+        assert(state.ran.length === ids.length, '批量执行应真的触发了')
+        passed += 1
+        console.log('  ok   降级只影响配额这一条：run_nodes 照常执行')
+    } finally { restore() }
 })()
 
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)

@@ -195,6 +195,12 @@ check('余额在预校验之后被吃掉 → 拒绝，并说清差多少', () =>
   assert(result.reason.includes('10') && result.reason.includes('30'), `要说清现状与需要：${result.reason}`)
 })
 
+check('报告里没查过配额（降级）→ 运行期不按配额误拦', () => {
+  // 降级时 facts 里不放 availablePoints：运行期复核不能拿「没查过」当「当时够钱」，更不能反过来误拦
+  const result = verify({ report: { facts: { reachableReferences: [] } } }, { availablePoints: 0 })
+  assert(result.ok === true, `降级报告不该被配额误拦，实际 ${JSON.stringify(result)}`)
+})
+
 check('参考图在预校验之后被删 → 拒绝（这是「人物崩坏」最常见的来源）', () => {
   const result = verify({}, { unreachableReferences: ['/uploads/master.png'] })
   assert(result.ok === false && result.code === 'reference_lost', '应报 reference_lost')

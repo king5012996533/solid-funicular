@@ -14,6 +14,7 @@ import {
   PREFLIGHT_REPORT_TTL_MS,
   runCanvasPipelineValidation,
   verifyPreflightReport,
+  type CanvasValidationContext,
   type PreflightReport,
 } from "@/shared/canvas-pipeline-validation";
 import {
@@ -21,7 +22,13 @@ import {
   describeConfirmationDecision,
   type AgentConfirmationDecision,
   type AgentConfirmationRequest,
+  type CanvasPreflightQuotaCheck,
 } from "@/shared/canvas-agent-tools";
+import {
+  requestPointsBalance,
+  requestPointsEstimate,
+  type PointsEstimateItem,
+} from "@/api/points";
 
 /**
  * 最近一次预校验报告。
@@ -39,6 +46,14 @@ const MAX_BATCH_COLUMNS = 4;
 const MAX_BATCH_RUNS = 12;
 /** 一次批量连线的上限 */
 const MAX_BATCH_LINKS = 40;
+/**
+ * 预校验里余额/预估两个接口各自的超时预算。
+ *
+ * 刻意压到 1.5 秒：预校验是**批量生成前的同步一步**，在用户点「执行」的路径上；
+ * 一个慢接口（网络抖动、服务端排队）不能把整次预校验拖住。超时即按失败处理 →
+ * 配额这一条静默跳过，其余校验照常跑（拿不到余额不该阻断别的问题的发现）。
+ */
+const PREFLIGHT_QUOTA_TIMEOUT_MS = 1500;
 
 export interface CanvasAgentNodeSnapshot {
   id: string;
@@ -152,6 +167,14 @@ export interface CanvasAgentToolResult {
   result: string;
   /** 给 UI 展示的一行记录 */
   summary: string;
+  /**
+   * 结构化细节（回执给服务端做埋点/留痕用）。
+   *
+   * 为什么需要它：有些结论（例如 preflight_check 的「配额到底查了没有」）只出现在浏览器里，
+   * 但排查「闸门是不是被静默跳过」必须在**服务端**看得见。走 details 回执比让服务端正则去
+   * 解析给模型看的 result 文本要可靠。
+   */
+  details?: Record<string, unknown>;
 }
 
 const text = (value: unknown, max = 400) => {
@@ -159,6 +182,105 @@ const text = (value: unknown, max = 400) => {
     .replace(/\s+/g, " ")
     .trim();
   return raw.length > max ? `${raw.slice(0, max)}…` : raw;
+};
+
+/**
+ * 给一次网络请求套上超时：到点就 abort。
+ *
+ * 用 AbortController 而不是 Promise.race —— race 只是「结果不要了」，底层请求还在跑；
+ * abort 才真正把连接释放掉。预校验会被反复调用，不释放会在批量场景里堆积。
+ */
+const withTimeout = async <T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await run(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * 探「这一批余额够不够」所需的外部事实。
+ *
+ * 折算方式（为什么这么算）：`/api/points/estimate` 给的是**整批合计** `totalEstimated`，
+ * 而校验器的整批判据是 `estimatedCostPerUnit × 可执行节点数 ≥ 可用余额`。把
+ * `estimatedCostPerUnit` 取成 `totalEstimated / 可执行节点数`，两者相乘还原出来的整批总额
+ * 就与接口给的 `totalEstimated` 一致 —— 于是「配额不足」这条结论与整批预估说的是同一件事，
+ * 不会出现「预估接口说够、校验器说不够」的自相矛盾。
+ *
+ * 降级（必须严格遵守）：任一接口失败（401 / 5xx / 超时 / 字段缺失）就**不注入**对应字段，
+ * 配额校验器看到 undefined 会静默跳过（它本就不该在「不知道余额」时假装知道），其余校验规则
+ * 照常执行。结论通过 quotaCheck 回传，供服务端埋点 —— 别让「闸门被跳过」这件事悄悄发生。
+ */
+const collectPreflightQuota = async (
+  visualNodes: CanvasAgentNodeSnapshot[],
+): Promise<{
+  availablePoints?: number;
+  estimatedCostPerUnit?: number;
+  estimatedCostTotal?: number;
+  quotaCheck: CanvasPreflightQuotaCheck;
+}> => {
+  // 没有可执行节点就没有可预估的消耗：连接口都不必打，配额天然满足。
+  if (!visualNodes.length) {
+    return { quotaCheck: { status: "skipped", reason: "no_estimatable_nodes", nodeCount: 0 } };
+  }
+
+  const items: PointsEstimateItem[] = visualNodes.map((node) => ({
+    model: node.model || "",
+    count: 1,
+    // 画幅能拿到就带上：定价若按画幅分档，漏传会低估；拿不到时服务端按默认算
+    ...(node.size ? { size: node.size } : {}),
+  }));
+
+  // 两个接口并行、各自独立超时：串行会把预校验的等待时间叠起来。
+  const [estimate, balance] = await Promise.all([
+    withTimeout((signal) => requestPointsEstimate(items, signal), PREFLIGHT_QUOTA_TIMEOUT_MS)
+      .then((value) => ({ ok: true as const, value }))
+      .catch(() => ({ ok: false as const })),
+    withTimeout((signal) => requestPointsBalance(signal), PREFLIGHT_QUOTA_TIMEOUT_MS)
+      .then((value) => ({ ok: true as const, value }))
+      .catch(() => ({ ok: false as const })),
+  ]);
+
+  // 字段缺失也算失败：success 不为 true 或数字字段不是 number，一律按「拿不到」处理
+  const totalEstimated = estimate.ok
+    && estimate.value?.success === true
+    && typeof estimate.value.totalEstimated === "number"
+    ? estimate.value.totalEstimated
+    : undefined;
+  const available = balance.ok
+    && balance.value?.success === true
+    && typeof balance.value.available === "number"
+    ? balance.value.available
+    : undefined;
+
+  const bothReady = typeof available === "number" && typeof totalEstimated === "number";
+  return {
+    ...(typeof available === "number" ? { availablePoints: available } : {}),
+    ...(typeof totalEstimated === "number"
+      ? { estimatedCostPerUnit: totalEstimated / visualNodes.length }
+      : {}),
+    ...(bothReady ? { estimatedCostTotal: totalEstimated } : {}),
+    quotaCheck: bothReady
+      ? {
+          status: "checked",
+          available,
+          totalEstimated,
+          nodeCount: visualNodes.length,
+        }
+      : {
+          status: "skipped",
+          reason: [
+            typeof available !== "number" ? "balance_api_error" : "",
+            typeof totalEstimated !== "number" ? "estimate_api_error" : "",
+          ].filter(Boolean).join(","),
+          nodeCount: visualNodes.length,
+        },
+  };
 };
 
 /** 工具清单：这是「Agent 能对画布做什么」的唯一来源，模型看到的描述也来自这里 */
@@ -379,11 +501,25 @@ export const executeCanvasAgentTool = async (
         }
       }));
 
+      /**
+       * 配额：这一批要花多少、现在有多少。
+       *
+       * 这两个数字（`/api/points/estimate`、`/api/points/balance`）此前**没有任何调用方**，
+       * 于是配额校验器直接短路 —— 后果是「余额不足」要跑到真扣费才炸（那时图已经在生成了）。
+       * 这里把它接上：能拿到就注入，预校验就能提前拦下；拿不到就降级（见 collectPreflightQuota），
+       * 不阻断其余规则的发现。
+       */
+      const estimatable = targets.filter((node) => node.type === "image" || node.type === "video");
+      const quota = await collectPreflightQuota(estimatable);
+      const context: CanvasValidationContext = { referenceReachability: reachability };
+      if (typeof quota.availablePoints === "number") context.availablePoints = quota.availablePoints;
+      if (typeof quota.estimatedCostPerUnit === "number") context.estimatedCostPerUnit = quota.estimatedCostPerUnit;
+
       const report = runCanvasPipelineValidation({
         targets,
         allNodes,
         edges,
-        context: { referenceReachability: reachability },
+        context,
       });
 
       lastPreflightReport = {
@@ -394,6 +530,10 @@ export const executeCanvasAgentTool = async (
         expiresAt: Date.now() + PREFLIGHT_REPORT_TTL_MS,
         facts: {
           reachableReferences: refUrls.filter((url) => reachability[url]),
+          // 只有真查过配额才记这两个事实：没查过却记上，运行期复核会误以为「当时够钱」
+          ...(typeof quota.availablePoints === "number" && typeof quota.estimatedCostTotal === "number"
+            ? { availablePoints: quota.availablePoints, estimatedCost: quota.estimatedCostTotal }
+            : {}),
         },
       };
 
@@ -405,6 +545,8 @@ export const executeCanvasAgentTool = async (
       return {
         ok: report.runnable,
         result: JSON.stringify({ runnable: report.runnable, blockedNodeIds: report.blockedNodeIds, findings: report.findings, validators: report.validators }),
+        // 配额检查结论走 details 回执给服务端埋点（浏览器 console 服务端看不到）
+        details: { quotaCheck: quota.quotaCheck },
         summary: report.runnable
           ? `预校验通过（${report.checkedNodes} 个节点）`
           : `预校验未通过：${report.blockedNodeIds.length} 个节点有必须修的问题\n${lines.join("\n")}`,

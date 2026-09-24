@@ -358,6 +358,27 @@ export const findCanvasAgentTool = (name: string) =>
   CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === name);
 
 /**
+ * `preflight_check` 的配额检查结论（前后端共用的数据形状）。
+ *
+ * 为什么单独一个类型：真正的余额/预估是在**浏览器**里取的（只有它拿得到画布节点的模型键），
+ * 而「配额到底查了没有」这件事必须出现在**服务端日志**里 —— 否则「闸门被静默跳过」在服务端
+ * 完全看不出来（表现就是「明明余额不足却没拦住」）。所以客户端把结论挂在工具结果的 details 上，
+ * 服务端按这个类型读取并埋点。放到共享文件，是为了让两侧改字段时同步编译失败、不漂移。
+ */
+export interface CanvasPreflightQuotaCheck {
+  /** checked = 两个接口都拿到、配额参与了校验；skipped = 拿不到，配额校验静默跳过 */
+  status: "checked" | "skipped";
+  /** skipped 时的原因（balance_api_error / estimate_api_error / no_estimatable_nodes） */
+  reason?: string;
+  /** 当前可用积分（checked 时有） */
+  available?: number;
+  /** 整批预估消耗（checked 时有） */
+  totalEstimated?: number;
+  /** 参与预估/校验的可执行节点数 */
+  nodeCount?: number;
+}
+
+/**
  * `request_confirmation` 的参数与回执。
  *
  * 单独定义类型（而不是让两边各写一份 `any`）：这是**半自动闸门**的数据形状，
