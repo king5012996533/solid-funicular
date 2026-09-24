@@ -265,11 +265,39 @@ model AiModel {
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
   provider          AiProvider    @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  pricing           ModelPricing?
 
   @@unique([providerId, category, modelKey], map: "uk_ai_models_provider_category_key")
   @@index([providerId, category, sortOrder], map: "idx_ai_models_provider_category_sort")
   @@index([isEnabled, category], map: "idx_ai_models_enabled_category")
   @@map("ai_models")
+}
+
+/// 模型定价（结构化，与能力配置分离）。
+///
+/// 为什么单独一张表而不是塞进 ai_models 的一列：
+/// 1. 能力与定价是两条独立轴 —— capabilityJson 描述「这个模型有什么档」，
+///    定价描述「每个档多少钱」。它们各自演进（加档位 / 调价），不该互相牵动。
+/// 2. 「该模型没有定价记录」本身是有意义的状态（→ 回落到代码里的草案价并告警），
+///    塞成 null 列的话，这个状态和「有配置但字段为空」就分不开了。
+///
+/// priceJson 的结构（详见 src/shared/model-pricing-rules.ts）：
+///   图片：{ perImage: number }  或  { perImageTiers: { '1k': n, '2k': n, ... } }
+///   视频：{ perSecond: n, minSeconds?, baseFee? }  或  { perTask: n }（二者互斥，保存时校验）
+model ModelPricing {
+  id         String        @id @default(cuid()) @db.VarChar(36)
+  modelId    String        @unique(map: "uk_model_pricing_model") @map("model_id") @db.VarChar(36)
+  /// 与 ai_models.category 保持一致（写入时由服务端按模型类别填充，并校验不允许不一致）
+  type       ModelCategory
+  priceJson  Json          @map("price_json")
+  /// 是否正在使用代码里的草案兜底价（后台据此标红提醒运营补录正式定价）
+  usingDraft Boolean       @default(false) @map("using_draft")
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+
+  model AiModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@map("model_pricing")
 }
 
 /// 技能配置主表。

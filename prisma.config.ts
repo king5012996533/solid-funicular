@@ -19,5 +19,13 @@ export default defineConfig({
   },
   datasource: {
     url: process.env.DATABASE_URL || (isGenerateOnly ? 'mysql://placeholder:placeholder@127.0.0.1:3306/placeholder' : env('DATABASE_URL')),
+    /**
+     * 影子库（`prisma migrate dev` 用它演练迁移）。
+     *
+     * 不指定的话 Prisma 会**临时创建一个** —— 而应用账号是「只有业务库权限」的最小权限账号，
+     * 建库会被拒（实测 P3014 / P1010）。.env 里本来就声明了 SHADOW_DATABASE_URL，
+     * 指向预建好的影子库，这里接上即可，也不用为了迁移把 CREATE 权限开给应用账号。
+     */
+    shadowDatabaseUrl: process.env.SHADOW_DATABASE_URL || undefined,
   },
 })
