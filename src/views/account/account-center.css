@@ -746,6 +746,8 @@
 
 @media (max-width: 768px) {
   .container-VHHcGs {
+    /* 项目没有全局 border-box：width:100% 再加 32px 左右内边距会顶出视口右侧 */
+    box-sizing: border-box;
     padding-left: 16px;
     padding-right: 16px;
     padding-top: 32px;

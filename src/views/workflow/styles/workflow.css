@@ -167,6 +167,72 @@
   transition: padding-right 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* 窄屏提示条：画布不适合手机编辑，给明确提示而不是静默裁切 */
+.workflow-mobile-hint {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  /* 竖排：提示文字占满整行，按钮单独一行靠右，避免两者在同一行里互相挤窄 */
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  z-index: 1200;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--canvas-bg-block-default, rgba(15, 15, 18, 0.9));
+  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.16));
+  color: var(--text-secondary, #b8c0cc);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.workflow-mobile-hint__text {
+  min-width: 0;
+}
+.workflow-mobile-hint__close {
+  align-self: flex-end;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary, #f5fbff);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.workflow-mobile-hint__close:hover {
+  background: var(--canvas-float-block-hover, rgba(255, 255, 255, 0.08));
+}
+@media (min-width: 769px) {
+  .workflow-mobile-hint {
+    display: none;
+  }
+}
+
+/**
+ * 窄屏下助手面板改「整屏浮层」。
+ *
+ * 面板默认宽 560px（还是用户可拖的），比 390px 的手机屏还宽：一打开不仅自己出屏，
+ * 还会给画布加上 padding-right: 560px，把顶栏工具一起挤到屏幕外。
+ * 手机上画布本来就没有可编辑空间，让面板直接盖满整屏、画布不预留位置更合理。
+ */
+@media (max-width: 768px) {
+  .workflow-container {
+    /* 内联 style 设的变量也要压过去，否则面板宽度仍按桌面值走 */
+    --assistant-panel-width: 100vw !important;
+  }
+  .workflow-container.workflow-right-panel-open .workflow-workbench {
+    padding-right: 0;
+  }
+  .workflow-assistant-resizer {
+    /* 整屏浮层没有可拖的边界 */
+    display: none;
+  }
+}
+
 /* ========== Vue Flow 画布覆盖样式 ========== */
 
 /* 画布外层壳：承担 dragover/drop + 浮层 absolute 定位基准；填满 .workflow-main 剩余高度 */

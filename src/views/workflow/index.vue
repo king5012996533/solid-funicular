@@ -1554,6 +1554,18 @@ const handleAssistantAddImage = ({ url }: { url: string }) => {
   addNode('image', center, { url, label: '助手生成' })
 }
 
+/**
+ * 窄屏提示：画布依赖鼠标（拖拽/连线/缩放）和大屏空间，手机上节点会挤成一团、助手面板也比屏幕宽。
+ * 与其把半个界面裁掉，不如给一条明确提示；用户点掉后仍可平移/查看画布。
+ */
+const isNarrowViewport = ref(false)
+const mobileHintDismissed = ref(false)
+const showMobileHint = computed(() => isNarrowViewport.value && !mobileHintDismissed.value)
+let narrowViewportQuery: MediaQueryList | null = null
+const syncNarrowViewport = (event: MediaQueryList | MediaQueryListEvent) => {
+  isNarrowViewport.value = Boolean(event.matches)
+}
+
 onMounted(() => {
   initSampleData()
   initHistory()
@@ -1573,12 +1585,18 @@ onMounted(() => {
   }
 
   autosaveReady.value = true
+
+  narrowViewportQuery = window.matchMedia('(max-width: 768px)')
+  syncNarrowViewport(narrowViewportQuery)
+  narrowViewportQuery.addEventListener('change', syncNarrowViewport)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleSpaceDown)
   window.removeEventListener('keyup', handleSpaceUp)
   clearAutosaveTimer()
+  narrowViewportQuery?.removeEventListener('change', syncNarrowViewport)
+  narrowViewportQuery = null
 })
 
 watch(() => route.query.workflowId, (workflowId) => {
@@ -1625,6 +1643,18 @@ watch(canvasSnapshot, () => {
     :class="{ 'workflow-right-panel-open': !isAssistantCollapsed, 'workflow-resizing-panel': resizingAssistant }"
     :style="{ '--assistant-panel-width': `${assistantPanelWidth}px` }"
   >
+    <div v-if="showMobileHint" class="workflow-mobile-hint" role="status">
+      <span class="workflow-mobile-hint__text">
+        画布编辑更适合桌面端：手机上节点与连线会挤在一起，拖拽、连线、缩放都不方便。
+      </span>
+      <button
+        type="button"
+        class="workflow-mobile-hint__close"
+        @click="mobileHintDismissed = true"
+      >
+        仍要查看
+      </button>
+    </div>
     <div class="workflow-workbench">
       <div class="workflow-main">
         <div

@@ -13,6 +13,7 @@
     </div>
     <div
       v-if="showWorkbenchGenerator"
+      class="home-header-generator-host"
       :class="{ 'home-header-preview-mask': previewReadonly }"
     >
       <!-- 首页配置：不可折叠、默认展开、弹窗强制向下弹出 -->
@@ -177,6 +178,21 @@ const handleSend = (message: string, type: CreationType, options?: HomeHeaderSen
 .home-header-content-generator {
   width: min(1195px, calc(100vw - 32px));
   margin: 0 auto;
+}
+
+/* 窄屏：min(1195px, 100vw - 32px) 没算掉左侧 76px 侧边栏，生成器会比内容区还宽。
+   而且 .home-header 是 flex，生成器外层 div 作为 flex item 默认 min-width:auto，
+   会被内容的 min-content（工具栏一行 ~769px）撑开、居中后左右都出界。
+   手机上让宿主占满内容区且允许收缩，内容交给内部 flex 自己换行/裁剪。 */
+@media (max-width: 768px) {
+  .home-header-generator-host {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .home-header-content-generator {
+    width: 100%;
+  }
 }
 
 .home-header-site-description-canana {

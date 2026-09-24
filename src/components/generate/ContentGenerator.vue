@@ -2142,9 +2142,18 @@ onUnmounted(() => {
 .dimension-layout-FUl4Nj .default-layout-eH8Zi1 {
   margin: 0 auto;
   max-width: 924px;
-  min-width: 622px;
   /*position: sticky;*/
   width: 100%;
+}
+
+/* 622px 是生成器「一行放得下工具栏 + 输入框」的宽度，属于桌面约束。
+   窄屏还锁着这个下限，输入区会以 622px 撑出 390px 的视口，右半边被 overflow:hidden 吃掉。
+   只在 ≥622px 的视口保留，手机下交给 width/max-width 自适应。 */
+@media screen and (min-width: 622px) {
+  .dimension-layout-FUl4Nj.default-layout-eH8Zi1,
+  .dimension-layout-FUl4Nj .default-layout-eH8Zi1 {
+    min-width: 622px;
+  }
 }
 
 @media screen and (max-width: 1920px) {

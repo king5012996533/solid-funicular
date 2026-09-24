@@ -647,6 +647,8 @@ body[lv-theme='light'] .login-modal-host {
 
 @media (max-width: 640px) {
   .login-modal-host.lv-modal-wrapper.lv-modal-wrapper-align-center {
+    /* 没有 border-box 时 width:100% 之外还要加 16px 内边距，弹窗会被整体右移出屏 */
+    box-sizing: border-box;
     padding: 16px;
     white-space: normal;
   }

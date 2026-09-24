@@ -1195,9 +1195,17 @@ const sidebarDefaultSession = computed<GenerateConversationSidebarItem>(() => ({
   imageUrl: generationSessions.value.find(session => session.isDefault)?.coverImageUrl || '',
 }))
 
+// 窄屏（手机）没有空间把会话栏和主区并排：主区只剩几十像素，内容全被裁掉。
+// 手机上强制走折叠态（渲染成小胶囊按钮），主区才能拿到整幅宽度。
+const isNarrowViewport = ref(false)
+let narrowViewportQuery: MediaQueryList | null = null
+const syncNarrowViewport = (event: MediaQueryList | MediaQueryListEvent) => {
+  isNarrowViewport.value = Boolean(event.matches)
+}
+
 // 空会话且没有最近记录时，左侧空栏没有信息价值，直接走折叠态保证主区居中。
 const isConversationSidebarEffectivelyCollapsed = computed(() => {
-  if (conversationSidebarCollapsed.value) {
+  if (isNarrowViewport.value || conversationSidebarCollapsed.value) {
     return true
   }
   return isCurrentSessionEmpty.value && sidebarRecentSessions.value.length === 0
@@ -2976,6 +2984,9 @@ const handlePageClick = (e: MouseEvent) => {
 onMounted(() => {
   currentSessionId.value = readStoredCurrentSessionId()
   conversationSidebarCollapsed.value = readStoredConversationSidebarCollapsed()
+  narrowViewportQuery = window.matchMedia('(max-width: 768px)')
+  syncNarrowViewport(narrowViewportQuery)
+  narrowViewportQuery.addEventListener('change', syncNarrowViewport)
   void loadPersistedGenerationSessions()
   void loadPersistedGeneratingRecords()
 
@@ -3043,6 +3054,8 @@ onUnmounted(() => {
 
   taskStreamControllers.forEach(controller => controller.abort())
   taskStreamControllers.clear()
+  narrowViewportQuery?.removeEventListener('change', syncNarrowViewport)
+  narrowViewportQuery = null
 })
 </script>
 

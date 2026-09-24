@@ -962,9 +962,15 @@
 .default-layout-l1Aja0, .task-indicator-container-W5j74R {
     margin: 0 auto;
     max-width: 924px;
-    min-width: 622px;
     position: sticky;
     width: 100%
+}
+
+/* 622px 是桌面最小宽度；窄屏（手机）锁死会把弹窗里的生成器顶出视口右侧 */
+@media screen and (min-width: 622px) {
+    .default-layout-l1Aja0, .task-indicator-container-W5j74R {
+        min-width: 622px
+    }
 }
 
 @media screen and (max-width: 1920px) {

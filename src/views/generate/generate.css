@@ -218,9 +218,16 @@
 .global-dreamina-container {
     height: 100vh;
     min-height: 665px;
-    min-width: 810px;
     overflow: hidden;
     width: 100vw
+}
+
+/* 同 styles.css：#csr-root / .global-dreamina-container 在窄屏不能锁 810px。
+   这里跟着去掉硬下限，只在 ≥810px 的视口恢复，桌面端不受影响。 */
+@media (min-width: 810px) {
+    .global-dreamina-container {
+        min-width: 810px
+    }
 }
 
 .container-bG3PQ9 {
@@ -1382,7 +1389,9 @@
     top: 20px
 }
 
-@media screen and (max-width: 810px) {
+@media screen and (max-width: 810px) and (min-width: 768px) {
+    /* 平板区间保留 750px，让记录卡片维持一行多列；
+       手机（<768px）不能锁死 —— 750px 会被外层 overflow:hidden 裁掉大半，既看不全也滚不到。 */
     .record-list-container {
         min-width: 750px
     }
@@ -3718,9 +3727,15 @@ div.normal-button-mS74ha {
 .default-layout-bOIxyJ, .task-indicator-container-flqXza {
     margin: 0 auto;
     max-width: 924px;
-    min-width: 622px;
     position: sticky;
     width: 100%
+}
+
+/* 同 styles.css：622px 下限只属于桌面，窄屏保留会把生成器撑出视口 */
+@media screen and (min-width: 622px) {
+    .default-layout-bOIxyJ, .task-indicator-container-flqXza {
+        min-width: 622px
+    }
 }
 
 .default-layout-bOIxyJ {
@@ -3730,6 +3745,14 @@ div.normal-button-mS74ha {
     justify-content: center;
     transition: max-width var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function), height var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function), box-shadow var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function), opacity var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function), transform var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function);
     will-change: max-width, height, box-shadow, opacity, transform
+}
+
+/* 项目没有全局 border-box：width:100% 再叠加这条 1px 边框，窄屏下会多顶出 2px。
+   只在窄屏加 border-box，桌面端布局不变。 */
+@media screen and (max-width: 768px) {
+    .default-layout-bOIxyJ {
+        box-sizing: border-box
+    }
 }
 
 @keyframes enable-visibility-hidden-kIvR_L {

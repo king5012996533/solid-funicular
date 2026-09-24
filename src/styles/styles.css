@@ -2267,9 +2267,17 @@ body,html {
         .global-dreamina-container {
             height: 100vh;
             min-height: 665px;
-            min-width: 810px;
             overflow: hidden;
             width: 100vw
+        }
+
+        /* 810px 是桌面端的最小可用宽度，窄屏（手机）不能锁死：容器被撑到 810px 后
+           又叠加了 overflow:hidden，视口只有 390px 时右侧内容既看不见也滚不到。
+           只在 ≥810px 的视口保留这个下限，桌面端（含 1280/1600）布局完全不变。 */
+        @media (min-width: 810px) {
+            .global-dreamina-container {
+                min-width: 810px
+            }
         }
 
         .container-aVP6Vy {
@@ -3089,6 +3097,18 @@ body,html {
             display: flex;
             font-size: 24px;
             font-weight: 600
+        }
+
+        /* 首页大标题是 flex 单行不换行，24px 字号在 390px 视口下宽 334px 顶出右边缘。
+           窄屏允许换行并缩小字号，桌面端（≥769px）完全不变。 */
+        @media screen and (max-width: 768px) {
+            .header-bto0dS {
+                flex-wrap: wrap;
+                font-size: 18px;
+                justify-content: center;
+                line-height: 1.5;
+                padding-bottom: 20px
+            }
         }
 
         .home-type-select-option {
@@ -4654,6 +4674,37 @@ body,html {
             position: relative;
             width: 312px;
             z-index: 999
+        }
+
+        /* 窄屏：312px 固定宽度 + flex item 默认 min-width:auto，会把搜索框连同
+           右半截一起顶出视口。这里让 tab 行可以换行，搜索那一组独占第二行。 */
+        @media screen and (max-width: 768px) {
+            .search-container {
+                box-sizing: border-box;
+                flex: 1 1 auto;
+                max-width: 100%;
+                min-width: 0;
+                width: auto
+            }
+
+            .container-o9SXsC {
+                gap: 8px
+            }
+
+            .container-nEcHp3 {
+                min-width: 0
+            }
+
+            .lv-tabs-header-scroll {
+                flex-wrap: wrap;
+                height: auto
+            }
+
+            .lv-tabs-header-extra {
+                flex: 1 1 100%;
+                height: auto;
+                margin-left: 0
+            }
         }
 
         .search-container:hover .lv-input-group-addafter {
@@ -7435,9 +7486,17 @@ body,html {
         .default-layout-bOIxyJ,.task-indicator-container-flqXza {
             margin: 0 auto;
             max-width: 924px;
-            min-width: 622px;
             position: sticky;
             width: 100%
+        }
+
+        /* min-width:622px 是桌面端生成器的最小可用宽度：窄屏保留下限会把输入区
+           撑到视口之外（390px 视口下右半边被 overflow:hidden 裁掉、也滚不到）。
+           只在 ≥622px 的视口恢复，桌面端（≥1280）不受影响。 */
+        @media screen and (min-width: 622px) {
+            .default-layout-bOIxyJ,.task-indicator-container-flqXza {
+                min-width: 622px
+            }
         }
 
         @media screen and (max-width: 1920px) {
