@@ -1,7 +1,7 @@
 import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
-import { getPointBalance } from '../marketing-center/service'
-import { POINTS_BALANCE_PATH } from './constants'
+import { getPointBalance, resolveGenerationPointCost } from '../marketing-center/service'
+import { POINTS_BALANCE_PATH, POINTS_ESTIMATE_PATH } from './constants'
 
 /**
  * `GET /api/points/balance` —— 只返回「当前可用积分」这一个数字。
@@ -17,8 +17,12 @@ import { POINTS_BALANCE_PATH } from './constants'
  * 不另发明一套算法）。
  */
 export const handlePointsRequest = async (req: any, res: any) => {
+  const requestUrl = new URL(String(req.url || ''), 'http://localhost')
+  if (requestUrl.pathname === POINTS_ESTIMATE_PATH) {
+    await handlePointsEstimateRequest(req, res)
+    return
+  }
   try {
-    const requestUrl = new URL(String(req.url || ''), 'http://localhost')
     if (req.method !== 'GET' || requestUrl.pathname !== POINTS_BALANCE_PATH) {
       sendJson(res, 404, { success: false, message: 'Not Found' })
       return
@@ -41,5 +45,109 @@ export const handlePointsRequest = async (req: any, res: any) => {
   } catch (error: any) {
     // 5xx：同样让调用方走降级分支，不阻断预校验整体流程
     sendJson(res, 500, { success: false, message: error?.message || '读取积分余额失败' })
+  }
+}
+
+/**
+ * 画布的模型选择键 → 计费函数要的三个参数。
+ *
+ * 画布节点存的是 `providerId::CATEGORY::modelKey`（模型选择器的选择键），
+ * 而 `resolveGenerationPointCost` 要 providerId + modelKey + endpointType 三项。
+ * 在这里解析一次，调用方（前端）不必知道计费函数的入参形状。
+ */
+const parseModelSelectionKey = (raw: string) => {
+  const parts = String(raw || '').split('::').map((item) => item.trim())
+  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+    return { providerId: parts[0], endpointType: parts[1].toLowerCase(), modelKey: parts[2] }
+  }
+  return null
+}
+
+/**
+ * `POST /api/points/estimate` —— 一批节点的预估消耗。
+ *
+ * 为什么必须由服务端算：真实扣费走的是 `resolveGenerationPointCost`（按模型定价）。
+ * 前端复写一套「张数 × 常量」迟早与计费漂移，最后表现为「预校验说 30 分、实际扣了 42 分」——
+ * 用户对不上账，比不预估还糟。这里直接调同一个函数。
+ *
+ * 性能：同一批里往往多个节点用同一个模型，所以**按模型去重后再查**，
+ * 10 个同模型节点只查一次库，而不是 10 次。
+ *
+ * 注意：`size`（画幅）目前**不参与定价** —— 计费函数只按模型定价。
+ * 接口仍接收 size 是为了将来定价细化时不必改调用方，但响应里的 cost 与 size 无关，这点不能含糊。
+ */
+export const handlePointsEstimateRequest = async (req: any, res: any) => {
+  try {
+    const requestUrl = new URL(String(req.url || ''), 'http://localhost')
+    if (req.method !== 'POST' || requestUrl.pathname !== POINTS_ESTIMATE_PATH) {
+      sendJson(res, 404, { success: false, message: 'Not Found' })
+      return
+    }
+
+    const currentUser = await requireCurrentSessionUser(req, res)
+    if (!currentUser) {
+      // 未登录：调用方按「拿不到预估」处理 → 配额校验静默跳过
+      return
+    }
+
+    const body = await readJsonBody(req)
+    const items = Array.isArray(body?.items) ? body.items : []
+    if (!items.length) {
+      sendJson(res, 200, { success: true, totalEstimated: 0, details: [] })
+      return
+    }
+
+    // 去重：同一模型只查一次定价
+    // 显式标注类型：items 是 any[]，直接用会让 Set 推成 unknown，后面传给解析函数就报错
+    const rawKeys: string[] = items.map((item: any) => String(item?.model || '').trim())
+    const uniqueKeys: string[] = [...new Set(rawKeys.filter(Boolean))]
+    const costByModel = new Map<string, number>()
+    await Promise.all(uniqueKeys.map(async (key) => {
+      const parsed = parseModelSelectionKey(key)
+      if (!parsed) {
+        costByModel.set(key, 0)
+        return
+      }
+      const resolved = await resolveGenerationPointCost({
+        providerId: parsed.providerId,
+        modelKey: parsed.modelKey,
+        endpointType: parsed.endpointType as 'chat' | 'image' | 'video',
+      })
+      costByModel.set(key, Math.max(0, Math.trunc(Number(resolved?.pointCost) || 0)))
+    }))
+
+    let totalEstimated = 0
+    const details = items.map((item: any) => {
+      const model = String(item?.model || '').trim()
+      const size = String(item?.size || '').trim()
+      const count = Math.max(1, Math.trunc(Number(item?.count) || 1))
+      const unit = costByModel.get(model) || 0
+      const cost = unit * count
+      totalEstimated += cost
+      return { model, size, count, cost }
+    })
+
+    sendJson(res, 200, { success: true, totalEstimated, details })
+  } catch (error: any) {
+    // 5xx：调用方走降级分支（跳过配额校验），不阻断预校验整体流程
+    sendJson(res, 500, { success: false, message: error?.message || '预估消耗计算失败' })
+  }
+}
+
+/** 读 JSON body（限长，避免有人拿超大 body 打这个接口） */
+const readJsonBody = async (req: any) => {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += buffer.length
+    if (size > 256 * 1024) throw new Error('请求体过大')
+    chunks.push(buffer)
+  }
+  if (!chunks.length) return null
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
   }
 }
