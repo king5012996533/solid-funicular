@@ -149,6 +149,28 @@ export const isValidAdminPassword = (password: string) => password.length >= 8 &
 // 生成 6 位随机验证码。
 export const generateVerificationCode = () => String(Math.floor(100000 + Math.random() * 900000))
 
+// 是否允许在发码响应里回显验证码明文。
+// 本地开发没有真实短信/邮件下发通道，需要把码回给前端做自动填充；
+// 但这等于「任何人拿到 6 位码即可登录任意账号」，所以必须是显式开启的调试开关，默认关闭。
+// 生产环境（NODE_ENV=production）无条件关闭，避免开关误配即被接管。
+export const isVerificationCodeDebugEnabled = () => {
+  if (String(process.env.NODE_ENV || '').trim() === 'production') {
+    return false
+  }
+
+  return String(process.env.AUTH_DEBUG_CODE_ENABLED || '').trim().toLowerCase() === 'true'
+}
+
+// 按调试开关决定是否把验证码明文放进响应。
+export const resolveVerificationCodeDebugCode = (code: string): string | undefined => {
+  if (!isVerificationCodeDebugEnabled()) {
+    return undefined
+  }
+
+  console.warn('[auth] 验证码明文回显已启用（AUTH_DEBUG_CODE_ENABLED=true），仅限本地开发，请勿在生产环境开启。')
+  return code
+}
+
 // 生成会话令牌。
 export const generateSessionToken = () => crypto.randomBytes(24).toString('base64url')
 

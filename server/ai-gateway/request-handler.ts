@@ -28,6 +28,32 @@ const buildGatewayAssociationNo = () => {
   return `GWY${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 }
 
+// 拒绝调用方自带上游地址：这是从源头堵 SSRF 的关键 —— 只做地址白名单不够，
+// 因为内网/任意外部主机都可能在菜单里。上游地址只能来自后台厂商配置。
+const sendArbitraryUpstreamRejected = (res: any, source: 'header' | 'body') => {
+  const message = source === 'header'
+    ? '禁止在请求头中指定上游地址，上游必须来自后台厂商配置'
+    : '禁止在请求体中指定上游地址或密钥，上游必须来自后台厂商配置'
+  sendJson(res, 400, {
+    message,
+    error: {
+      type: 'upstream_address_not_allowed',
+      message,
+    },
+  })
+}
+
+// 缺少厂商选择信息时无法在后台解析上游，直接拒绝而不是回落成任意 URL。
+const sendUpstreamSelectorRequired = (res: any) => {
+  sendJson(res, 400, {
+    message: '缺少厂商 ID 或上游接口类型，上游必须来自后台厂商配置',
+    error: {
+      type: 'upstream_selector_required',
+      message: '缺少厂商 ID 或上游接口类型，上游必须来自后台厂商配置',
+    },
+  })
+}
+
 /**
  * 把网关请求体里的规格归一化成定价入参。
  *
@@ -59,6 +85,17 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
     const headerBaseUrl = String(req.headers['x-upstream-base-url'] || '').trim()
     const headerEndpoint = String(req.headers['x-upstream-endpoint'] || '').trim()
     const headerApiKey = String(req.headers['x-upstream-api-key'] || '').trim()
+    if (headerBaseUrl || headerEndpoint || headerApiKey) {
+      sendArbitraryUpstreamRejected(res, 'header')
+      return
+    }
+
+    // 网关用平台密钥代付，且会转发到后台配置的上游，因此一律要求登录会话。
+    const currentUser = await requireCurrentSessionUser(req, res)
+    if (!currentUser?.id) {
+      return
+    }
+
     const headerProviderId = String(req.headers['x-upstream-provider-id'] || '').trim()
     const headerEndpointType = String(req.headers['x-upstream-endpoint-type'] || '').trim() as AiEndpointType
     const headerModelKey = String(req.headers['x-upstream-model-key'] || '').trim()
@@ -71,9 +108,9 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       method: headerMethod,
     })
 
-    if (headerProviderId && headerEndpointType) {
-      const currentUser = shouldChargeHeaderRequest ? await requireCurrentSessionUser(req, res) : null
-      if (shouldChargeHeaderRequest && !currentUser?.id) {
+    if (headerProviderId || headerEndpointType) {
+      if (!headerProviderId || !headerEndpointType) {
+        sendUpstreamSelectorRequired(res)
         return
       }
 
@@ -98,7 +135,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       const associationNo = buildGatewayAssociationNo()
       const consumedPointLog = shouldChargeHeaderRequest && billingDetail.pointCost > 0
         ? await consumeGenerationPoints({
-          userId: currentUser!.id,
+          userId: currentUser.id,
           pointCost: billingDetail.pointCost,
           sourceId: associationNo,
           associationNo,
@@ -118,7 +155,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
         refunded = true
         try {
           await refundGenerationPoints({
-            userId: currentUser!.id,
+            userId: currentUser.id,
             pointCost: billingDetail.pointCost,
             sourceId: associationNo,
             associationNo,
@@ -163,33 +200,32 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       return
     }
 
-    if (headerBaseUrl && headerEndpoint) {
-      debugUpstreamUrl = `${headerBaseUrl.replace(/\/+$/, '')}/${headerEndpoint.replace(/^\/+/, '')}`
-      debugUpstreamMethod = headerMethod
-      await forwardMultipartRequest({
-        req,
-        res,
-        baseUrl: headerBaseUrl,
-        endpoint: headerEndpoint,
-        apiKey: headerApiKey || undefined,
-        method: headerMethod,
-      })
+    const payload = await readJsonBody(req)
+
+    // 请求体里的 baseUrl / endpoint / apiKey 一律不接受，只认 providerId + endpointType。
+    const hasArbitraryUpstreamField = Boolean(
+      String(payload.upstream?.baseUrl || '').trim()
+      || String(payload.upstream?.endpoint || '').trim()
+      || String(payload.upstream?.apiKey || '').trim(),
+    )
+    if (hasArbitraryUpstreamField) {
+      sendArbitraryUpstreamRejected(res, 'body')
       return
     }
 
-    const payload = await readJsonBody(req)
     const normalized = normalizeGatewayPayload(payload)
-    const upstream = normalized.providerId && normalized.endpointType
-      ? await resolveGatewayProviderUpstream({
-        providerId: normalized.providerId,
-        endpointType: normalized.endpointType,
-        modelKey: normalized.modelKey || undefined,
-      })
-      : null
+    if (!normalized.providerId || !normalized.endpointType) {
+      sendUpstreamSelectorRequired(res)
+      return
+    }
 
-    debugUpstreamUrl = upstream
-      ? joinUpstreamUrl(upstream.baseUrl, upstream.endpoint)
-      : normalized.upstreamUrl
+    const upstream = await resolveGatewayProviderUpstream({
+      providerId: normalized.providerId,
+      endpointType: normalized.endpointType,
+      modelKey: normalized.modelKey || undefined,
+    })
+
+    debugUpstreamUrl = joinUpstreamUrl(upstream.baseUrl, upstream.endpoint)
     debugUpstreamMethod = normalized.method
 
     const shouldChargeJsonRequest = isChargeableGenerationRequest({
@@ -198,11 +234,6 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       method: normalized.method,
     })
     const billedJsonEndpointType = normalizeChargeableEndpointType(normalized.endpointType)
-
-    const currentUser = shouldChargeJsonRequest ? await requireCurrentSessionUser(req, res) : null
-    if (shouldChargeJsonRequest && !currentUser?.id) {
-      return
-    }
 
     const billingDetail = shouldChargeJsonRequest
       ? await resolveModelPricingCost({
@@ -216,7 +247,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
     const associationNo = buildGatewayAssociationNo()
     const consumedPointLog = shouldChargeJsonRequest && billingDetail.pointCost > 0
       ? await consumeGenerationPoints({
-        userId: currentUser!.id,
+        userId: currentUser.id,
         pointCost: billingDetail.pointCost,
         sourceId: associationNo,
         associationNo,
@@ -236,7 +267,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       refunded = true
       try {
         await refundGenerationPoints({
-          userId: currentUser!.id,
+          userId: currentUser.id,
           pointCost: billingDetail.pointCost,
           sourceId: associationNo,
           associationNo,
@@ -259,12 +290,8 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
 
     await forwardGatewayPayload({
       res,
-      upstreamUrl: upstream
-        ? joinUpstreamUrl(upstream.baseUrl, upstream.endpoint)
-        : normalized.upstreamUrl,
-      apiKey: upstream
-        ? (upstream.apiKey || undefined)
-        : (normalized.apiKey || undefined),
+      upstreamUrl: joinUpstreamUrl(upstream.baseUrl, upstream.endpoint),
+      apiKey: upstream.apiKey || undefined,
       method: normalized.method,
       headers: normalized.headers,
       body: normalized.body,

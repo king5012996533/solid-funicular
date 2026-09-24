@@ -10,10 +10,17 @@ import { prisma } from '../server/db/prisma.ts'
 
 const API = 'http://localhost:5409'
 
+// 管理员密码从环境变量读：写进仓库等于把「用户名 + 密码」两半一起交出去。
+const adminPassword = String(process.env.DEV_ADMIN_PASSWORD || '').trim()
+if (!adminPassword) {
+  console.error('缺少 DEV_ADMIN_PASSWORD 环境变量：本脚本要用管理员密码登录本地服务，请先设置（不要把密码写进仓库）。')
+  process.exit(1)
+}
+
 const login = await fetch(`${API}/api/auth/login`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ methodType: 'ADMIN_PASSWORD', target: 'admin', password: 'DevLocal-2026' }),
+  body: JSON.stringify({ methodType: 'ADMIN_PASSWORD', target: 'admin', password: adminPassword }),
 })
 const cookie = (login.headers.getSetCookie?.() ?? []).map((item) => item.split(';')[0]).join('; ')
 
