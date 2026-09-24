@@ -1,4 +1,9 @@
 import { prisma } from '../db/prisma'
+import { evaluateCanvasWriteLock, isPipelineLockExpired, type PipelineLockInfo } from './pipeline-lock-rules'
+
+// 决策逻辑在 pipeline-lock-rules.ts（不依赖 IO，可单测）；这里保留同名导出，调用方无需改动
+export { evaluateCanvasWriteLock, isPipelineLockExpired }
+export type { PipelineLockInfo }
 import { toNullableJsonInput } from '../shared/json-input'
 
 /**
@@ -21,15 +26,6 @@ import { toNullableJsonInput } from '../shared/json-input'
 
 /** 锁的最长持有时间：流水线一轮可能十几分钟，给足 30 分钟后自动失效，避免僵死锁住画布 */
 const LOCK_TTL_MS = 30 * 60_000
-
-export interface PipelineLockInfo {
-  workflowId: string
-  userId: string
-  token: string
-  snapshotVersionId: string
-  acquiredAt: number
-  expiresAt: number
-}
 
 const locks = new Map<string, PipelineLockInfo>()
 

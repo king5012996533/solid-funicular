@@ -6,7 +6,7 @@ import type {
   WorkflowVersionStatus,
 } from '@prisma/client'
 import { prisma } from '../db/prisma'
-import { getActivePipelineLock } from './pipeline-lock'
+import { evaluateCanvasWriteLock, getActivePipelineLock } from './pipeline-lock'
 import type {
   WorkflowDefinitionCreatePayload,
   WorkflowDefinitionListQuery,
@@ -336,8 +336,10 @@ export const getWorkflowDefinitionDetail = async (workflowId: string, context: W
 export const updateWorkflowDefinition = async (
   workflowId: string,
   payload: WorkflowDefinitionUpdatePayload,
-  context: WorkflowAccessContext,
+  context: WorkflowAccessContext & { pipelineToken?: string },
 ) => {
+  // 改定义也算写画布：流水线持锁期间同样只放行带 token 的写入
+  ensurePipelineLockSatisfied(workflowId, context.pipelineToken)
   const workflow = await prisma.workflowDefinition.findUnique({
     where: { id: workflowId },
     select: {
@@ -519,8 +521,10 @@ export const createWorkflowDefinition = async (
 export const createWorkflowDefinitionVersion = async (
   workflowId: string,
   payload: WorkflowDefinitionVersionPayload,
-  context: WorkflowAccessContext,
+  context: WorkflowAccessContext & { pipelineToken?: string },
 ) => {
+  // 存版本是「以当前画布内容另存」——流水线跑一半时被外部存一次，同样会造成锚点错乱
+  ensurePipelineLockSatisfied(workflowId, context.pipelineToken)
   const workflow = await prisma.workflowDefinition.findUnique({
     where: { id: workflowId },
     select: {
@@ -605,6 +609,14 @@ export class WorkflowLockedByPipelineError extends Error {
   }
 }
 
+/** 三个画布写入口共用的锁守卫：被占用且 token 不对就抛（由 request-handler 映射成 409） */
+const ensurePipelineLockSatisfied = (workflowId: string, pipelineToken?: string) => {
+  const decision = evaluateCanvasWriteLock(getActivePipelineLock(workflowId), pipelineToken)
+  if (decision.blocked && decision.holder) {
+    throw new WorkflowLockedByPipelineError(decision.holder)
+  }
+}
+
 export const autosaveWorkflowDefinitionDraft = async (
   workflowId: string,
   payload: WorkflowDefinitionVersionPayload,
@@ -644,10 +656,7 @@ export const autosaveWorkflowDefinitionDraft = async (
    *
    * 无锁时整段跳过：**没跑流水线的时候，这条判断不该对任何人产生任何影响**。
    */
-  const activeLock = getActivePipelineLock(workflowId)
-  if (activeLock && activeLock.token !== String(context.pipelineToken || '')) {
-    throw new WorkflowLockedByPipelineError(activeLock)
-  }
+  ensurePipelineLockSatisfied(workflowId, context.pipelineToken)
 
   const result = await prisma.$transaction(async (tx) => {
     if (workflow.currentVersion?.id && workflow.currentVersion.status === 'DRAFT') {

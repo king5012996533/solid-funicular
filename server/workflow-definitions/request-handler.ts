@@ -133,9 +133,11 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
     }
 
     if (req.method === 'PATCH' && workflowDetailMatch) {
+      // 与 draft 同一套：token 从 body 或请求头取，缺了就是「外部写入」，持锁期间会被 409 拦下
       const payload = await readWorkflowDefinitionBody<WorkflowDefinitionUpdatePayload>(req)
       const data = await updateWorkflowDefinition(workflowDetailMatch.workflowId, payload, {
         currentUserId: currentUser.id,
+        pipelineToken: String((payload as { pipelineToken?: string })?.pipelineToken || req.headers?.['x-pipeline-token'] || ''),
       })
       sendJson(res, 200, { data, message: '工作流已更新' })
       return
@@ -153,6 +155,7 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
       const payload = await readWorkflowDefinitionBody<WorkflowDefinitionVersionPayload>(req)
       const data = await createWorkflowDefinitionVersion(workflowVersionsMatch.workflowId, payload, {
         currentUserId: currentUser.id,
+        pipelineToken: String((payload as { pipelineToken?: string })?.pipelineToken || req.headers?.['x-pipeline-token'] || ''),
       })
       sendJson(res, 200, { data, message: '工作流版本已保存' })
       return
