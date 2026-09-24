@@ -178,8 +178,18 @@ export const getGenerationCost = (input: GetGenerationCostInput): GenerationCost
     detail,
   })
 
-  if (input.configLoadFailed || !spec) {
-    return fallback('pricing_config_load_failed', '读取定价配置失败，按草案兜底价计费（后台应标红提醒）')
+  /**
+   * 两种「拿不到定价」必须分开报 —— 它们对应完全不同的运营动作：
+   *   读取失败 → 查数据库/服务是否异常（环境问题）
+   *   没配价   → 让运营去后台补录（配置缺失）
+   * 之前把两者并成一个条件，结果没配价的模型被报成「读配置失败」，
+   * 排查时会朝错误方向查 —— 这是真机跑出来才发现的。
+   */
+  if (input.configLoadFailed) {
+    return fallback('pricing_config_load_failed', '读取定价配置失败，按草案兜底价计费（先查数据库/服务是否异常）')
+  }
+  if (!spec) {
+    return fallback('pricing_model_not_configured', '该模型尚无定价配置，按草案兜底价计费（请在后台补录）')
   }
   if (!spec.tiers?.length) {
     return fallback('pricing_model_not_configured', '该模型尚无定价配置，按草案兜底价计费（请在后台补录）')

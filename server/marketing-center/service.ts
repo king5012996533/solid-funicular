@@ -1,3 +1,10 @@
+import {
+  DRAFT_MODEL_PRICING,
+  getGenerationCost,
+  type ModelPricingSpec,
+  type NormalizedGenerationParams,
+  type PricingFallbackReason,
+} from '../../src/shared/model-pricing-rules'
 import prisma from '../db/prisma'
 import { invalidateRedisCachePatterns, invalidateRedisCaches } from '../redis/cache-manager'
 import { getOrSetJsonCache } from '../redis/json-cache'
@@ -245,6 +252,58 @@ const readModelBillingPower = (value: unknown) => {
 // 读取后台模型配置中的积分消耗规则，统一给生成链路使用。
 // capabilityFlags 用于"联网搜索 / 深度思考"等扩展能力开关，按 capabilityJson 配置的
 // billingMultiplier 放大基础点数，让额外成本能反映在用户扣点上。
+/**
+ * 从**定价配置表**解析生成消耗（M3 定价试点）。
+ *
+ * 与既有 resolveGenerationPointCost 的关系：那个读的是模型里的 billingPower（扁平一个数，
+ * 现在全库未配 → 一律 0）。这里是「先读 model_pricing 的结构化定价 → 交给
+ * src/shared/model-pricing-rules.ts 的 getGenerationCost 算」，算不出来才回落草案价。
+ *
+ * 预估接口与真实扣费都必须走这一个函数 —— 这是「预估 = 实扣」的唯一保证方式。
+ * 返回里带上 usingDraft / fallbackReason，供调用方打日志、后台标红。
+ */
+export const resolveModelPricingCost = async (input: {
+  providerId: string
+  modelKey: string
+  endpointType: 'chat' | 'image' | 'video'
+  params?: NormalizedGenerationParams
+}): Promise<{
+  pointCost: number
+  usingDraft: boolean
+  fallbackReason?: PricingFallbackReason
+  detail: string
+  modelName: string
+}> => {
+  const params: NormalizedGenerationParams = input.params ?? { kind: 'image', count: 1 }
+
+  let spec: ModelPricingSpec | null = null
+  let configLoadFailed = false
+  let modelName = input.modelKey
+
+  try {
+    const model = await prisma.aiModel.findFirst({
+      where: { modelKey: input.modelKey, providerId: input.providerId },
+      select: { id: true, name: true, pricing: { select: { priceJson: true } } },
+    })
+    if (model) {
+      modelName = model.name || input.modelKey
+      spec = (model.pricing?.priceJson as unknown as ModelPricingSpec) ?? null
+    }
+  } catch (error) {
+    // 读定价配置本身失败 → 走草案兜底，并如实标注原因（与「模型没配价」区分开）
+    configLoadFailed = true
+  }
+
+  const result = getGenerationCost({ spec, params, configLoadFailed, draftPrice: DRAFT_MODEL_PRICING })
+  return {
+    pointCost: result.points,
+    usingDraft: result.usingDraft,
+    fallbackReason: result.fallbackReason,
+    detail: result.detail,
+    modelName,
+  }
+}
+
 export const resolveGenerationPointCost = async (input: {
   providerId: string
   modelKey: string

@@ -101,6 +101,11 @@ check('读取配置失败 → 用草案价，原因是 pricing_config_load_faile
   assert(result.usingDraft === true && result.fallbackReason === 'pricing_config_load_failed', '原因应为读配置失败')
   assert(result.points > 0, '绝不允许返回 0')
 })
+check('配置读取成功但模型没配价 → pricing_model_not_configured（**不是**读配置失败）', () => {
+  const result = getGenerationCost({ spec: null, params: img(), configLoadFailed: false, draftPrice: DRAFT })
+  assert(result.fallbackReason === 'pricing_model_not_configured', `应报未配价，实际 ${result.fallbackReason}`)
+  assert(result.points > 0, '绝不为 0')
+})
 check('模型没有定价记录 → pricing_model_not_configured', () => {
   const result = getGenerationCost({ spec: { matchMode: 'none', tiers: [] }, params: img(), draftPrice: DRAFT })
   assert(result.fallbackReason === 'pricing_model_not_configured' && result.points > 0, `实际 ${JSON.stringify(result)}`)
