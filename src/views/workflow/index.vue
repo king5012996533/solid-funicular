@@ -1407,6 +1407,9 @@ const canvasAgentContext: CanvasAgentContext = {
     text: String((node.data as { prompt?: string; content?: string; url?: string })?.prompt
       || (node.data as { content?: string })?.content
       || ''),
+    // 分开给：预校验按节点类型分派字段，只给合并后的 text 会把有提示词的节点误报成空
+    prompt: String((node.data as { prompt?: string })?.prompt || ''),
+    content: String((node.data as { content?: string })?.content || ''),
     model: String((node.data as { model?: string })?.model || ''),
     size: String((node.data as { size?: string })?.size || ''),
     quality: String((node.data as { quality?: string })?.quality || ''),

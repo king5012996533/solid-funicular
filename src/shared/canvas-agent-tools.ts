@@ -177,6 +177,32 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     /**
+     * 批量生图前的预校验入口（M3 风险③ 第一步）。
+     *
+     * **职责边界（工具说明里必须写明）**：真正执行的是调用方/客户端 ——
+     * 读节点、HEAD 探参考图、跑校验器都在那一层完成；Agent 拿到的只是一份报告。
+     * 校验器本身是纯函数，不会连库、不会发请求。写清楚这条，是为了避免以后有人
+     * 误以为「在提示词里让它校验」就等于服务端会去探图与查余额。
+     */
+    name: "preflight_check",
+    label: "批量预校验",
+    description:
+      "批量执行（run_nodes）之前检查这批节点「能不能跑」：提示词是否为空/超长/含未替换占位符、模型与画幅取值是否合法、分镜是否真的继承了母版、参考图是否还能访问、余额是否够这一批。执行在客户端完成（读画布、探图、跑校验器），你拿到的是报告。报告不过就别开始生成 —— 带着问题跑等于白花钱。",
+    parameters: {
+      type: "object",
+      properties: {
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "要校验的节点 id；不填则校验画布上全部可执行节点",
+        },
+      },
+      required: [],
+    },
+    requiresClient: true,
+  },
+  {
+    /**
      * 一次执行多个节点（2026-09-24，M3）。
      *
      * 分镜图是「一批一起出」的活：6 个节点分 6 次调 run_node，界面上就是 6 条零碎的执行记录，

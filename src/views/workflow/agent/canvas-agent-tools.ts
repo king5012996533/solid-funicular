@@ -46,6 +46,15 @@ export interface CanvasAgentNodeSnapshot {
   label: string;
   /** 图片/视频节点的提示词或文本节点的内容（截断后给模型，避免把整张图 base64 塞进上下文） */
   text: string;
+  /**
+   * 分开给出的提示词与文本内容。
+   *
+   * 为什么不能只给合并后的 `text`：预校验的校验器按节点类型分派字段（图片/视频看 prompt、
+   * 文本看 content）。实测踩过一次：快照只给 `text` → 校验器读 `prompt` 为空 →
+   * 把有提示词的节点报成「没有提示词」。**误报会把合法批次也拦下来**，门卫就不可信了。
+   */
+  prompt?: string;
+  content?: string;
   model?: string;
   size?: string;
   quality?: string;
