@@ -288,3 +288,123 @@ export const runCanvasPipelineValidation = (input: {
     validators: validators.map((validator) => validator.key),
   }
 }
+
+/**
+ * 预校验报告的**时效**判断（纯函数）
+ *
+ * 为什么必须单独有这一层：报告里的「参考图能访问」「余额够」都是**有时效的外部事实**。
+ * 预校验通过 → 用户看了两分钟 → 才点批量生图，这中间余额可能被别的任务吃掉、
+ * 参考图可能被删。只判「报告存在」是不够的，必须把**关键事实再核一遍**。
+ *
+ * 三种失效要分清（对应三种不同的处置）：
+ *   1. 报告过期 → 整个重跑一次预校验（最省事也最安全）
+ *   2. 报告覆盖的节点与本次要跑的不一致 → 拒绝，让 Agent 重新预校验（不能拿旧报告跑新一批）
+ *   3. 关键事实变了（余额掉了 / 参考图没了）→ 拒绝，并把「哪一条变了」说清楚
+ */
+export interface PreflightReport {
+  reportId: string
+  workflowId: string
+  /** 报告覆盖的节点 id */
+  nodeIds: string[]
+  createdAt: number
+  expiresAt: number
+  /** 报告当时记下的关键事实（用于复核是否已经变化） */
+  facts: {
+    availablePoints?: number
+    /** 当时判定为「可访问」的参考图 */
+    reachableReferences?: string[]
+    /** 本次批量预计消耗 */
+    estimatedCost?: number
+  }
+}
+
+export interface PreflightVerifyInput {
+  report: PreflightReport | null | undefined
+  workflowId: string
+  /** 本次实际要执行的节点 */
+  nodeIds: string[]
+  /** 现在的事实（由调用方现探） */
+  current: {
+    availablePoints?: number
+    unreachableReferences?: string[]
+  }
+  now?: number
+}
+
+export type PreflightVerifyResult =
+  | { ok: true; reportId: string }
+  | { ok: false; code: 'missing' | 'expired' | 'workflow_mismatch' | 'nodes_not_covered' | 'cost_changed' | 'reference_lost'; reason: string; hint: string }
+
+export const verifyPreflightReport = (input: PreflightVerifyInput): PreflightVerifyResult => {
+  const now = input.now ?? Date.now()
+  const { report, workflowId, nodeIds, current } = input
+
+  if (!report) {
+    return {
+      ok: false,
+      code: 'missing',
+      reason: '这一批没有有效的预校验报告',
+      hint: '先调用 preflight_check 做一次预校验，再执行批量生图',
+    }
+  }
+
+  if (report.workflowId !== workflowId) {
+    return {
+      ok: false,
+      code: 'workflow_mismatch',
+      reason: '预校验报告不是这块画布的',
+      hint: '在当前画布上重新做一次 preflight_check',
+    }
+  }
+
+  if (report.expiresAt <= now) {
+    return {
+      ok: false,
+      code: 'expired',
+      reason: `预校验报告已过期（${Math.round((now - report.expiresAt) / 1000)} 秒前失效）`,
+      hint: '重新调用 preflight_check —— 余额和参考图都可能在这期间变了',
+    }
+  }
+
+  const covered = new Set(report.nodeIds)
+  const uncovered = nodeIds.filter((id) => !covered.has(id))
+  if (uncovered.length) {
+    return {
+      ok: false,
+      code: 'nodes_not_covered',
+      reason: `这一批有 ${uncovered.length} 个节点不在预校验范围内（${uncovered.slice(0, 5).join('、')}）`,
+      hint: '对完整的一批节点重新做 preflight_check，不要拿旧报告跑新节点',
+    }
+  }
+
+  // 关键事实复核：报告说「够钱」，现在可能已经不够了（别的任务吃掉了配额）
+  if (
+    typeof report.facts.availablePoints === 'number'
+    && typeof report.facts.estimatedCost === 'number'
+    && typeof current.availablePoints === 'number'
+    && current.availablePoints < report.facts.estimatedCost
+  ) {
+    return {
+      ok: false,
+      code: 'cost_changed',
+      reason: `预校验时余额够（${report.facts.availablePoints}），现在只剩 ${current.availablePoints}，不足以完成这一批（预计 ${report.facts.estimatedCost}）`,
+      hint: '充值，或把这一批拆小；不要带着不够的余额启动批量生成',
+    }
+  }
+
+  // 关键事实复核：报告里可访问的参考图，现在可能已经没了
+  const lost = (current.unreachableReferences || []).filter((url) => (report.facts.reachableReferences || []).includes(url))
+  if (lost.length) {
+    return {
+      ok: false,
+      code: 'reference_lost',
+      reason: `预校验之后有 ${lost.length} 张参考图变得不可访问：${lost.slice(0, 3).join('、')}`,
+      hint: '重新生成母版并重新挂图，然后重新做一次 preflight_check',
+    }
+  }
+
+  return { ok: true, reportId: report.reportId }
+}
+
+/** 预校验报告的有效期：外部事实（余额、图片可达性）在几分钟内就可能变化 */
+export const PREFLIGHT_REPORT_TTL_MS = 10 * 60_000

@@ -10,6 +10,7 @@
  */
 import {
   DEFAULT_CANVAS_VALIDATORS,
+  verifyPreflightReport,
   runCanvasPipelineValidation,
 } from '../../src/shared/canvas-pipeline-validation.ts'
 
@@ -148,6 +149,61 @@ check('注册一个「需要看图」的校验器即可生效，流程代码零�
   // 同一个节点、不带这个校验器时应当通过 —— 证明它是「挂上去才生效」，而不是被写死在流程里
   const withoutVision = runCanvasPipelineValidation({ targets: [shot], allNodes: [shot], edges: [], context: {} })
   assert(!codes(withoutVision).includes('vision.subject_broken'), '不挂校验器时不该出现该结论')
+})
+
+console.log('\n== 报告时效（外部事实会变，不能只看「报告存在」）==')
+
+const now = 1_800_000_000_000
+const report = (over = {}) => ({
+  reportId: 'pf_1',
+  workflowId: 'wf_1',
+  nodeIds: ['s1', 's2'],
+  createdAt: now - 1000,
+  expiresAt: now + 60_000,
+  facts: { availablePoints: 100, reachableReferences: ['/uploads/master.png'], estimatedCost: 30 },
+  ...over,
+})
+const verify = (over = {}, current = {}) => verifyPreflightReport({
+  report: report(over.report), workflowId: over.workflowId ?? 'wf_1', nodeIds: over.nodeIds ?? ['s1'], current, now,
+})
+
+check('有效报告 → 通过', () => {
+  const result = verify()
+  assert(result.ok === true, `应通过，实际 ${JSON.stringify(result)}`)
+})
+
+check('没有报告 → 拒绝，并告诉它去调 preflight_check', () => {
+  const result = verifyPreflightReport({ report: null, workflowId: 'wf_1', nodeIds: ['s1'], current: {}, now })
+  assert(result.ok === false && result.code === 'missing', '应报 missing')
+  assert(result.hint.includes('preflight_check'), '修复信号要指向具体动作')
+})
+
+check('报告过期 → 拒绝（余额和参考图可能在这期间变了）', () => {
+  const result = verify({ report: { expiresAt: now - 1 } })
+  assert(result.ok === false && result.code === 'expired', `应报 expired，实际 ${JSON.stringify(result)}`)
+})
+
+check('拿旧报告跑新节点 → 拒绝（不能少校验几个就跑）', () => {
+  const result = verify({ nodeIds: ['s1', 's9'] })
+  assert(result.ok === false && result.code === 'nodes_not_covered', '应报 nodes_not_covered')
+  assert(result.reason.includes('s9'), '要说清是哪个节点没被覆盖')
+})
+
+check('余额在预校验之后被吃掉 → 拒绝，并说清差多少', () => {
+  const result = verify({}, { availablePoints: 10 })
+  assert(result.ok === false && result.code === 'cost_changed', '应报 cost_changed')
+  assert(result.reason.includes('10') && result.reason.includes('30'), `要说清现状与需要：${result.reason}`)
+})
+
+check('参考图在预校验之后被删 → 拒绝（这是「人物崩坏」最常见的来源）', () => {
+  const result = verify({}, { unreachableReferences: ['/uploads/master.png'] })
+  assert(result.ok === false && result.code === 'reference_lost', '应报 reference_lost')
+  assert(result.hint.includes('重新生成母版') || result.hint.includes('重新挂图'), '修复信号要具体')
+})
+
+check('报告属于别的画布 → 拒绝', () => {
+  const result = verify({ workflowId: 'wf_OTHER' })
+  assert(result.ok === false && result.code === 'workflow_mismatch', '应报 workflow_mismatch')
 })
 
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)

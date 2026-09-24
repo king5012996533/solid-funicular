@@ -11,11 +11,25 @@
  */
 
 import {
+  PREFLIGHT_REPORT_TTL_MS,
+  runCanvasPipelineValidation,
+  verifyPreflightReport,
+  type PreflightReport,
+} from "@/shared/canvas-pipeline-validation";
+import {
   CANVAS_AGENT_TOOL_DEFINITIONS,
   describeConfirmationDecision,
   type AgentConfirmationDecision,
   type AgentConfirmationRequest,
 } from "@/shared/canvas-agent-tools";
+
+/**
+ * 最近一次预校验报告。
+ *
+ * 放在模块级：一份报告对应「这块画布的这一批」，同一时刻只需要记住最新那份
+ * （再早的已经被同批次的校验覆盖，留着只会误导）。TTL 由 verifyPreflightReport 判。
+ */
+let lastPreflightReport: PreflightReport | null = null
 
 /** 一次批量建节点的上限：够铺一条完整分镜，又不至于一次把画布塞爆 */
 const MAX_BATCH_NODES = 12;
@@ -45,6 +59,8 @@ export interface CanvasAgentNodeSnapshot {
   imageUrl?: string;
   /** 文本节点的内容长度（模型据此判断分镜表是否已经铺过） */
   textLength?: number;
+  /** 挂着的参考图（预校验要 HEAD 探可达性，运行期还要复核一次） */
+  referenceImages?: string[];
 }
 
 export interface CanvasAgentContext {
@@ -333,6 +349,58 @@ export const executeCanvasAgentTool = async (
         summary: `新建 ${created.filter(Boolean).length} 个节点${failures ? `（${failures} 个失败）` : ""}`,
       };
     }
+    case "preflight_check": {
+      const asked = (Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean);
+      const allNodes = ctx.snapshotNodes();
+      const edges = ctx.snapshotEdges();
+      const targets = asked.length
+        ? allNodes.filter((node) => asked.includes(node.id))
+        : allNodes.filter((node) => node.type === "image" || node.type === "video");
+      if (!targets.length) return fail("没有可校验的节点（画布上没有图片/视频节点）");
+
+      // 参考图可达性：这一步必须在客户端做（只有浏览器这边能直接探本地托管的图）
+      const refUrls = [...new Set(targets.flatMap((node) => node.referenceImages || []))];
+      const reachability: Record<string, boolean> = {};
+      await Promise.all(refUrls.map(async (url) => {
+        try {
+          const res = await fetch(url, { method: "HEAD" });
+          reachability[url] = res.ok;
+        } catch {
+          reachability[url] = false;
+        }
+      }));
+
+      const report = runCanvasPipelineValidation({
+        targets,
+        allNodes,
+        edges,
+        context: { referenceReachability: reachability },
+      });
+
+      lastPreflightReport = {
+        reportId: `pf_${Date.now().toString(36)}`,
+        workflowId: "",
+        nodeIds: targets.map((node) => node.id),
+        createdAt: Date.now(),
+        expiresAt: Date.now() + PREFLIGHT_REPORT_TTL_MS,
+        facts: {
+          reachableReferences: refUrls.filter((url) => reachability[url]),
+        },
+      };
+
+      // 报告要能驱动修复：每个问题都带上「哪个节点 + 怎么改」，而不只是「被拦下了」
+      const lines = report.findings.map((item) => {
+        const where = item.nodeId ? `节点 ${item.nodeId}` : "整批";
+        return `- [${item.level === "error" ? "必须修" : "建议"}] ${where}：${item.message}${item.hint ? ` → ${item.hint}` : ""}`;
+      });
+      return {
+        ok: report.runnable,
+        result: JSON.stringify({ runnable: report.runnable, blockedNodeIds: report.blockedNodeIds, findings: report.findings, validators: report.validators }),
+        summary: report.runnable
+          ? `预校验通过（${report.checkedNodes} 个节点）`
+          : `预校验未通过：${report.blockedNodeIds.length} 个节点有必须修的问题\n${lines.join("\n")}`,
+      };
+    }
     case "run_nodes": {
       const ids = (Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean);
       if (!ids.length) return fail("ids 不能为空");
@@ -342,6 +410,36 @@ export const executeCanvasAgentTool = async (
       const known = new Set(ctx.snapshotNodes().map((node) => node.id));
       const missing = ids.filter((id) => !known.has(id));
       if (missing.length) return fail(`这些节点不存在：${missing.join("、")}（先用 get_canvas_state 确认）`);
+
+      /**
+       * **运行期 gate**：没有有效预校验报告就不许批量生成。
+       *
+       * 为什么不只写在提示词里：那是软约束，模型偶尔跳过你也不会知道 ——
+       * 而代价是带着空提示词/失效参考图真的花钱跑一批。
+       * 这里现探一次关键事实（参考图还在不在），过期/覆盖面不符/事实变了都拦下，
+       * 并把「该怎么修」回给模型（报告本身就是它的修复依据）。
+       */
+      const currentRefUrls = [...new Set(
+        ctx.snapshotNodes().filter((node) => ids.includes(node.id)).flatMap((node) => node.referenceImages || []),
+      )];
+      const unreachable: string[] = [];
+      await Promise.all(currentRefUrls.map(async (url) => {
+        try {
+          const res = await fetch(url, { method: "HEAD" });
+          if (!res.ok) unreachable.push(url);
+        } catch {
+          unreachable.push(url);
+        }
+      }));
+      const verdict = verifyPreflightReport({
+        report: lastPreflightReport,
+        workflowId: "",
+        nodeIds: ids,
+        current: { unreachableReferences: unreachable },
+      });
+      if (!verdict.ok) {
+        return fail(`批量执行被拦下：${verdict.reason}。${verdict.hint}`);
+      }
 
       const outcomes: Array<{ id: string; ok: boolean; reason?: string }> = ctx.runNodes
         ? await ctx.runNodes(ids)

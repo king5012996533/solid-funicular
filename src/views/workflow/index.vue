@@ -1414,6 +1414,10 @@ const canvasAgentContext: CanvasAgentContext = {
     // 已经生成出来的图地址：连续性靠它（母版出图后要把这张图挂给分镜节点当参考图）
     imageUrl: String((node.data as { url?: string })?.url || ''),
     textLength: String((node.data as { content?: string })?.content || '').length,
+    // 参考图要给出来：预校验要探这些图还在不在（这是「人物崩坏」最常见的来源）
+    referenceImages: Array.isArray((node.data as { referenceImages?: string[] })?.referenceImages)
+      ? ((node.data as { referenceImages?: string[] }).referenceImages as string[])
+      : [],
   })),
   snapshotEdges: () => edges.value.map((edge) => ({ source: edge.source, target: edge.target })),
   selectedIds: () => getSelectedNodes.value.map((node) => node.id),
