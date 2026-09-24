@@ -91,6 +91,63 @@ console.log('\n【H】回滚素材：不 prune + 可注入 tag')
   check('镜像流水线产出 sha tag', read('.github/workflows/docker-image.yml').includes('type=sha'), true)
 }
 
+console.log('\n【I】打包服务的运行时依赖必须覆盖后端源码的全部裸导入')
+{
+  // 打包用的是 `packages: 'external'`：源码里的裸导入会原样留在产物顶层。
+  // 清单少写一个，容器里 `node server/index.js` 就在 module link 阶段
+  // ERR_MODULE_NOT_FOUND 退出（2026-09-25 实测：漏 @earendil-works/pi-* 时镜像起不来）。
+  const buildScript = read('scripts/build-server-service.mjs')
+  const listBody = buildScript.match(/RUNTIME_DEPENDENCY_NAMES = \[([\s\S]*?)\]/)?.[1] || ''
+  const declared = new Set([...listBody.matchAll(/'([^']+)'/g)].map((match) => match[1]))
+
+  const serverDir = path.join(rootDir, 'server')
+  const bareImports = new Set()
+  for (const relativePath of readdirSync(serverDir, { recursive: true })) {
+    if (!String(relativePath).endsWith('.ts')) {
+      continue
+    }
+    const content = readFileSync(path.join(serverDir, relativePath), 'utf8')
+    const specs = [
+      ...content.matchAll(/from\s+['"]([^'"]+)['"]/g),
+      ...content.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm),
+    ].map((match) => match[1])
+    for (const spec of specs) {
+      if (spec.startsWith('.') || spec.startsWith('node:')) {
+        continue
+      }
+      bareImports.add(
+        spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0],
+      )
+    }
+  }
+
+  const missing = [...bareImports].filter((name) => !declared.has(name)).sort()
+  check(
+    `运行时依赖清单覆盖后端裸导入${missing.length ? `（缺 ${missing.join(', ')}）` : ''}`,
+    missing.length,
+    0,
+  )
+}
+
+console.log('\n【J】后端接管的信号必须覆盖启动脚本转发的信号')
+{
+  // 启动脚本转发什么信号，后端就得注册什么信号；漏一个，默认处置是直接杀掉进程
+  // （SIGHUP 默认退出码 129），等于绕开优雅停机把在途任务切断。
+  const forwardList =
+    read('scripts/service-start-production.mjs').match(/FORWARD_SIGNALS = \[([^\]]*)\]/)?.[1] || ''
+  const forwarded = [...forwardList.matchAll(/'([A-Z]+)'/g)].map((match) => match[1])
+  const indexTs = read('server/index.ts')
+
+  check('启动脚本转发 SIGTERM', forwarded.includes('SIGTERM'), true)
+  for (const signal of forwarded) {
+    check(
+      `server/index.ts 注册 ${signal}`,
+      new RegExp(`process\\.on\\("${signal}"`).test(indexTs),
+      true,
+    )
+  }
+}
+
 console.log(`\n${'─'.repeat(52)}`)
 console.log(`  通过 ${passed} / 失败 ${failed}`)
 process.exit(failed ? 1 : 0)

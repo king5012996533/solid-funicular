@@ -787,10 +787,12 @@ server.listen(serverPort, "0.0.0.0", () => {
 });
 
 /**
- * 优雅停机：收到 SIGTERM/SIGINT 后停止接受新连接，等待在途请求/连接收口；
+ * 优雅停机：收到 SIGTERM/SIGINT/SIGHUP 后停止接受新连接，等待在途请求/连接收口；
  * 超过上限（GRACEFUL_SHUTDOWN_TIMEOUT_MS，默认 5 分钟）仍未结束则强制关闭并退出。
  * 之前没有这段逻辑，发布时 SIGTERM 直接导致进程被硬杀，在途生成任务
  * （图片单张实测 54~334 秒）会被整段切断。
+ * SIGHUP 必须一并接管：start-production 会把它转发给后端进程，而 Node 的默认
+ * 处置是直接终止（退出码 129），等于绕开整段收口逻辑把在途任务切断。
  */
 const gracefulShutdownTimeoutMs = (() => {
   const parsed = Number(
@@ -856,3 +858,4 @@ const shutdown = (signal: string) => {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGHUP", () => shutdown("SIGHUP"));

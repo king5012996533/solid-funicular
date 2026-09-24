@@ -33,8 +33,16 @@ const startupValidationOutputPath = path.resolve(outputDir, 'startup-env-validat
 const packageJsonPath = path.resolve(outputDir, 'package.json')
 
 // 运行期真正需要的依赖清单。
+// 注意：这份清单必须覆盖打包产物里所有 `packages: 'external'` 的裸导入。
+// 漏一个，镜像里 `node server/index.js` 就会 ERR_MODULE_NOT_FOUND 起不来
+// （2026-09-25 实测：漏了 @earendil-works/pi-* 时，按服务包 package.json 装完依赖后
+//  后端在 module link 阶段直接退出，退出码 1）。
 const RUNTIME_DEPENDENCY_NAMES = [
   '@aws-sdk/client-s3',
+  // 生成任务的 pi 运行时由 server/generation-tasks/pi-runtime.ts 静态导入，
+  // esbuild 会把它留在打包产物的顶层 import 里，必须随服务包安装。
+  '@earendil-works/pi-agent-core',
+  '@earendil-works/pi-ai',
   '@prisma/adapter-mariadb',
   '@prisma/client',
   'dotenv',
