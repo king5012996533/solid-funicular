@@ -1,3 +1,4 @@
+import { acquirePipelineLock, releasePipelineLock } from './pipeline-lock'
 import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
 import { isPrismaConfigured } from '../db/prisma'
@@ -54,6 +55,18 @@ const matchWorkflowPublishPath = (requestPath: string) => {
   }
 }
 
+/** POST /api/workflows/:id/pipeline-lock —— 制片 Agent 开跑前取锁（同时留一份快照） */
+const matchWorkflowPipelineLockPath = (requestPath: string) => {
+  const matched = requestPath.match(/^\/api\/workflows\/([^/]+)\/pipeline-lock$/)
+  return matched ? { workflowId: decodeURIComponent(matched[1]) } : null
+}
+
+/** POST /api/workflows/:id/pipeline-lock/release —— 本轮结束（成功/失败都）释放 */
+const matchWorkflowPipelineLockReleasePath = (requestPath: string) => {
+  const matched = requestPath.match(/^\/api\/workflows\/([^/]+)\/pipeline-lock\/release$/)
+  return matched ? { workflowId: decodeURIComponent(matched[1]) } : null
+}
+
 const matchWorkflowDraftPath = (requestPath: string) => {
   const matched = requestPath.match(/^\/api\/workflows\/([^/]+)\/draft$/)
   if (!matched) {
@@ -84,6 +97,8 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
     const workflowVersionsMatch = matchWorkflowVersionsPath(requestPath)
     const workflowPublishMatch = matchWorkflowPublishPath(requestPath)
     const workflowDraftMatch = matchWorkflowDraftPath(requestPath)
+    const workflowPipelineLockMatch = matchWorkflowPipelineLockPath(requestPath)
+    const workflowPipelineLockReleaseMatch = matchWorkflowPipelineLockReleasePath(requestPath)
 
     if (req.method === 'GET' && requestPath === WORKFLOW_DEFINITIONS_BASE_PATH) {
       const data = await listWorkflowDefinitions({
@@ -139,6 +154,42 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
         currentUserId: currentUser.id,
       })
       sendJson(res, 200, { data, message: '工作流版本已保存' })
+      return
+    }
+
+    /**
+     * 取流水线锁：跑之前占住这块画布，并留一份快照用于失败回滚。
+     *
+     * 返回 409 表示已被别的流水线占着 —— 这时**不抢占**，把持锁者是谁告诉调用方，
+     * 由它决定是等还是提示用户（抢占会让前一轮的中间成果变成孤儿）。
+     */
+    if (req.method === 'POST' && workflowPipelineLockMatch) {
+      const payload = await readWorkflowDefinitionBody<{ label?: string }>(req).catch(() => ({ label: undefined }))
+      const result = await acquirePipelineLock({
+        workflowId: workflowPipelineLockMatch.workflowId,
+        userId: currentUser.id,
+        label: payload?.label,
+      })
+      if (result.ok) {
+        sendJson(res, 200, { data: result.lock })
+        return
+      }
+      if (result.reason === 'locked') {
+        sendWorkflowDefinitionError(res, 409, `这块画布正在被另一个流水线执行占用（自 ${new Date(result.holder.acquiredAt).toLocaleTimeString('zh-CN')} 起），请等它结束或先停止它。`)
+        return
+      }
+      sendWorkflowDefinitionError(res, result.reason === 'not_found' ? 404 : 403, '无法获取画布锁')
+      return
+    }
+
+    if (req.method === 'POST' && workflowPipelineLockReleaseMatch) {
+      const payload = await readWorkflowDefinitionBody<{ token?: string }>(req)
+      const released = releasePipelineLock(workflowPipelineLockReleaseMatch.workflowId, String(payload?.token || ''))
+      if (!released) {
+        sendWorkflowDefinitionError(res, 409, '释放失败：锁不存在，或 token 不是持锁者的（不能释放别人的锁）')
+        return
+      }
+      sendJson(res, 200, { data: { released: true } })
       return
     }
 

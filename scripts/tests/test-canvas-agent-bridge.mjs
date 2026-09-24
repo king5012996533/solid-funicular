@@ -190,8 +190,11 @@ await check('工具结果为空时给占位，避免上游因空 content 报错'
 
 console.log('\n== 对话历史并进本轮用户消息 ==')
 
-await check('没有历史时原样返回', () => {
-  assert(buildPromptWithHistory('干个活', null) === '干个活')
+await check('没有历史时也把「本轮执行要求」附上（实测缺了它模型会在中途收尾汇报）', () => {
+  const result = buildPromptWithHistory('干个活', null)
+  assert(result.startsWith('干个活'), `用户的要求要原样在最前面，实际：${result.slice(0, 40)}`)
+  assert(result.includes('【本轮执行要求】'), '要贴上执行要求')
+  assert(result.includes('不要中途收尾汇报'), '执行要求要说清「别中途收尾」')
 })
 
 await check('有历史时贴成背景，并标明「用户现在的要求」', () => {
