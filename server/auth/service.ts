@@ -523,6 +523,20 @@ export const createVerificationCodeRecord = async (input: {
   }
 }
 
+// 覆盖验证码记录里的码值。
+// 短信通道的验证码由服务商生成（阿里云 ReturnVerifyCode 带回），必须用它覆盖本地生成的码，
+// 否则用户收到的码与库里存的对不上，永远登不进去。
+export const updateVerificationCodeRecordCode = async (id: string, code: string) => {
+  await prisma.authVerificationCode.update({
+    where: {
+      id,
+    },
+    data: {
+      code,
+    },
+  })
+}
+
 // 消费验证码记录。
 export const consumeVerificationCodeRecord = async (input: {
   methodType: AuthMethodType
