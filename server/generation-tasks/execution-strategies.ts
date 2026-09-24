@@ -356,30 +356,90 @@ const videoTaskExecutionStrategy: GenerationTaskExecutionStrategy = {
   execute(task, payload, context) {
     return context.executeVideoGenerationTask(task, payload)
   },
-  async handleStopped(task, _payload, context) {
+  /**
+   * 收口与图片同策（2026-09-25 修）。
+   *
+   * 之前这里只退分 + 记一行状态，**既没写记录也没发终止事件**：画布上的视频节点靠事件流
+   * 收尾，收不到 terminated 事件就永远停在「生成中」；刷新后记录还是 RUNNING，
+   * 用户既看不到结果也停不下来。而上游对 failed/timeout/cancelled 会全额退分给我们，
+   * 所以收口时必须同步退给用户（退款走既有 refundGenerationPoints，不手写流水）。
+   */
+  async handleStopped(task, payload, context) {
     await context.refundTaskPointsIfNeeded(task, 'task_aborted')
     await context.markTaskExecutionState(task, {
       lastErrorAt: new Date().toISOString(),
       lastErrorMessage: '任务已收到停止指令',
     })
     context.emitTaskProgressEvent(task.recordId, {
-      stage: 'stopped',
+      stage: 'stopping',
       stopped: true,
+      message: '视频生成已收到停止指令，正在收口状态',
+    })
+    await context.updateGenerationRecord(task.recordId, {
+      ...context.buildInitialRecordPayload(payload),
+      done: true,
+      stopped: true,
+      error: '',
+      outputs: [],
+    }, task.userId)
+    const stoppedRecord = await context.getGenerationRecordById(task.recordId, task.userId)
+    await context.syncSharedTaskRuntime(task, 'stopped')
+    context.emitTaskStreamEvent(task.recordId, {
+      type: 'stopped',
+      recordId: task.recordId,
+      done: true,
+      stopped: true,
+      record: stoppedRecord,
+      stage: 'stopped',
       message: '视频生成已停止',
     })
+    context.logGenerationTask('video_task:stopped', {
+      recordId: task.recordId,
+      userId: task.userId,
+    })
   },
-  async handleFailed(task, _payload, _error, errorMessage, context) {
-    // 视频是长任务，失败退款与图片同策（没拿到成品就退）
+  async handleFailed(task, payload, error, errorMessage, context) {
+    // 视频是长任务，失败退款与图片同策（没拿到成品就退；上游 failed/timeout/cancelled 也全额退给我们）
     await context.refundTaskPointsIfNeeded(task, 'task_failed')
     await context.markTaskExecutionState(task, {
       lastErrorAt: new Date().toISOString(),
       lastErrorMessage: errorMessage || '视频生成失败',
     })
+    context.emitTaskProgressEvent(task.recordId, {
+      stage: 'failing',
+      message: '视频生成异常，正在写入失败状态',
+    })
+    // 失败也要把记录写成终态：只发事件不写记录的话，刷新后界面又回到「生成中」
+    await context.updateGenerationRecord(task.recordId, {
+      ...context.buildInitialRecordPayload(payload),
+      done: true,
+      stopped: false,
+      error: errorMessage || '视频生成失败',
+      outputs: [],
+    }, task.userId)
+    const failedRecord = await context.getGenerationRecordById(task.recordId, task.userId)
+    await context.syncSharedTaskRuntime(task, 'failed')
+    context.emitTaskStreamEvent(task.recordId, {
+      type: 'failed',
+      recordId: task.recordId,
+      done: true,
+      stopped: false,
+      record: failedRecord,
+      stage: 'failed',
+      message: errorMessage || '视频生成失败',
+    })
+    context.logGenerationTaskError('video_task:failed', error, {
+      recordId: task.recordId,
+      userId: task.userId,
+    })
   },
-  resolveFailureMessage(error) {
-    // 上游的原因（超时/内容被拒/额度不足）优先原样透出，便于用户判断能不能重试
+  resolveFailureMessage(error, abortReason, context) {
+    if (abortReason === 'execution_lock_lost') {
+      return '任务执行锁已失效，系统已中断本次生成'
+    }
+    // 上游的原因（超时/内容被拒/额度不足/参考图不可达）优先原样透出，便于用户判断能不能重试
     const message = error instanceof Error ? error.message : String(error)
-    if (!message) return '视频生成失败'
+    if (!message) return context.normalizeGenerationErrorMessage(error, '视频生成失败')
     return message.length > 200 ? `${message.slice(0, 200)}…` : message
   },
 }

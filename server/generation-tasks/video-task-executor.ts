@@ -52,7 +52,13 @@ export interface VideoTaskExecutorContext {
     modelKey: string;
     requestBody: Record<string, unknown>;
     onRetry?: (retryState: VideoTaskRetryState) => Promise<void> | void;
-  }) => Promise<{ upstreamUrl: string; taskId: string; immediateUrl?: string }>;
+  }) => Promise<{
+    upstreamUrl: string;
+    taskId: string;
+    immediateUrl?: string;
+    /** 建单前按模型能力声明纠正过的参数（mode/时长/比例），写进任务日志 */
+    adjustments?: string[];
+  }>;
   /** 轮询到终态：成功返回成品地址，失败抛错（错误信息来自上游） */
   pollVideoTask: (input: {
     signal: AbortSignal;
@@ -65,7 +71,25 @@ export interface VideoTaskExecutorContext {
       progress?: number;
       attempt: number;
     }) => Promise<void> | void;
-  }) => Promise<{ upstreamUrl: string; videoUrl: string }>;
+  }) => Promise<{ upstreamUrl: string; videoUrl: string; attempts?: number }>;
+  /**
+   * 把上游成品转存到我们自己的存储，返回落库用的本地地址。
+   * 上游给的是带时间签名的 CDN 地址（会过期），只作中转、不落库。
+   */
+  materializeVideoOutput: (input: {
+    signal: AbortSignal;
+    providerId: string;
+    modelKey: string;
+    taskId: string;
+    videoUrl: string;
+  }) => Promise<{
+    publicUrl: string;
+    relativePath: string;
+    storageType: string;
+    size: number;
+    sourceUrl: string;
+    refreshed: boolean;
+  }>;
   buildInitialRecordPayload: (
     payload: GenerationTaskStartPayload,
   ) => GenerationRecordPayload;
@@ -128,10 +152,12 @@ export const executeVideoTask = async (
     upstreamUrl: created.upstreamUrl,
     taskId: created.taskId,
     modelKey,
+    adjustments: created.adjustments || [],
   });
   context.emitTaskProgressEvent(task.recordId, {
     stage: "video_queued",
-    message: `上游已接单（任务 ${created.taskId.slice(0, 12)}…），开始等待生成`,
+    // 上游文档要求首次查询在建单 5 分钟后，先把这条告诉用户，免得以为卡住了
+    message: `上游已接单（任务 ${created.taskId.slice(0, 12)}…），约 5 分钟后开始查询进度`,
   });
 
   // 建单即出片的网关（少数）跳过轮询
@@ -153,14 +179,46 @@ export const executeVideoTask = async (
       },
     });
     videoUrl = polled.videoUrl;
+    context.logGenerationTask("video_task:polled", {
+      recordId: task.recordId,
+      userId: task.userId,
+      taskId: created.taskId,
+      attempts: polled.attempts ?? null,
+    });
   }
   await context.ensureTaskNotAborted(task);
 
   if (!videoUrl) throw new Error("上游没有返回视频地址");
 
+  // 上游产物是带时间签名的 CDN 地址，过期后 403（等于内容丢失）→ 拿到就立刻转存到我们自己的存储，
+  // 库里只留本地地址；上游地址只作中转，不落库。
+  context.emitTaskProgressEvent(task.recordId, {
+    stage: "downloading_output",
+    message: "视频已出片，正在转存到本站存储",
+  });
+  const stored = await context.materializeVideoOutput({
+    signal: task.abortController.signal,
+    providerId,
+    modelKey,
+    taskId: created.taskId,
+    videoUrl,
+  });
+  context.logGenerationTask("video_task:output_stored", {
+    recordId: task.recordId,
+    userId: task.userId,
+    upstreamUrlPreview: String(videoUrl).slice(0, 120),
+    savedUrl: stored.publicUrl,
+    storageType: stored.storageType,
+    relativePath: stored.relativePath,
+    size: stored.size,
+    refreshed: stored.refreshed,
+  });
+  const localUrl = String(stored.publicUrl || "").trim();
+  if (!localUrl) throw new Error("视频转存失败：没有拿到本地地址");
+
   context.emitTaskProgressEvent(task.recordId, {
     stage: "syncing_record",
-    message: "视频已生成，正在写入记录",
+    message: "视频已转存到本站，正在写入记录",
   });
   await context.updateGenerationRecord(
     task.recordId,
@@ -168,8 +226,22 @@ export const executeVideoTask = async (
       ...context.buildInitialRecordPayload(payload),
       done: true,
       stopped: false,
-      // 与图片链路保持一致：产物统一放 outputs，画布节点从记录里取
-      outputs: [{ outputType: "video", url: videoUrl }],
+      // 与图片链路保持一致：产物统一放 outputs，画布节点从记录里取。
+      // 这里写的是**本站地址**（/uploads/generated/video/...），不是上游 CDN 直链。
+      outputs: [
+        {
+          outputType: "video",
+          url: localUrl,
+          metaJson: {
+            // 只留可长期复用的信息：上游任务 id + 我们自己的存储位置。
+            // 上游那条签名地址**不落库**（会过期，且带签名，没有复用的价值）。
+            upstreamTaskId: created.taskId,
+            storageType: stored.storageType,
+            relativePath: stored.relativePath,
+            fileSizeBytes: stored.size,
+          },
+        },
+      ],
     },
     task.userId,
   );
@@ -191,6 +263,8 @@ export const executeVideoTask = async (
   context.logGenerationTask("video_task:request_success", {
     recordId: task.recordId,
     userId: task.userId,
-    videoUrl,
+    videoUrl: localUrl,
+    upstreamTaskId: created.taskId,
+    storedSize: stored.size,
   });
 };

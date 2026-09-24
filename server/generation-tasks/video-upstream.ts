@@ -16,6 +16,22 @@
  */
 
 import { resolveGatewayProviderUpstream } from "../provider-config/service";
+import { saveUploadedBuffer } from "../storage/service";
+import {
+  normalizeVideoCreateBody,
+  readRequestImageUrls,
+  resolveUpstreamImageUrls,
+  resolveVideoCreateContract,
+} from "./video-create-contract";
+import {
+  VIDEO_POLL_FIRST_DELAY_MS,
+  VIDEO_POLL_MAX_DELAY_MS,
+  VIDEO_POLL_MIN_DELAY_MS,
+  VIDEO_POLL_TOTAL_BUDGET_MS,
+  computeVideoPollDelayMs,
+  shouldContinueVideoPolling,
+  sleepWithAbort,
+} from "./video-poll-schedule";
 import type { FetchWithBurstRateRetryInput } from "./upstream-helpers";
 
 export type VideoDialect = "openai-videos" | "ark-seedance" | "task-generic";
@@ -29,8 +45,17 @@ export interface VideoUpstreamConfig {
   statusPath?: string;
   /** 成品下载路径模板（openai 风格才有：`/videos/{id}/content`） */
   contentPath?: string;
+  /**
+   * 重新签发成品地址的路径模板（GenVideo：`/tasks/output-url/{id}`）。
+   * 上游产物是带时间签名的 CDN 地址，过期后 403 —— 这时只能向它换一份新地址。
+   */
+  outputUrlPath?: string;
   dialect: VideoDialect;
   apiKey?: string;
+  /** 模型能力声明（capabilityJson）：建单参数契约（mode / 时长字段名 / 参考图字段名）从这里读 */
+  modelCapability?: unknown;
+  /** 本站资源的公网基址；参考图是 `/uploads/...` 相对地址时靠它转成上游能取到的绝对地址 */
+  publicAssetBaseUrl?: string;
 }
 
 export interface VideoTaskCreated {
@@ -263,7 +288,8 @@ export const buildVideoCreateRequest = (
         model: body.model,
         content: [{ type: "text", text: prompt }],
         ...(body.ratio ? { ratio: body.ratio } : {}),
-        ...(body.duration ? { duration: Number(body.duration) } : {}),
+        // 时长字段名按契约归一化后可能落在 durationSeconds 上（见 normalizeVideoCreateBody）
+        ...((body.durationSeconds ?? body.duration) ? { duration: Number(body.durationSeconds ?? body.duration) } : {}),
         ...(body.resolution ? { resolution: body.resolution } : {}),
         ...(Array.isArray(body.referenceImages) && body.referenceImages.length
           ? { image_urls: body.referenceImages }
@@ -280,9 +306,12 @@ export const buildVideoCreateRequest = (
 // 真正的 HTTP 动作：建单 + 轮询（由执行器注入 fetchWithBurstRateRetry，与图片链路同一套重试/日志）
 // ---------------------------------------------------------------------------
 
-const VIDEO_POLL_INTERVAL_MS = 3_000
-/** 轮询上限：SceneFlow 那边按 5s × 240 ≈ 20 分钟；这里 3s × 400 ≈ 20 分钟，覆盖 veo/sora/seedance 这类长任务 */
-const VIDEO_POLL_MAX_ATTEMPTS = 400
+// ---------------------------------------------------------------------------
+// 真正的 HTTP 动作：建单 + 轮询（由执行器注入 fetchWithBurstRateRetry，与图片链路同一套重试/日志）
+// ---------------------------------------------------------------------------
+
+// 轮询节奏（首次 5 分钟 / 15→30 秒退避 / 2 小时上限）在 video-poll-schedule.ts 里，
+// 那边是纯函数、有单测；原来的 3 秒 × 400 次（20 分钟就放弃）已删。
 
 const resolveConfig = async (input: { providerId: string; modelKey: string }): Promise<VideoUpstreamConfig> => {
     const upstream = await resolveGatewayProviderUpstream({
@@ -290,17 +319,37 @@ const resolveConfig = async (input: { providerId: string; modelKey: string }): P
         endpointType: 'video',
         modelKey: input.modelKey,
     })
-    const explicitDialect = (upstream as unknown as { extraJson?: { videoDialect?: unknown } }).extraJson?.videoDialect
+    const extraJson = (upstream as unknown as {
+        extraJson?: {
+            videoDialect?: unknown
+            videoStatusPath?: string
+            videoContentPath?: string
+            videoOutputUrlPath?: string
+        }
+    }).extraJson || {}
     const videoEndpoint = upstream.endpoint || '/videos'
     return {
         providerId: input.providerId,
         baseUrl: upstream.baseUrl,
         createEndpoint: videoEndpoint,
-        statusPath: (upstream as unknown as { extraJson?: { videoStatusPath?: string } }).extraJson?.videoStatusPath,
-        contentPath: (upstream as unknown as { extraJson?: { videoContentPath?: string } }).extraJson?.videoContentPath,
-        dialect: resolveVideoDialect({ videoEndpoint, explicit: explicitDialect }),
+        statusPath: extraJson.videoStatusPath,
+        contentPath: extraJson.videoContentPath,
+        outputUrlPath: extraJson.videoOutputUrlPath || deriveOutputUrlPath(extraJson.videoStatusPath),
+        dialect: resolveVideoDialect({ videoEndpoint, explicit: extraJson.videoDialect }),
         apiKey: upstream.apiKey,
+        modelCapability: (upstream as unknown as { modelCapabilityJson?: unknown }).modelCapabilityJson,
+        publicAssetBaseUrl: String(process.env.PUBLIC_ASSET_BASE_URL || '').trim(),
     }
+}
+
+/**
+ * 从查询路径推出「换发成品地址」的路径：`/tasks/{id}` → `/tasks/output-url/{id}`。
+ * 上游文档给的是 `GET /v1/tasks/output-url/{id}`；厂商配置里显式写了就用配置的。
+ */
+const deriveOutputUrlPath = (statusPath?: string): string | undefined => {
+    const value = String(statusPath || '').trim()
+    if (!value.includes('/tasks/{id}')) return undefined
+    return value.replace('/tasks/{id}', '/tasks/output-url/{id}')
 }
 
 const authHeaders = (config: VideoUpstreamConfig) => {
@@ -320,14 +369,36 @@ export interface VideoRequestDeps {
 export const createVideoTaskRequest = async (
     input: { providerId: string; modelKey: string; requestBody: Record<string, unknown>; signal: AbortSignal },
     deps: VideoRequestDeps,
-): Promise<{ upstreamUrl: string; taskId: string; immediateUrl?: string }> => {
+): Promise<{ upstreamUrl: string; taskId: string; immediateUrl?: string; adjustments: string[] }> => {
     const config = await resolveConfig(input)
-    const { url, body } = buildVideoCreateRequest(config, input.requestBody)
+    // 建单参数按模型能力声明归一化：mode / 时长字段名 / 时长档位 / 画幅写法 / 参考图字段名
+    const contract = resolveVideoCreateContract(config.modelCapability)
+    // 参考图先在本层确认上游真能取到：上游对取不到的图是**静默忽略**的（成片对不上、钱已经花了）
+    const requestedImages = readRequestImageUrls(input.requestBody)
+    const reachableImages = requestedImages.length
+        ? await resolveUpstreamImageUrls({
+            images: requestedImages,
+            publicAssetBaseUrl: config.publicAssetBaseUrl,
+        })
+        : []
+    const normalized = normalizeVideoCreateBody({
+        body: input.requestBody,
+        contract,
+        referenceImages: reachableImages,
+    })
+    const { url, body } = buildVideoCreateRequest(config, normalized.body)
     deps.log?.('video_upstream:create', {
         providerId: input.providerId,
         modelKey: input.modelKey,
         dialect: config.dialect,
         url,
+        // 按「真正发出去的形状」留痕：字段名与固定值写错时上游不报错、直接忽略，只能靠日志对账
+        mode: body.mode ?? null,
+        ratio: body.ratio ?? null,
+        durationField: contract.durationField || 'duration',
+        duration: body[contract.durationField || 'duration'] ?? null,
+        imageCount: reachableImages.length,
+        adjustments: normalized.adjustments,
     })
     const response = await deps.fetchWithBurstRateRetry({
         url,
@@ -344,6 +415,8 @@ export const createVideoTaskRequest = async (
         throw new Error(`视频建单失败（HTTP ${response.status}）：${extractErrorMessage(payload) || String(text).slice(0, 160)}`)
     }
     const record = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    // 任务 id 是 long、以字符串返回：只能用字符串收发。number 超过安全整数会静默丢精度，
+    // 拿着错的 id 去查任务只会得到 404，而钱已经扣了。
     const taskId = String(
         record.id
         || record.task_id
@@ -355,7 +428,22 @@ export const createVideoTaskRequest = async (
     if (!taskId && !immediateUrl) {
         throw new Error(`视频建单响应里既没有任务 id 也没有成品地址：${String(text).slice(0, 160)}`)
     }
-    return { upstreamUrl: url, taskId: taskId || 'immediate', immediateUrl: immediateUrl || undefined }
+    // 建单响应里带 points（本渠道 5 积分/条、建单即预扣）与状态，留痕供对账
+    deps.log?.('video_upstream:create_response', {
+        taskId: taskId || '(immediate)',
+        status: String(record.status || ''),
+        points: record.points ?? null,
+        createdAt: record.createdAt ?? null,
+        finishedAt: record.finishedAt ?? null,
+        hasOutputUrl: Boolean(record.outputUrl),
+        immediateUrl: Boolean(immediateUrl),
+    })
+    return {
+        upstreamUrl: url,
+        taskId: taskId || 'immediate',
+        immediateUrl: immediateUrl || undefined,
+        adjustments: normalized.adjustments,
+    }
 }
 
 /** 轮询到终态；失败时抛上游给的原因（不吞） */
@@ -368,20 +456,34 @@ export const pollVideoTaskRequest = async (
         onProgress?: (state: { rawStatus: string; progress?: number; attempt: number }) => Promise<void> | void
     },
     deps: VideoRequestDeps,
-): Promise<{ upstreamUrl: string; videoUrl: string }> => {
+): Promise<{ upstreamUrl: string; videoUrl: string; attempts: number }> => {
     const config = await resolveConfig(input)
     const statusPath = (config.statusPath || `${config.createEndpoint}/{id}`).replace('{id}', encodeURIComponent(input.taskId))
     const url = joinUpstreamUrl(config.baseUrl, statusPath)
+    const startedAt = Date.now()
     deps.log?.('video_upstream:poll_start', {
         providerId: input.providerId,
         modelKey: input.modelKey,
         taskId: input.taskId,
         url,
         dialect: config.dialect,
+        firstDelayMs: VIDEO_POLL_FIRST_DELAY_MS,
+        minDelayMs: VIDEO_POLL_MIN_DELAY_MS,
+        maxDelayMs: VIDEO_POLL_MAX_DELAY_MS,
+        totalBudgetMs: VIDEO_POLL_TOTAL_BUDGET_MS,
     })
 
-    for (let attempt = 1; attempt <= VIDEO_POLL_MAX_ATTEMPTS; attempt += 1) {
+    let attempt = 0
+    while (shouldContinueVideoPolling(Date.now() - startedAt)) {
+        attempt += 1
+        // 先等再查：第一次查询落在建单 5 分钟后（上游文档要求），之后 15→30 秒退避；
+        // 等待掐到预算内，避免最后一次等待越过 2 小时上限
+        const remainingMs = Math.max(0, VIDEO_POLL_TOTAL_BUDGET_MS - (Date.now() - startedAt))
+        const delayMs = Math.min(computeVideoPollDelayMs(attempt), remainingMs)
+        deps.log?.('video_upstream:poll_wait', { attempt, delayMs, elapsedMs: Date.now() - startedAt })
+        await sleepWithAbort(delayMs, input.signal)
         if (input.signal.aborted) throw new Error('任务已取消')
+
         const response = await deps.fetchWithBurstRateRetry({
             url,
             init: { method: 'GET', headers: authHeaders(config) },
@@ -411,14 +513,184 @@ export const pollVideoTaskRequest = async (
             await input.onProgress?.({ rawStatus, progress: extractProgress(payload), attempt })
             if (state === 'succeeded') {
                 const videoUrl = extractVideoUrl(payload)
-                if (videoUrl) return { upstreamUrl: url, videoUrl }
+                if (videoUrl) {
+                    // 终态里带 points（本渠道按条预扣，失败/超时全额退回）与 finishedAt
+                    deps.log?.('video_upstream:poll_succeeded', {
+                        attempt,
+                        elapsedMs: Date.now() - startedAt,
+                        rawStatus,
+                        points: record.points ?? null,
+                        finishedAt: record.finishedAt ?? null,
+                    })
+                    return { upstreamUrl: url, videoUrl, attempts: attempt }
+                }
                 // 状态成功但没给地址：再等一轮（有的网关先改状态后补地址）
                 deps.log?.('video_upstream:poll_succeeded_without_url', { attempt, body: String(text).slice(0, 200) })
             } else if (state === 'failed') {
                 throw new Error(`上游视频任务失败：${extractErrorMessage(payload) || rawStatus || '未知原因'}`)
             }
         }
-        await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS))
     }
-    throw new Error(`视频任务轮询超时（${Math.round((VIDEO_POLL_INTERVAL_MS * VIDEO_POLL_MAX_ATTEMPTS) / 60000)} 分钟未出结果）`)
+    throw new Error(`视频任务轮询超时（${Math.round(VIDEO_POLL_TOTAL_BUDGET_MS / 60000)} 分钟未出结果；上游此时也会判 timeout 并全额退分）`)
+}
+
+// ---------------------------------------------------------------------------
+// 产物转存：上游给的是带时间签名的 CDN 地址（会过期，过期后 403 = 内容丢失），
+// 所以拿到 succeeded 就立刻下载到我们自己的存储，库里只留本地地址。
+// ---------------------------------------------------------------------------
+
+/**
+ * 产物 MIME 兜底。
+ *
+ * 实测：GenVideo 的成品在 doubao TOS 上回的 content-type 是 `binary/octet-stream`，
+ * 直接拿它存盘会**存成没有扩展名的文件**，我们静态服务再按扩展名回 content-type，
+ * 画布上的 <video> 就播不动了（字节是对的、能播不了）。所以：非 video/* 时按地址里的
+ * 扩展名认，再认不出就按上游文档的 mime_type=video_mp4 落成 video/mp4。
+ */
+const resolveVideoMimeType = (contentType: string, sourceUrl: string): string => {
+    if (/^video\//i.test(contentType)) return contentType
+    const extension = /\.(mp4|webm|mov|m4v)(?:\?|#|$)/i.exec(String(sourceUrl || ''))?.[1]?.toLowerCase()
+    if (extension === 'webm') return 'video/webm'
+    if (extension === 'mov') return 'video/quicktime'
+    if (extension === 'm4v') return 'video/x-m4v'
+    return 'video/mp4'
+}
+
+export interface MaterializedVideoOutput {
+    /** 落库用的本地地址（/uploads/... 或对象存储地址） */
+    publicUrl: string
+    relativePath: string
+    storageType: string
+    size: number
+    mimeType?: string
+    /** 实际下载用的上游地址（可能是换发后的新地址），只做日志用，不落库 */
+    sourceUrl: string
+    /** 是否走了「换发新地址」这一步 */
+    refreshed: boolean
+}
+
+/** 向上游换发一份新的成品地址（旧地址过期/403 时用；文档：GET /v1/tasks/output-url/{id}） */
+export const requestRefreshedOutputUrl = async (
+    input: { providerId: string; modelKey: string; taskId: string; signal: AbortSignal },
+    deps: VideoRequestDeps,
+): Promise<string> => {
+    const config = await resolveConfig(input)
+    const outputUrlPath = String(config.outputUrlPath || '').trim()
+    if (!outputUrlPath) {
+        throw new Error('上游没有配置换发成品地址的路径，无法重新获取视频地址')
+    }
+    const url = joinUpstreamUrl(config.baseUrl, outputUrlPath.replace('{id}', encodeURIComponent(input.taskId)))
+    const response = await deps.fetchWithBurstRateRetry({
+        url,
+        init: { method: 'GET', headers: authHeaders(config) },
+        signal: input.signal,
+        stage: 'video_output_url_refresh',
+        timeoutMs: 30_000,
+        detail: { providerId: input.providerId, taskId: input.taskId },
+    })
+    const text = await response.text()
+    let payload: unknown = null
+    try { payload = JSON.parse(text) } catch { payload = text }
+    if (!response.ok) {
+        throw new Error(`换发视频地址失败（HTTP ${response.status}）：${extractErrorMessage(payload) || String(text).slice(0, 160)}`)
+    }
+    const refreshed = extractVideoUrl(payload)
+    deps.log?.('video_upstream:output_url_refreshed', {
+        taskId: input.taskId,
+        url,
+        ok: Boolean(refreshed),
+    })
+    if (!refreshed) {
+        throw new Error(`上游换发的响应里没有视频地址：${String(text).slice(0, 160)}`)
+    }
+    return refreshed
+}
+
+/**
+ * 下载上游成品并转存到我们自己的存储，返回落库用的本地地址。
+ *
+ * 为什么必须在视频链路上做这一步（而不是只把 CDN 地址写进库）：
+ * `outputUrl` 是第三方 CDN 的**时间签名地址**，过期后用户再看就是 403 ——
+ * 记录还在、视频没了，等于内容丢失。地址为 null 或下载 403 时按文档向
+ * `/tasks/output-url/{id}` 换一份新地址再试一次。
+ */
+export const materializeVideoOutput = async (
+    input: { providerId: string; modelKey: string; taskId: string; videoUrl: string; signal: AbortSignal },
+    deps: VideoRequestDeps,
+): Promise<MaterializedVideoOutput> => {
+    const downloadOnce = async (sourceUrl: string) => {
+        const response = await deps.fetchWithBurstRateRetry({
+            url: sourceUrl,
+            init: { method: 'GET' },
+            signal: input.signal,
+            stage: 'video_output_download',
+            timeoutMs: 300_000,
+            detail: { providerId: input.providerId, taskId: input.taskId },
+        })
+        if (!response.ok) {
+            throw new Error(`下载视频成品失败（HTTP ${response.status}）`)
+        }
+        const arrayBuffer = await response.arrayBuffer()
+        return {
+            buffer: Buffer.from(arrayBuffer),
+            mimeType: resolveVideoMimeType(
+                String(response.headers.get('content-type') || '').trim(),
+                sourceUrl,
+            ),
+        }
+    }
+
+    let sourceUrl = String(input.videoUrl || '').trim()
+    let refreshed = false
+    let downloaded: { buffer: Buffer; mimeType?: string } | null = null
+
+    if (!sourceUrl) {
+        // 文档：succeeded 时 outputUrl 应当非空；为空就只能换发
+        sourceUrl = await requestRefreshedOutputUrl(input, deps)
+        refreshed = true
+        downloaded = await downloadOnce(sourceUrl)
+    } else {
+        try {
+            downloaded = await downloadOnce(sourceUrl)
+        } catch (error) {
+            // 签名过期/403：换一份新地址再下一次（上游地址只做中转，不落库）
+            deps.log?.('video_upstream:output_download_failed', {
+                taskId: input.taskId,
+                error: error instanceof Error ? error.message : String(error),
+            })
+            sourceUrl = await requestRefreshedOutputUrl(input, deps)
+            refreshed = true
+            downloaded = await downloadOnce(sourceUrl)
+        }
+    }
+
+    const size = downloaded.buffer.byteLength
+    if (!size) throw new Error('视频成品转存失败：下载到的内容为空')
+
+    const saved = await saveUploadedBuffer({
+        buffer: downloaded.buffer,
+        mimeType: downloaded.mimeType,
+        filename: `generation-output-${input.taskId}`,
+        category: 'generated/video',
+    })
+    deps.log?.('video_upstream:output_stored', {
+        taskId: input.taskId,
+        refreshed,
+        sourceUrlPreview: sourceUrl.slice(0, 160),
+        savedUrl: saved.publicUrl,
+        storageType: saved.storageType,
+        relativePath: saved.relativePath,
+        size,
+        mimeType: downloaded.mimeType || null,
+    })
+
+    return {
+        publicUrl: saved.publicUrl,
+        relativePath: saved.relativePath,
+        storageType: saved.storageType,
+        size,
+        mimeType: downloaded.mimeType,
+        sourceUrl,
+        refreshed,
+    }
 }

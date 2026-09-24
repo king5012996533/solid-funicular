@@ -45,7 +45,11 @@ import { GenerationTaskRequestError } from './shared'
 import { getGenerationTaskExecutionStrategy, type GenerationTaskExecutionStrategyContext, type TaskAbortReason } from './execution-strategies'
 import { executeImageTask } from './image-task-executor'
 import { executeVideoTask } from './video-task-executor'
-import { createVideoTaskRequest, pollVideoTaskRequest } from './video-upstream'
+import {
+  createVideoTaskRequest,
+  materializeVideoOutput,
+  pollVideoTaskRequest,
+} from './video-upstream'
 import { executeAgentChatTaskFlow } from './agent-chat-task-executor'
 import { executeCanvasAgentTaskFlow } from './canvas-agent-executor'
 import { executeAgentWorkspaceTaskFlow } from './agent-workspace-task-executor'
@@ -204,8 +208,17 @@ const executeVideoGenerationTask = async (task: RunningGenerationTask, payload: 
     createVideoTask: (input) => createVideoTaskRequest(input, {
       fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
       onRetry: input.onRetry,
+      // 建单参数（字段名 / mode / 时长）与上游响应的 points 都要留痕：
+      // 上游对写错的字段名不报错、直接忽略，只能靠日志对账。
+      log: (stage, detail) => logGenerationTask(stage, detail),
     }),
     pollVideoTask: (input) => pollVideoTaskRequest(input, {
+      fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
+      log: (stage, detail) => logGenerationTask(stage, detail),
+    }),
+    // 成品转存：上游给的是带时间签名的 CDN 地址（会过期、过期后 403），
+    // 所以拿到 succeeded 就立刻下载到我们自己的存储，库里只留本地地址。
+    materializeVideoOutput: (input) => materializeVideoOutput(input, {
       fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({ ...retryInput, logGenerationTask }),
       log: (stage, detail) => logGenerationTask(stage, detail),
     }),
