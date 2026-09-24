@@ -651,6 +651,9 @@ export const resolveGatewayProviderUpstream = async (input: {
     apiKey: decryptProviderApiKey(provider.apiKeyEncrypted),
     endpoint,
     modelCapabilityJson,
+    // 视频链路要读厂商 extraJson 里的 videoDialect / videoStatusPath / videoContentPath；
+    // 不返回它的话，轮询只能退回 `${endpoint}/{id}`，对 GenVideo（查询在 /tasks/{id}）就是打错地址。
+    extraJson: provider.extraJson,
   }
 }
 

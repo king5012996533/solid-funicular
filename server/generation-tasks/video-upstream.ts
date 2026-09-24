@@ -112,8 +112,57 @@ export const normalizeTaskStatus = (
   return "processing";
 };
 
+/**
+ * 明确的成品字段优先：这些字段的值本身就是成品地址，**不要求带 `.mp4` 这类扩展名**。
+ *
+ * 为什么要先走这一遍：GenVideo（ai-genvideo.com）成功响应把成品放在 `outputUrl`，
+ * 但它指向 doubao 的 TOS，路径里没有 `.mp4`（只有查询串 `mime_type=video_mp4`），
+ * 下面按扩展名筛的那一遍会把这种地址判成「不是视频」→ 状态成功却取不到地址、一直轮询到超时。
+ */
+const EXPLICIT_VIDEO_URL_KEYS = [
+  "outputUrl",
+  "output_url",
+  "video_url",
+  "videoUrl",
+  "file_url",
+  "download_url",
+] as const;
+
+const pickExplicitVideoUrl = (payload: unknown): string => {
+  const seen = new Set<unknown>();
+  const walk = (node: unknown, depth: number): string => {
+    if (depth > 6 || node === null || node === undefined) return "";
+    if (typeof node !== "object" || seen.has(node)) return "";
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const hit = walk(item, depth + 1);
+        if (hit) return hit;
+      }
+      return "";
+    }
+    const record = node as Record<string, unknown>;
+    for (const key of EXPLICIT_VIDEO_URL_KEYS) {
+      const value = record[key];
+      if (typeof value === "string" && /^https?:\/\//i.test(value.trim()))
+        return value.trim();
+    }
+    for (const key of ["data", "result", "output"]) {
+      if (key in record) {
+        const hit = walk(record[key], depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return "";
+  };
+  return walk(payload, 0);
+};
+
 /** 从五花八门的响应里把成品地址捞出来（同一个网关不同模型字段都不一样） */
 export const extractVideoUrl = (payload: unknown): string => {
+  const explicit = pickExplicitVideoUrl(payload);
+  if (explicit) return explicit;
+
   const seen = new Set<unknown>();
   const walk = (node: unknown, depth: number): string => {
     if (depth > 6 || node === null || node === undefined) return "";
@@ -137,6 +186,9 @@ export const extractVideoUrl = (payload: unknown): string => {
     for (const key of [
       "video_url",
       "videoUrl",
+      // GenVideo（ai-genvideo.com）成功响应把成品放在 outputUrl（旧项目实测字段）
+      "outputUrl",
+      "output_url",
       "url",
       "content",
       "output",
