@@ -1,9 +1,20 @@
+/**
+ * 独立后端服务包（dist-service）的生产启动入口。
+ *
+ * 由 scripts/build-server-service.mjs 复制到 dist-service 根目录，与
+ * dist-service/startup-env-validation.mjs 一起运行（Dockerfile 里 PID 1 直接跑它）。
+ *
+ * 职责：
+ *   1. 加载 .env.production（容器里通常没有该文件，env 由 compose env_file 注入）；
+ *   2. 关键变量校验，缺失即失败 —— 不静默连开发库、不用仓库默认密钥；
+ *   3. 执行 prisma migrate deploy；
+ *   4. node 直启后端，并把 SIGTERM/SIGINT 转发过去做优雅停机。
+ */
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { config as loadEnvFile } from 'dotenv'
-import { runStartupLegacySecretsSync } from './lib/run-startup-legacy-secrets-sync.mjs'
-import { assertProductionEnv } from './lib/startup-env-validation.mjs'
+import { assertProductionEnv } from './startup-env-validation.mjs'
 
 // 需要转发给后端进程的退出信号。
 const FORWARD_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP']
@@ -14,7 +25,6 @@ const runCommand = (command, args, options = {}) => {
     const outputChunks = []
     const errorChunks = []
 
-    // 启动子进程。
     const child = spawn(command, args, {
       stdio: ['inherit', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
@@ -35,10 +45,8 @@ const runCommand = (command, args, options = {}) => {
       }
     })
 
-    // 监听命令执行失败场景。
     child.on('error', reject)
 
-    // 根据退出码判断命令是否成功。
     child.on('close', (code) => {
       const stdout = Buffer.concat(outputChunks).toString('utf8')
       const stderr = Buffer.concat(errorChunks).toString('utf8')
@@ -53,14 +61,7 @@ const runCommand = (command, args, options = {}) => {
   })
 }
 
-/**
- * 启动后端服务，并把退出信号转发给它。
- *
- * 容器里 PID 1 是本脚本（Dockerfile CMD 直接 `node start-production.mjs`，不再经 npm）。
- * 收到 SIGTERM 时如果不转发，后端进程收不到信号，就只能在宽限期后被硬杀 ——
- * 在途生成任务（图片单张实测 54~334 秒）会被切断。这里原样转发信号，
- * 由后端自己做优雅停机。
- */
+// 启动后端服务，并把退出信号转发给它（详见 scripts/start-production.mjs 的说明）。
 const runServer = (command, args) => {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -77,20 +78,16 @@ const runServer = (command, args) => {
       handlers.clear()
     }
 
-    const forwardSignal = (signal) => {
-      if (child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill(signal)
-        } catch {
-          // 忽略：子进程可能刚好已退出。
-        }
-      }
-    }
-
     for (const signal of FORWARD_SIGNALS) {
       const handler = () => {
         console.info(`[start-production] 收到 ${signal}，转发给后端进程以优雅停机`)
-        forwardSignal(signal)
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill(signal)
+          } catch {
+            // 忽略：子进程可能刚好已退出。
+          }
+        }
       }
       handlers.set(signal, handler)
       process.on(signal, handler)
@@ -103,12 +100,7 @@ const runServer = (command, args) => {
 
     child.on('close', (code, signal) => {
       cleanup()
-      if (signal) {
-        // 被信号（含我们转发的 SIGTERM）终止视为正常停机。
-        resolve()
-        return
-      }
-      if (code === 0) {
+      if (signal || code === 0) {
         resolve()
         return
       }
@@ -127,7 +119,7 @@ const hasProductionEnvFile = async () => {
   }
 }
 
-// 从 Prisma migrate deploy 输出里提取核心信息，避免把整段原始日志直接打出来。
+// 从 Prisma migrate deploy 输出里提取核心信息。
 const summarizePrismaMigrateOutput = (rawText) => {
   const normalizedText = String(rawText || '')
 
@@ -148,18 +140,6 @@ const summarizePrismaMigrateOutput = (rawText) => {
   }
 }
 
-const resolveRedisStatusText = () => {
-  const enabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.REDIS_ENABLED || '').trim().toLowerCase())
-  if (!enabled) {
-    return '未启用'
-  }
-
-  const host = String(process.env.REDIS_HOST || '').trim() || '127.0.0.1'
-  const port = String(process.env.REDIS_PORT || '').trim() || '6379'
-  const database = String(process.env.REDIS_DATABASE || '').trim() || '0'
-  return `已启用 (${host}:${port}/${database})`
-}
-
 // 启动生产环境应用。
 const start = async () => {
   const hasEnvFile = await hasProductionEnvFile()
@@ -171,11 +151,9 @@ const start = async () => {
     process.env.ENV_FILE = '.env.production'
   }
 
-  // 关键变量缺失 / 仍是仓库默认密钥时立即失败，绝不带着残缺配置去连库、跑迁移。
   assertProductionEnv(process.env)
   console.info('[start-production] 环境变量校验通过')
 
-  // 先执行数据库迁移，创建 secret 相关表；删旧密钥列由后续同步负责。
   console.info('[start-production] 正在检查数据库迁移')
   const migrateResult = await runCommand('npx', ['prisma', 'migrate', 'deploy'])
   const migrationSummary = summarizePrismaMigrateOutput(`${migrateResult.stdout}\n${migrateResult.stderr}`)
@@ -184,33 +162,19 @@ const start = async () => {
     + `${migrationSummary.migrationCount || '0'} 个迁移 · ${migrationSummary.statusText}`,
   )
 
-  // 迁移建表后，再把旧 api_key 写入 secret_configs，最后删除 legacy 列。
-  try {
-    await runStartupLegacySecretsSync()
-  } catch (error) {
-    console.error('[start-production] 旧版厂商密钥同步失败，将继续启动', error)
-  }
-
-  // 根据运行环境决定是否显式加载 .env.production。
   const serverArgs = hasEnvFile
-    ? ['--env-file=.env.production', 'dist-service/server/index.js']
-    : ['dist-service/server/index.js']
+    ? ['--env-file=.env.production', 'server/index.js']
+    : ['server/index.js']
 
-  console.info(`[start-production] Redis: ${resolveRedisStatusText()}`)
   console.info('[start-production] 正在启动后端服务')
-
-  // 再启动正式后端服务，由后端统一承载 API 与静态前端。
   await runServer('node', serverArgs)
 }
 
-// 执行启动流程，并在失败时返回非零退出码。
 start()
   .then(() => {
-    // 后端已正常退出（含收到 SIGTERM 优雅停机）；显式收尾，避免残留句柄挂住进程。
     process.exit(0)
   })
   .catch((error) => {
-    // 输出启动失败原因，便于排查部署问题。
     console.error('[start-production] 启动失败', error)
     process.exit(1)
   })

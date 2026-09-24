@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# 后端独立服务包（npm run build:service 的产物，构建期生成，不入库）
+dist-service
 
 # 不维护 npm lock，CI 使用 npm install（无 setup-node 缓存）
 package-lock.json

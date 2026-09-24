@@ -50,6 +50,16 @@ jobs:
             exit 1
           fi
 
+          if [ -z "${{ secrets.STORAGE_CONFIG_SECRET }}" ]; then
+            echo "缺少 GitHub Secrets: STORAGE_CONFIG_SECRET"
+            exit 1
+          fi
+
+          if [ -z "${{ secrets.JWT_SECRET }}" ]; then
+            echo "缺少 GitHub Secrets: JWT_SECRET"
+            exit 1
+          fi
+
           if [ -z "${{ secrets.VITE_API_BASE_URL }}" ]; then
             echo "缺少 GitHub Secrets: VITE_API_BASE_URL"
             exit 1
@@ -59,6 +69,15 @@ jobs:
             echo "缺少 GitHub Secrets: CORS_ALLOWED_ORIGINS"
             exit 1
           fi
+
+      - name: 计算本次部署的镜像 tag
+        id: image-tag
+        run: |
+          # workflow_run 用被触发那次构建的 head_sha；手动触发用当前 sha。
+          # 镜像由 docker-image.yml 打上不可变的 sha-<短hash> tag，部署时固定消费它，
+          # 这样"线上跑的是哪个提交"可追溯，回滚也有确定的 tag 可指。
+          HEAD_SHA="${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}"
+          echo "image-tag=sha-${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: 初始化部署目录
         uses: appleboy/ssh-action@v1.0.3
@@ -85,11 +104,15 @@ jobs:
 
       - name: 通过 SSH 部署 Docker 容器
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.image-tag }}
+          SERVER_PORT: "5409"
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
+          envs: IMAGE_TAG,SERVER_PORT
           script: |
             set -eux
 
@@ -97,7 +120,9 @@ jobs:
             mkdir -p "$DEPLOY_DIR"
             cd "$DEPLOY_DIR"
 
-            cat > .env <<'EOF'
+            # 文件名必须与 docker-compose.yml 的 `env_file: ./.env.production` 完全一致。
+            # 以前这里写的是 .env，compose 找不到 env_file → 变量全缺 / compose 直接报错。
+            cat > .env.production <<'EOF'
             SERVER_PORT=5409
             VITE_API_BASE_URL=${{ secrets.VITE_API_BASE_URL }}
             VITE_PROVIDER_DEFAULT_BASE_URL=https://api.chatfire.site/v1
@@ -107,6 +132,7 @@ jobs:
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             PROVIDER_CONFIG_SECRET=${{ secrets.PROVIDER_CONFIG_SECRET }}
             STORAGE_CONFIG_SECRET=${{ secrets.STORAGE_CONFIG_SECRET }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
             REDIS_ENABLED=${{ secrets.REDIS_ENABLED }}
             REDIS_HOST=${{ secrets.REDIS_HOST }}
             REDIS_PORT=${{ secrets.REDIS_PORT }}
@@ -118,18 +144,41 @@ jobs:
             REDIS_TASK_RUNTIME_TTL_SECONDS=1800
             REDIS_TASK_SNAPSHOT_TTL_SECONDS=1800
             REDIS_TASK_ABORT_TTL_SECONDS=300
-            REDIS_TASK_LOCK_TTL_MS=30000
+            REDIS_TASK_LOCK_TTL_MS=300000
             AUTH_LOGIN_CODE_EXPIRE_MINUTES=5
             AUTH_SESSION_EXPIRE_DAYS=30
             EOF
-            
+
+            # 记录本次部署的镜像 tag 与提交号，供对账与回滚。
+            printf 'IMAGE_TAG=%s\nCOMMIT=%s\nDEPLOYED_AT=%s\n' \
+              "$IMAGE_TAG" "${{ github.event.workflow_run.head_sha || github.sha }}" "$(date -u +%FT%TZ)" \
+              > .deployed-version
+
             ls -la
             # 清理历史遗留的同名容器，避免旧部署方式残留导致 compose 重建失败。
             docker rm -f canana-vue-app || true
-            docker compose pull
-            docker compose up -d --force-recreate --remove-orphans
-            docker image prune -f
+
+            # 固定 tag 部署（不回落到 latest）。IMAGE_TAG 同时用于 compose 插值。
+            IMAGE_TAG="$IMAGE_TAG" docker compose pull
+            IMAGE_TAG="$IMAGE_TAG" docker compose up -d --force-recreate --remove-orphans
+
+            # 不执行 `docker image prune`：上一版镜像要留着做回滚素材（见 docs/ops/rollback.md）。
+
+            # 部署后探针：readiness 会真探 DB/Redis，依赖不可用时返回 503 → 这里判失败让 workflow 变红。
+            ready=0
+            for i in $(seq 1 20); do
+              if curl -fsS "http://127.0.0.1:${SERVER_PORT}/api/ready" >/dev/null; then ready=1; break; fi
+              sleep 3
+            done
+            if [ "$ready" != "1" ]; then
+              echo "部署后 readiness 探针失败：http://127.0.0.1:${SERVER_PORT}/api/ready 未在 60 秒内返回 2xx"
+              docker compose logs --tail=80 app || true
+              exit 1
+            fi
+
             docker ps
+            echo "--- 保留的镜像（回滚素材）---"
+            docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedSince}}' | grep canana-vue || true
 
       - name: 发送部署通知
         if: always()

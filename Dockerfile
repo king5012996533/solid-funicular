@@ -74,5 +74,11 @@ RUN mkdir -p /app/uploads
 # 暴露统一应用端口。
 EXPOSE 5409
 
-# 启动完整生产应用，先迁移数据库，再启动统一服务。
-CMD ["npm", "run", "start"]
+# 让 docker stop / 编排下发的 SIGTERM 直接到达应用，触发优雅停机。
+STOPSIGNAL SIGTERM
+
+# 启动完整生产应用：node 直启，PID 1 就是 node。
+# 以前是 ["npm", "run", "start"]，PID 1 是 npm，SIGTERM 传不到 node，
+# 每次发布都会硬切断在途生成任务（图片单张实测 54~334 秒）。
+# start-production.mjs 内部会校验生产环境变量、跑迁移，再把信号转发给后端进程。
+CMD ["node", "start-production.mjs"]

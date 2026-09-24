@@ -258,17 +258,39 @@ npm run type-check
 npm run build
 ```
 
-### 生产启动
+### 生产启动（裸机 / 非 Docker）
+
+`npm run start` 运行的是**打包后的服务包**（`dist-service/`），不是源码。直接跑会 `MODULE_NOT_FOUND`，
+所以必须先构建前端与后端服务包：
 
 ```bash
+# 0) 准备 .env.production（缺失时启动会直接失败，不会静默连开发库）
+cp .env.production.example .env.production   # 然后填真实值
+
+# 1) 前端静态资源 → dist/
+npm run build
+
+# 2) 后端独立服务包 → dist-service/（这一步以前 README 漏了，照着做会起不来）
+npm run build:service
+
+# 3) 启动（校验环境变量 → prisma migrate deploy → node 直启服务端）
 npm run start
 ```
 
 生产启动流程会自动处理：
 
-1. `prisma migrate deploy`
-2. 启动服务端
-3. 由服务端统一托管前端静态资源与 API
+1. 加载 `.env.production` 并**校验关键变量**（`DATABASE_URL` / `JWT_SECRET` /
+   `PROVIDER_CONFIG_SECRET` / `STORAGE_CONFIG_SECRET`）：缺失或仍用仓库默认密钥时**立即退出**，
+   不会带着残缺配置去连库、跑迁移；
+2. `prisma migrate deploy`；
+3. node 直启服务端，由服务端统一托管前端静态资源与 API；
+4. 收到 `SIGTERM`/`SIGINT` 后优雅停机（停止接新请求，等待在途任务/连接收口，默认上限 5 分钟）。
+
+- 健康检查：`GET /api/health`（liveness，只表示进程活着）；
+- **就绪检查**：`GET /api/ready`（readiness，真探 DB/Redis，任一不可用返回 503，供编排摘流量）。
+
+> 单机 Docker 部署见下方「🐳 Docker 部署」。运维细节见
+> [数据库备份与恢复](docs/ops/backup-restore.md) 与 [发布/回滚](docs/ops/rollback.md)。
 
 ## 🖼️ 图片生成与编辑链路
 
@@ -290,7 +312,6 @@ npm run start
 - 有参考图时：自动切换到图片编辑接口
 - 服务端生成任务会按 `requestMode` 分流，不再把参考图继续塞进旧 JSON 请求体
 
-
 其中图片编辑请求会发送如下核心字段：
 
 - `model`
@@ -308,17 +329,22 @@ npm run start
 
 ### 推荐最小环境变量
 
+`docker-compose.yml` 通过 `env_file` 读取 **`.env.production`**（可用 `APP_ENV_FILE` 覆盖），
+所以文件必须叫这个名字——以前部署脚本写的是 `.env`，compose 找不到，变量全缺。
+
 ```env
-APP_PORT=5409
+SERVER_PORT=5409
 VITE_API_BASE_URL=https://你的域名或接口地址
 STATIC_DIST_DIR=/app/dist
 UPLOADS_DIR=/app/uploads
 CORS_ALLOWED_ORIGINS=https://你的前端域名
 DATABASE_URL=mysql://用户名:密码@数据库地址:3306/canana_mind
-PROVIDER_CONFIG_SECRET=请替换成你自己的密钥
-STORAGE_CONFIG_SECRET=
+PROVIDER_CONFIG_SECRET=请替换成你自己的随机密钥
+STORAGE_CONFIG_SECRET=请替换成你自己的随机密钥
+JWT_SECRET=请替换成你自己的随机密钥
 AUTH_LOGIN_CODE_EXPIRE_MINUTES=5
 AUTH_SESSION_EXPIRE_DAYS=30
+GRACEFUL_SHUTDOWN_TIMEOUT_MS=300000
 REDIS_ENABLED=true
 REDIS_HOST=redis
 REDIS_PORT=6379
@@ -329,11 +355,18 @@ REDIS_ENV=production
 REDIS_URL=
 ```
 
+> `PROVIDER_CONFIG_SECRET` / `STORAGE_CONFIG_SECRET` 留空或使用仓库里的示例值时，
+> 生产启动会**直接失败**（禁止回落到公开默认密钥，否则库里的厂商 key 等于明文）。
+
 ### 启动方式
 
+镜像 tag 由 `IMAGE_TAG` 注入（默认 `latest`，生产应固定到 `vX.Y.Z` 或 `sha-<短hash>`，
+见 [发布/回滚](docs/ops/rollback.md)）：
+
 ```bash
-docker compose pull
-docker compose up -d --force-recreate --remove-orphans
+# 拉取指定版本（不指定则用 latest）
+IMAGE_TAG=v1.0.3 docker compose pull
+IMAGE_TAG=v1.0.3 docker compose up -d --force-recreate --remove-orphans
 ```
 
 如果需要本机构建镜像：
@@ -343,18 +376,38 @@ docker build -t canana-vue:latest .
 docker compose up -d --force-recreate --remove-orphans
 ```
 
+容器健康检查打的是 `/api/ready`（真探 DB/Redis）；`stop_grace_period` 已设为 320s，
+配合应用侧 `GRACEFUL_SHUTDOWN_TIMEOUT_MS`，发布时不会硬切断在途生成任务。
+
 ## 🧩 常用脚本
 
 ```bash
 npm run dev
-npm run build
-npm run start
+npm run build            # 前端静态资源 → dist/
+npm run build:service    # 后端独立服务包 → dist-service/（生产启动前必须先跑）
+npm run start            # 生产启动（校验 env → 迁移 → 起服务）
 npm run preview
 npm run type-check
+npm run type-check:server
 npm run prisma:generate
 npm run prisma:migrate:dev
 npm run prisma:migrate:deploy
 ```
+
+### 运维脚本（备份 / 恢复 / 回滚）
+
+```bash
+# 数据库备份（mysqldump + gzip + 轮转，失败非零退出并告警）
+DATABASE_URL='mysql://用户:密码@地址:3306/canana_mind' scripts/backup-db.sh
+
+# 恢复（必须显式确认，避免手滑覆盖）
+RESTORE_CONFIRM=yes DATABASE_URL='mysql://…' scripts/restore-db.sh backups/canana_mind_YYYYmmdd_HHMMSS.sql.gz
+
+# 备份新鲜度检查（可挂 cron）
+BACKUP_DIR=./backups scripts/check-backup-freshness.sh
+```
+
+细节见 [数据库备份与恢复](docs/ops/backup-restore.md)、[发布/回滚与镜像保留](docs/ops/rollback.md)。
 
 ## 🗂️ 当前项目结构
 
@@ -482,8 +535,6 @@ canana-vue/
 - Redis 健康状态、运行时配置查看
 - 主题色与布局配置
 
-
-
 ## 🖼️ 存储与上传
 
 ### 本地上传
@@ -570,7 +621,7 @@ Copyright (c) 2026 Sam
 
 ### src-cutia —— 视频编辑器模块
 
-`src-cutia/` 目录下的代码来自 [msgbyte/cutia](https://github.com/msgbyte/cutia)（*An open-source, in-browser alternative to CapCut*），
+`src-cutia/` 目录下的代码来自 [msgbyte/cutia](https://github.com/msgbyte/cutia)（_An open-source, in-browser alternative to CapCut_），
 采用 **MIT** 许可，原始版权声明为 `Copyright 2025 Cutia`。
 完整的许可文本见 [`src-cutia/LICENSE`](./src-cutia/LICENSE)。
 
@@ -578,9 +629,9 @@ Copyright (c) 2026 Sam
 
 以下依赖采用 LGPL，均**仅用于服务端**（不随前端产物分发），因此不触发 LGPL 的传染性条件：
 
-| 依赖 | 许可证 |
-|---|---|
-| `mariadb` | LGPL-2.1-or-later |
+| 依赖                   | 许可证            |
+| ---------------------- | ----------------- |
+| `mariadb`              | LGPL-2.1-or-later |
 | `@img/sharp-libvips-*` | LGPL-3.0-or-later |
 
 本项目不包含任何 GPL / AGPL 依赖。
@@ -595,6 +646,7 @@ Copyright (c) 2026 Sam
 - [Prisma 文档](https://www.prisma.io/docs)
 - [即梦AI](https://jimeng.jianying.com/) - 字节跳动AI创作平台
 - [Dreamina](https://www.capcut.com/ai-tool/platform) - 剪映AI创作工具
+
 ---
 
 **CanvasMind** - 让 AI 创作更简单 🎨✨

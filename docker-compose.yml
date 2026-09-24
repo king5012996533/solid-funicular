@@ -1,11 +1,17 @@
 services:
   # 应用服务，同时承载前端与后端。
   app:
-    image: couei/canana-vue:latest
+    # 固定 tag 策略：部署时由 CI 显式传入不可变 tag（sha-<短hash> / vX.Y.Z），
+    # 只有本地手工调试才回落到 latest，避免"线上版本不可追溯"。
+    image: ${IMAGE_NAME:-couei/canana-vue}:${IMAGE_TAG:-latest}
     container_name: canana-vue-app
     restart: unless-stopped
+    # 给优雅停机留足时间：应用侧 GRACEFUL_SHUTDOWN_TIMEOUT_MS 默认 5 分钟，
+    # docker 默认只等 10s 就 SIGKILL，会把在途生成任务切断。
+    stop_grace_period: 320s
     env_file:
-      # 默认读取 .env.production，可通过 APP_ENV_FILE 覆盖
+      # 必须与部署脚本写入的文件名一致（CI 写 .env.production，见 deploy.yml）。
+      # 可通过 APP_ENV_FILE 覆盖。
       - ${APP_ENV_FILE:-./.env.production}
     ports:
       # 对外暴露统一应用端口。
@@ -17,8 +23,9 @@ services:
 #      # 兼容 Linux 环境下通过 host.docker.internal 访问宿主机 MySQL。
 #      - "host.docker.internal:host-gateway"
     healthcheck:
-      # 通过统一健康检查接口判断容器是否可用。
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:' + (process.env.SERVER_PORT || 5409) + '/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      # readiness 会真探 DB/Redis：依赖不可用时返回 503，编排层据此摘流量。
+      # liveness（/api/health）只表示进程活着，不用于此。
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:' + (process.env.SERVER_PORT || 5409) + '/api/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 5

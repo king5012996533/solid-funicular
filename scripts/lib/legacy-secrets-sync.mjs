@@ -7,12 +7,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PrismaMariaDb } from '@prisma/adapter-mariadb'
 import { PrismaClient } from '@prisma/client'
+import { resolveConfigSecret } from './startup-env-validation.mjs'
 
 const SENSITIVE_FIELD_NAME_PATTERN = /password|secret|key/i
 const DEFAULT_TEMPLATE_NAME = 'OpenAI 兼容'
 
 const getSecretKey = () => {
-  const secret = process.env.PROVIDER_CONFIG_SECRET || 'canana-vue-provider-config-secret'
+  // 生产环境缺少 PROVIDER_CONFIG_SECRET 时抛错，避免用仓库默认值解密旧密钥。
+  const secret = resolveConfigSecret(['PROVIDER_CONFIG_SECRET'], 'canana-vue-provider-config-secret')
   return crypto.createHash('sha256').update(secret).digest()
 }
 

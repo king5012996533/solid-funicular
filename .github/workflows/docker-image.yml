@@ -2,8 +2,10 @@ name: Docker 镜像发布
 
 on:
   push:
+    # 仓库唯一主干是 main（`git ls-remote --heads origin` 只有 refs/heads/main）。
+    # 这里原写成 master，远端不存在该分支 → 推 main 永远不触发，镜像链从未跑过。
     branches:
-      - master
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -47,6 +49,8 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=v${{ steps.package-version.outputs.version }},enable=${{ steps.package-version.outputs.version != '' }}
+            # 不可变的 commit 短 hash tag，回滚/对账时能精确指到某个提交。
+            type=sha,prefix=sha-,format=short
 
       - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v6
