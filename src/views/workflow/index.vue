@@ -1375,6 +1375,9 @@ const canvasAgentContext: CanvasAgentContext = {
     size: String((node.data as { size?: string })?.size || ''),
     quality: String((node.data as { quality?: string })?.quality || ''),
     status: (node.data as { loading?: boolean })?.loading ? '生成中' : String((node.data as { error?: string })?.error || ''),
+    // 已经生成出来的图地址：连续性靠它（母版出图后要把这张图挂给分镜节点当参考图）
+    imageUrl: String((node.data as { url?: string })?.url || ''),
+    textLength: String((node.data as { content?: string })?.content || '').length,
   })),
   snapshotEdges: () => edges.value.map((edge) => ({ source: edge.source, target: edge.target })),
   selectedIds: () => getSelectedNodes.value.map((node) => node.id),
@@ -1407,6 +1410,21 @@ const canvasAgentContext: CanvasAgentContext = {
     }
   },
   runNode: (id) => runNodeById(id),
+  /**
+   * 批量执行（串行）。
+   *
+   * 为什么不让工具层用 Promise.all 并发起：提交生成任务有**每人限流**，
+   * 一口气并发 6~12 个很容易被限流挡回来，而且失败时说不清是哪一个没起来。
+   * 串行虽然慢几秒（每次只是「触发」，不等出图），但每个节点的成败都能如实回报。
+   */
+  runNodes: async (ids) => {
+    const outcomes: Array<{ id: string; ok: boolean; reason?: string }> = []
+    for (const id of ids) {
+      const result = await runNodeById(id)
+      outcomes.push({ id, ok: result.ok, reason: result.reason })
+    }
+    return outcomes
+  },
   /**
    * 把参考图挂到图片节点上。
    *

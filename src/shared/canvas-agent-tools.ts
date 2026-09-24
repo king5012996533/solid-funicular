@@ -137,6 +137,70 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     requiresClient: true,
   },
   {
+    /**
+     * 一次建多个节点（2026-09-24，M3）。
+     *
+     * 为什么必须批量：一条正常的分镜链路是「1 个分镜表 + 2~4 个母版 + 6~12 张分镜图」，
+     * 逐个调 add_node 意味着十几轮模型往返，既慢又容易在中途丢步骤（模型忘了建第 7 个）。
+     * 一把建完还能顺便把「谁是谁」一次性告诉模型：返回值按输入顺序给出 id。
+     */
+    name: "add_nodes",
+    label: "批量建节点",
+    description:
+      "一次创建多个节点，返回按输入顺序排列的 id 列表。铺分镜时用它（一次不要超过 12 个）。每个节点都要给 type；图片/视频节点请写清 prompt。",
+    parameters: {
+      type: "object",
+      properties: {
+        nodes: {
+          type: "array",
+          description: "要创建的节点列表，按想要的顺序给（返回的 id 顺序与之一致）",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["text", "image", "video", "asset"] },
+              label: { type: "string", description: "节点标题，例如「镜号 03」" },
+              content: { type: "string", description: "文本节点的内容（type=text 时用）" },
+              prompt: { type: "string", description: "图片/视频节点的提示词" },
+              model: { type: "string", description: "模型 key（可选，不填用画布默认）" },
+              size: { type: "string" },
+              quality: { type: "string" },
+              x: { type: "number", description: "画布坐标（可选）" },
+              y: { type: "number" },
+            },
+            required: ["type"],
+          },
+        },
+      },
+      required: ["nodes"],
+    },
+    requiresClient: true,
+  },
+  {
+    /**
+     * 一次执行多个节点（2026-09-24，M3）。
+     *
+     * 分镜图是「一批一起出」的活：6 个节点分 6 次调 run_node，界面上就是 6 条零碎的执行记录，
+     * 而且模型要在中间反复等待。合成一次调用让「一次确认 → 一把出图」这个流程在日志里也看得清。
+     * 仍然是**每个节点各起一个生成任务**（计费、并发、失败重试都还走原有那套），不是新机制。
+     */
+    name: "run_nodes",
+    label: "批量执行节点",
+    description:
+      "依次执行多个节点（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。会消耗积分，调用前必须先取得用户确认。",
+    parameters: {
+      type: "object",
+      properties: {
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "要执行的节点 id 列表，按执行顺序给",
+        },
+      },
+      required: ["ids"],
+    },
+    requiresClient: true,
+  },
+  {
     name: "connect_nodes",
     label: "连接节点",
     description:
@@ -144,10 +208,22 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     parameters: {
       type: "object",
       properties: {
-        source: { type: "string", description: "起点节点 id" },
-        target: { type: "string", description: "终点节点 id" },
+        source: { type: "string", description: "起点节点 id（单条连线时用）" },
+        target: { type: "string", description: "终点节点 id（单条连线时用）" },
+        links: {
+          type: "array",
+          description: "一次连多条时用这个：每项 {source,target}。母版连到多个分镜时用它省往返。",
+          items: {
+            type: "object",
+            properties: {
+              source: { type: "string" },
+              target: { type: "string" },
+            },
+            required: ["source", "target"],
+          },
+        },
       },
-      required: ["source", "target"],
+      required: [],
     },
     requiresClient: true,
   },

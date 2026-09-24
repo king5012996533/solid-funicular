@@ -17,6 +17,15 @@ import {
   type AgentConfirmationRequest,
 } from "@/shared/canvas-agent-tools";
 
+/** 一次批量建节点的上限：够铺一条完整分镜，又不至于一次把画布塞爆 */
+const MAX_BATCH_NODES = 12;
+/** 自动排布时的列数（超过就换行） */
+const MAX_BATCH_COLUMNS = 4;
+/** 一次批量执行的上限：分镜图一般 6~12 张 */
+const MAX_BATCH_RUNS = 12;
+/** 一次批量连线的上限 */
+const MAX_BATCH_LINKS = 40;
+
 export interface CanvasAgentNodeSnapshot {
   id: string;
   type: string;
@@ -27,6 +36,15 @@ export interface CanvasAgentNodeSnapshot {
   size?: string;
   quality?: string;
   status?: string;
+  /**
+   * 这个节点已经生成出来的图（本地托管地址）。
+   *
+   * 连续性全靠它：母版出图之后，分镜节点要把**那张图**挂成参考图才谈得上「同一个角色」。
+   * 不把地址给模型，它就只能靠文字描述去猜，出来的角色必然每张都不一样。
+   */
+  imageUrl?: string;
+  /** 文本节点的内容长度（模型据此判断分镜表是否已经铺过） */
+  textLength?: number;
 }
 
 export interface CanvasAgentContext {
@@ -49,6 +67,11 @@ export interface CanvasAgentContext {
   selectNodes: (ids: string[], focus?: boolean) => void;
   /** 执行某个节点（node 组件注册进来的 runGeneration） */
   runNode: (id: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 依次执行多个节点（可选；没注入就退化成逐个 runNode）。
+   * 分镜图是「一批一起出」的活，合成一次调用能让执行记录更干净。
+   */
+  runNodes?: (ids: string[]) => Promise<Array<{ id: string; ok: boolean; reason?: string }>>;
   /** 套用一个工作流模板，返回创建出的节点/连线数量 */
   applyTemplate: (
     templateId: string,
@@ -257,7 +280,98 @@ export const executeCanvasAgentTool = async (
         summary: `更新节点 ${id}：${Object.keys(patch).join("、")}`,
       };
     }
+    case "add_nodes": {
+      const raw = Array.isArray(args.nodes) ? args.nodes : [];
+      if (!raw.length) return fail("nodes 不能为空");
+      if (raw.length > MAX_BATCH_NODES) {
+        return fail(`一次最多建 ${MAX_BATCH_NODES} 个节点（收到 ${raw.length} 个）。分批来，先建分镜表与母版，再建分镜。`);
+      }
+      const base = ctx.defaultPosition();
+      const items = raw.map((item, index) => {
+        const node = (item || {}) as Record<string, unknown>;
+        const data: Record<string, unknown> = {};
+        for (const key of ["label", "content", "prompt", "model", "size", "quality"]) {
+          if (node[key] !== undefined && node[key] !== null && node[key] !== "") data[key] = node[key];
+        }
+        // 没给坐标就自动排布：横向一行，每隔一个节点宽度错开，避免全叠在中心点
+        const fallbackX = base.x + (index % MAX_BATCH_COLUMNS) * 320;
+        const fallbackY = base.y + Math.floor(index / MAX_BATCH_COLUMNS) * 260;
+        return {
+          type: String(node.type || "text"),
+          position: {
+            x: Number.isFinite(Number(node.x)) ? Number(node.x) : fallbackX,
+            y: Number.isFinite(Number(node.y)) ? Number(node.y) : fallbackY,
+          },
+          data,
+          label: String(node.label || ""),
+        };
+      });
+
+      const created: string[] = [];
+      for (const item of items) {
+        const id = ctx.addNode(item.type, item.position, item.data);
+        created.push(String(id || ""));
+      }
+
+      const failures = created.filter((id) => !id).length;
+      if (failures === created.length) {
+        return fail("一个节点都没建出来（可能是画布未就绪）");
+      }
+      return {
+        ok: true,
+        result: JSON.stringify({
+          nodes: items.map((item, index) => ({ id: created[index] || null, type: item.type, label: item.label })),
+        }),
+        summary: `新建 ${created.filter(Boolean).length} 个节点${failures ? `（${failures} 个失败）` : ""}`,
+      };
+    }
+    case "run_nodes": {
+      const ids = (Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean);
+      if (!ids.length) return fail("ids 不能为空");
+      if (ids.length > MAX_BATCH_RUNS) {
+        return fail(`一次最多执行 ${MAX_BATCH_RUNS} 个节点（收到 ${ids.length} 个），分批来。`);
+      }
+      const known = new Set(ctx.snapshotNodes().map((node) => node.id));
+      const missing = ids.filter((id) => !known.has(id));
+      if (missing.length) return fail(`这些节点不存在：${missing.join("、")}（先用 get_canvas_state 确认）`);
+
+      const outcomes: Array<{ id: string; ok: boolean; reason?: string }> = ctx.runNodes
+        ? await ctx.runNodes(ids)
+        : await Promise.all(ids.map(async (id) => ({ id, ...(await ctx.runNode(id)) })));
+
+      const started = outcomes.filter((item) => item.ok).length;
+      const failed = outcomes.filter((item) => !item.ok);
+      return {
+        ok: started > 0,
+        result: JSON.stringify({ outcomes }),
+        summary: `已触发 ${started} 个节点执行${failed.length ? `，${failed.length} 个没起来（${failed.map((item) => `${item.id}: ${item.reason || "未知原因"}`).join("；")}）` : ""}`,
+      };
+    }
     case "connect_nodes": {
+      // 批量优先：母版连多个分镜是常见动作，一次连完能省掉一堆往返
+      const links = Array.isArray(args.links) ? args.links : [];
+      if (links.length) {
+        const known = new Set(ctx.snapshotNodes().map((node) => node.id));
+        const done: Array<{ source: string; target: string }> = [];
+        const skipped: string[] = [];
+        for (const item of links.slice(0, MAX_BATCH_LINKS)) {
+          const source = String((item as Record<string, unknown>)?.source || "").trim();
+          const target = String((item as Record<string, unknown>)?.target || "").trim();
+          if (!source || !target || source === target || !known.has(source) || !known.has(target)) {
+            skipped.push(`${source || "?"}→${target || "?"}`);
+            continue;
+          }
+          if (ctx.addEdge(source, target)) done.push({ source, target });
+          else skipped.push(`${source}→${target}（已存在或失败）`);
+        }
+        if (!done.length) return fail(`一条都没连上：${skipped.join("、")}`);
+        return {
+          ok: true,
+          result: JSON.stringify({ links: done, skipped }),
+          summary: `连了 ${done.length} 条线${skipped.length ? `（${skipped.length} 条跳过）` : ""}`,
+        };
+      }
+
       const source = String(args.source || "").trim();
       const target = String(args.target || "").trim();
       if (!source || !target) return fail("缺少 source / target");
