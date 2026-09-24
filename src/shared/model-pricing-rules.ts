@@ -33,9 +33,15 @@ export interface PricingTier {
   resolutionLabel: string
   /** label 模式：上游的档位值原样（如 quality 的 'high'、size 的 '1024x1024'） */
   upstreamLabel?: string
-  /** 边归档模式：长边/短边的区间（闭区间） */
-  longEdgeMin?: number
-  longEdgeMax?: number
+  /**
+   * 边归档模式的区间（闭区间）。
+   *
+   * 命名故意不带 long/short：同一个字段在 longEdge 模式装长边、在 shortEdge 模式装短边。
+   * 之前叫 longEdgeMin/Max，到了 shortEdge 模式下就变成「字段名说长边、实际装短边」——
+   * 单测里那条失败用例正是这么抓出来的。名字中性与匹配模式解耦，少一个踩坑点。
+   */
+  edgeMin?: number
+  edgeMax?: number
   price: TierPrice
 }
 
@@ -122,8 +128,8 @@ export const matchPricingTier = (
   if (edge === null) return null
   return (
     spec.tiers.find((tier) => {
-      const min = Number.isFinite(tier.longEdgeMin as number) ? (tier.longEdgeMin as number) : Number.NEGATIVE_INFINITY
-      const max = Number.isFinite(tier.longEdgeMax as number) ? (tier.longEdgeMax as number) : Number.POSITIVE_INFINITY
+      const min = Number.isFinite(tier.edgeMin as number) ? (tier.edgeMin as number) : Number.NEGATIVE_INFINITY
+      const max = Number.isFinite(tier.edgeMax as number) ? (tier.edgeMax as number) : Number.POSITIVE_INFINITY
       return edge >= min && edge <= max
     }) ?? null
   )
@@ -240,10 +246,10 @@ export const validateModelPricing = (spec: ModelPricingSpec): string[] => {
     }
 
     if (spec.matchMode === 'longEdge' || spec.matchMode === 'shortEdge') {
-      const min = tier.longEdgeMin
-      const max = tier.longEdgeMax
+      const min = tier.edgeMin
+      const max = tier.edgeMax
       if (typeof min !== 'number' || typeof max !== 'number') {
-        problems.push(`${where} 缺少 ${spec.matchMode} 的区间（longEdgeMin / longEdgeMax）`)
+        problems.push(`${where} 缺少 ${spec.matchMode} 的区间（edgeMin / edgeMax）`)
       } else if (min > max) {
         problems.push(`${where} 的区间上下界反了`)
       } else {
