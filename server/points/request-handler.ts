@@ -112,6 +112,9 @@ export const handlePointsEstimateRequest = async (req: any, res: any) => {
           count: item?.count,
         }),
       })
+      // 未配价/未标定/匹配失败 → 预估按 0：真正的拦截在建单接口（那里会返回可读的 4xx）。
+      // 这里不能沿用旧的草案价，否则预校验通过、建单却被拒，用户看到的数字前后矛盾。
+      if (resolved?.refuse) return 0
       return Math.max(0, Math.trunc(Number(resolved?.pointCost) || 0))
     }
 

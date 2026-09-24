@@ -1,10 +1,11 @@
 /**
  * 生成任务「扣费一致性」单测（2026-09-25）。
  *
- * 用假 context 驱动真实的 startGenerationTask，把三条容易出错的边界钉死：
+ * 用假 context 驱动真实的 startGenerationTask，把几条容易出错的边界钉死：
  *   1. 扣费已提交、建单却失败 → **必须原路退款**（否则分数白扣、任务不存在）；
  *   2. 视频任务的流水 endpointType 必须是 video（之前写死 image，后台按视频筛不出来）；
- *   3. 余额不足（INSUFFICIENT_POINTS）要映射成 402，而不是 500。
+ *   3. 余额不足（INSUFFICIENT_POINTS）要映射成 402，而不是 500；
+ *   4. 定价不可用（未配价/未标定/匹配失败）→ **在扣费之前**拒绝并映射 400，积分一分不扣。
  *
  * 跑法：npx tsx tests/generation-task-billing.test.ts
  */
@@ -13,6 +14,7 @@ import { startGenerationTask, type TaskLifecycleContext } from '../server/genera
 import { resolveGenerationTaskStrategy } from '../server/generation-tasks/strategy'
 import { GenerationTaskRequestError, resolveGenerationTaskErrorStatus } from '../server/generation-tasks/shared'
 import type { GenerationTaskStartPayload } from '../server/generation-tasks/shared'
+import { ModelPricingRefusedError } from '../src/shared/model-pricing-rules'
 
 let passed = 0
 let failed = 0
@@ -51,6 +53,9 @@ const buildHarness = (options: {
   consumeError?: Error
   imageCost?: number
   videoCost?: number
+  /** 模拟「定价不可用」：解析器返回 refuse，建单路径应在扣费前拒绝 */
+  refuse?: boolean
+  refuseReason?: string
 }) => {
   const consumeCalls: ConsumeCall[] = []
   const refundCalls: RefundCall[] = []
@@ -78,9 +83,11 @@ const buildHarness = (options: {
       modelName: 'chat-model',
     }),
     resolveModelPricingCost: async (input: { endpointType: 'image' | 'video' }) => ({
-      pointCost: input.endpointType === 'video' ? (options.videoCost ?? 60) : (options.imageCost ?? 6),
+      pointCost: options.refuse ? 0 : (input.endpointType === 'video' ? (options.videoCost ?? 60) : (options.imageCost ?? 6)),
       usingDraft: false,
-      detail: '',
+      refuse: Boolean(options.refuse),
+      refuseReason: options.refuseReason,
+      detail: options.refuse ? '该模型未配置定价，暂时无法生成。请联系运营为该模型补录定价后重试。' : '',
       modelName: 'priced-model',
     }),
     consumeGenerationPoints: async (input: any) => {
@@ -265,6 +272,57 @@ asyncChecks.push({
     }
     assert(harness.refundCalls.length === 0, '没有成功扣费就不该退款（避免凭空加积分）')
   },
+})
+
+console.log('== D. 定价不可用 → 在扣费之前拒绝（4xx，积分不被扣）==')
+
+asyncChecks.push({
+  name: '未配价模型建图任务 → 抛 ModelPricingRefusedError，完全没有扣费/退款/执行',
+  run: async () => {
+    const harness = buildHarness({ refuse: true, refuseReason: 'pricing_model_not_configured' })
+    let thrown: any = null
+    try {
+      await startGenerationTask(imagePayload(), 'user-1', harness.context)
+    } catch (error) {
+      thrown = error
+    }
+    assert(thrown instanceof ModelPricingRefusedError, `应抛 ModelPricingRefusedError，实际 ${thrown}`)
+    assert(thrown.reason === 'pricing_model_not_configured', '拒绝原因应为未配价')
+    assert(resolveGenerationTaskErrorStatus(thrown) === 400, '接口层应转成 400')
+    assert(harness.consumeCalls.length === 0, '拒绝必须发生在扣费之前（不能扣了再退）')
+    assert(harness.refundCalls.length === 0, '没有扣费就不该有退款')
+    assert(harness.startedTasks.length === 0, '被拒绝的任务不应进入后台执行')
+  },
+})
+
+asyncChecks.push({
+  name: '未配价模型建视频任务 → 同样拒绝（不是只挡图片）',
+  run: async () => {
+    const harness = buildHarness({ refuse: true, refuseReason: 'pricing_model_not_configured' })
+    let thrown: any = null
+    try {
+      await startGenerationTask(videoPayload(), 'user-1', harness.context)
+    } catch (error) {
+      thrown = error
+    }
+    assert(thrown instanceof ModelPricingRefusedError, '视频同样应被拒绝')
+    assert(harness.consumeCalls.length === 0, '视频拒绝也不得扣费')
+  },
+})
+
+asyncChecks.push({
+  name: '已配价模型建单 → 正常扣费 6 分（拒绝逻辑没误伤正常路径）',
+  run: async () => {
+    const harness = buildHarness({})
+    const record = await startGenerationTask(imagePayload(), 'user-1', harness.context)
+    assert(record.id === 'record-1', '应正常返回记录')
+    assert(harness.consumeCalls.length === 1 && harness.consumeCalls[0].pointCost === 6, '应按定价扣 6 分')
+  },
+})
+
+check('ModelPricingRefusedError 映射为 400（不是 500）', () => {
+  const error = new ModelPricingRefusedError('pricing_model_not_configured', '未配置定价')
+  assert(resolveGenerationTaskErrorStatus(error) === 400, '应返回 400')
 })
 
 const main = async () => {

@@ -6,6 +6,7 @@ import { GenerationTaskRequestError } from './shared'
 import { readCapabilityFlagsFromRequestBody, type ModelCapabilityFlags } from '../../src/shared/provider-capability'
 import {
   buildNormalizedGenerationParams,
+  ModelPricingRefusedError,
   type NormalizedGenerationParams,
   type PricingFallbackReason,
 } from '../../src/shared/model-pricing-rules'
@@ -92,7 +93,8 @@ export interface TaskLifecycleContext {
    *     （能力倍率只在这条链路上有意义，且 chat 模型现全库未配价、行为要保持不变）。
    *   - resolveModelPricingCost：读结构化定价表 + 接收真实请求参数 → 图片/视频结算与预估接口都用它，
    *     从而与预估接口共用同一个算法，保证「预估 = 实扣」。
-   * 返回里的 usingDraft / fallbackReason 仅用于打日志（未配价的模型会走草案兜底价）。
+   * 返回里的 usingDraft 仅用于打日志（只有「读配置本身失败」才走草案兜底）；
+   * 未配价 / 未标定 / 规格匹配不到档位会返回 refuse=true，建单路径据此**在扣费前**拒绝生成。
    */
   resolveModelPricingCost: (input: {
     providerId: string
@@ -103,6 +105,8 @@ export interface TaskLifecycleContext {
     pointCost: number
     usingDraft: boolean
     fallbackReason?: PricingFallbackReason
+    refuse: boolean
+    refuseReason?: PricingFallbackReason
     detail: string
     modelName: string
   }>
@@ -508,6 +512,40 @@ export const startGenerationTask = async (
         seconds: requestBody.seconds ?? requestBody.duration,
       }),
     })
+
+    /**
+     * 定价缺失/未标定/规格匹配不到档位 → **在扣费之前**拒绝建单。
+     *
+     * 这一步必须在 consumeGenerationPoints 之前：拒绝发生在扣费前，就不会产生任何扣款，
+     * 也就不需要「先扣再退」那种补偿（那会在流水里留下两条记录、还可能退失败）。
+     * 前端拿到的是可读的 4xx 文案（ModelPricingRefusedError → model_pricing_refused）。
+     */
+    if (billingDetail.refuse) {
+      context.logGenerationTask('task_pricing_refused', {
+        userId: currentUserId,
+        providerId,
+        modelKey,
+        endpointType: billingEndpointType,
+        reason: billingDetail.refuseReason,
+      })
+      throw new ModelPricingRefusedError(
+        billingDetail.refuseReason ?? 'pricing_model_not_configured',
+        billingDetail.detail || '该模型暂不可用，请联系运营',
+      )
+    }
+
+    // 「读配置本身失败」仍按草案价放行，但必须留下日志，方便回头定位是哪次环境异常
+    if (billingDetail.usingDraft) {
+      context.logGenerationTask('task_pricing_draft_fallback', {
+        userId: currentUserId,
+        providerId,
+        modelKey,
+        endpointType: billingEndpointType,
+        reason: billingDetail.fallbackReason,
+        pointCost: billingDetail.pointCost,
+      })
+    }
+
     const associationNo = context.buildGatewayAssociationNo()
     const pointLog = billingDetail.pointCost > 0
       ? await context.consumeGenerationPoints({

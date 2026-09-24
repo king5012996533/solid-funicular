@@ -18,19 +18,19 @@ const ten = await resolveModelPricingCost({
 })
 console.log('一次 10 张（按次计费应仍是 6）：', JSON.stringify(ten))
 
-// 对照：没配定价的模型应走草案兜底且非 0
+// 对照：没配定价的模型应**拒绝**（不再按草案价兜底）
 const other = await resolveModelPricingCost({
   providerId: 'p-sceneflow-ggk',
   modelKey: 'gpt-image-2.5-flare',
   endpointType: 'image',
   params: { kind: 'image', count: 1 },
 })
-console.log('未配价模型（应兜底且非 0）：', JSON.stringify(other))
+console.log('未配价模型（应拒绝、不给假价）：', JSON.stringify(other))
 
 const results = [
-  ['试点模型算出 6 分且不走兜底', result.pointCost === 6 && result.usingDraft === false],
+  ['试点模型算出 6 分且不走兜底', result.pointCost === 6 && result.usingDraft === false && result.refuse === false],
   ['一次 10 张仍是 6 分（按次计费不被乘 10）', ten.pointCost === 6],
-  ['未配价模型走兜底且不为 0', other.pointCost > 0 && other.usingDraft === true],
+  ['未配价模型被拒绝（refuse）且不给假价', other.refuse === true && other.pointCost === 0],
 ]
 console.log('\n== 判定 ==')
 for (const [name, ok] of results) console.log(`  ${ok ? '✅' : '❌'} ${name}`)

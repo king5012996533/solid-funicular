@@ -9,7 +9,9 @@
  *    经 ggwk1 是按次（perTask）；同名不同渠道必须各自标定（实测已确认）。
  * 2. **参数归一化也在这一条链路上**（含视频时长 clamp）。只共享「定价」是不够的：
  *    如果预估用请求里的 30 秒、扣费用 clamp 后的 20 秒，两个数必然对不上。
- * 3. **兜底一律不返回 0**：三种回落原因分开报，后台据此标红提醒运营补录定价。
+ * 3. **只有「读配置本身失败」才用草案兜底**（那是真异常，先让业务能跑）；模型未配价 /
+ *    有档位却没标定匹配模式 / 规格匹配不到档位，一律**拒绝生成**（返回 refuse=true，
+ *    由调用方转成 4xx），绝不静默按一个假价扣费 —— 「按 6 分收视频任务的钱」就是踩过的坑。
  */
 
 export type PricingMatchMode = 'none' | 'label' | 'longEdge' | 'shortEdge'
@@ -73,16 +75,49 @@ export type PricingFallbackReason =
   | 'tier_match_failed'
 
 export interface GenerationCostResult {
-  /** 最终积分数（整数，非负） */
+  /** 最终积分数（整数，非负）。**被拒绝时为 0** —— 调用方必须先看 refuse 再决定用不用它 */
   points: number
-  /** 命中的档位（回落时为 null） */
+  /** 命中的档位（未命中时为 null） */
   tier: PricingTier | null
-  /** 是否走了草案兜底 */
+  /** 是否走了草案兜底（仅「读配置本身失败」这一种真异常） */
   usingDraft: boolean
-  /** 走兜底的原因（用于日志分类与后台标红） */
+  /** 走草案兜底的原因（仅 usingDraft 为 true 时出现） */
   fallbackReason?: PricingFallbackReason
-  /** 给人看的说明（后台/日志用） */
+  /**
+   * 是否**拒绝**计费：模型没配价 / 定价未标定 / 规格匹配不到档位时为 true。
+   * 调用方必须据此拒绝生成（转成明确的 4xx），**绝不允许**忽略它按 points 扣费。
+   */
+  refuse: boolean
+  /** 拒绝原因（refuse 为 true 时必有），与 FallbackReason 共用同一套枚举值 */
+  refuseReason?: PricingFallbackReason
+  /** 给人看的说明（正常价/草案兜底/拒绝三种情况都有可读文案） */
   detail: string
+}
+
+/** 拒绝计费的语义化错误码：接口层据此返回 4xx，而不是把「未配价」伪装成 500 */
+export const MODEL_PRICING_REFUSED_CODE = 'MODEL_PRICING_REFUSED'
+
+/**
+ * 「模型未配价 / 定价未标定 / 规格匹配不到档位」时抛出的错误。
+ *
+ * 为什么单独一个类而不是返回 0：0 分会被当成「免费」静默放行，用户拿到一次白嫖、
+ * 平台倒贴一次上游成本。用异常把这条路径**显式挡在扣费之前**，接口层再转成可读的 4xx。
+ */
+export class ModelPricingRefusedError extends Error {
+  code = MODEL_PRICING_REFUSED_CODE
+  statusCode = 400
+  reason: PricingFallbackReason
+
+  constructor(reason: PricingFallbackReason, message: string) {
+    super(message)
+    this.name = 'ModelPricingRefusedError'
+    this.reason = reason
+  }
+}
+
+/** 识别拒绝计费错误（跨模块 catch 里用，避免各处 instanceof 时漏 import） */
+export const isModelPricingRefusedError = (error: unknown): error is ModelPricingRefusedError => {
+  return (error as { code?: string } | null | undefined)?.code === MODEL_PRICING_REFUSED_CODE
 }
 
 /**
@@ -186,73 +221,110 @@ export const computeTierPoints = (price: TierPrice, params: NormalizedGeneration
 }
 
 export interface GetGenerationCostInput {
-  /** 读到的定价配置；null 表示读取失败（→ 走草案兜底） */
+  /** 读到的定价配置；null 表示「没有定价记录」或读取失败（由 configLoadFailed 区分） */
   spec: ModelPricingSpec | null
   params: NormalizedGenerationParams
-  /** 读取定价配置本身的错误（区分「读不到」与「没配」两种兜底原因） */
+  /** 读取定价配置本身的错误（只有它为 true 才走草案兜底） */
   configLoadFailed?: boolean
   /** 该模型的草案兜底价（来自代码常量，见 DRAFT_MODEL_PRICING） */
   draftPrice: TierPrice
 }
 
 /**
- * 统一入口：**读到的配置 → 档位匹配 → 定价**，失败则回落草案价。
+ * 拒绝时给用户看的文案：必须说清「为什么不能生成、要找谁」，不能只报「服务器错误」。
+ *
+ * 三种拒绝分别对应不同的运营动作，所以要分别措辞；匹配失败还要把规格值带出来，
+ * 否则用户只知道「不能用」，不知道是尺寸不对还是时长不对。
+ */
+export const buildPricingRefusalMessage = (
+  reason: PricingFallbackReason,
+  spec: ModelPricingSpec | null,
+  params: NormalizedGenerationParams,
+): string => {
+  if (reason === 'pricing_model_not_configured') {
+    return '该模型未配置定价，暂时无法生成。请联系运营为该模型补录定价后重试。'
+  }
+  if (reason === 'pricing_mode_not_calibrated') {
+    return '该模型的定价未标定匹配模式，暂时无法生成。请联系运营补全定价配置。'
+  }
+
+  const mode = spec?.matchMode || 'none'
+  const specParts: string[] = []
+  if (params.label) specParts.push(`label=${params.label}`)
+  if (params.width && params.height) specParts.push(`尺寸=${params.width}x${params.height}`)
+  if (params.kind === 'video' && params.seconds) specParts.push(`时长=${params.seconds}秒`)
+  if (params.count && params.count > 1) specParts.push(`数量=${params.count}`)
+  const edge = pickEdgeForMode(mode, params)
+  const edgePart = edge === null ? '' : `，匹配边值=${edge}`
+  const specPart = specParts.length ? `，规格：${specParts.join('、')}` : ''
+  return `当前规格匹配不到该模型的定价档位（匹配模式 ${mode}${edgePart}${specPart}），无法生成。请调整规格，或联系运营补全对应档位。`
+}
+
+/**
+ * 统一入口：**读到的配置 → 档位匹配 → 定价**；拿不到正式价时**拒绝**，绝不静默收假价。
  *
  * 预估接口与真实扣费都必须调它，不许各自实现 —— 这是「预估 = 实扣」的唯一保证方式。
+ * 唯一的草案兜底是「读配置本身失败」（真异常，先让业务能跑并告警）；
+ * 「没配价 / 没标定 / 匹配不到档位」是**配置缺失**，一律 refuse，由调用方转 4xx。
  */
 export const getGenerationCost = (input: GetGenerationCostInput): GenerationCostResult => {
   const { spec, params, draftPrice } = input
 
-  const fallback = (reason: PricingFallbackReason, detail: string): GenerationCostResult => ({
+  const draftFallback = (detail: string): GenerationCostResult => ({
     points: computeTierPoints(draftPrice, params),
     tier: null,
     usingDraft: true,
-    fallbackReason: reason,
+    fallbackReason: 'pricing_config_load_failed',
+    refuse: false,
     detail,
   })
 
+  const refuse = (reason: PricingFallbackReason): GenerationCostResult => ({
+    // 拒绝时不给任何「假价」：points 记 0，真正拦下来的是调用方对 refuse 的处理
+    points: 0,
+    tier: null,
+    usingDraft: false,
+    refuse: true,
+    refuseReason: reason,
+    detail: buildPricingRefusalMessage(reason, spec, params),
+  })
+
   /**
-   * 两种「拿不到定价」必须分开报 —— 它们对应完全不同的运营动作：
-   *   读取失败 → 查数据库/服务是否异常（环境问题）
-   *   没配价   → 让运营去后台补录（配置缺失）
-   * 之前把两者并成一个条件，结果没配价的模型被报成「读配置失败」，
-   * 排查时会朝错误方向查 —— 这是真机跑出来才发现的。
+   * 只有「读配置本身失败」才走草案兜底 —— 它对应「数据库/服务异常」这类环境问题，
+   * 让业务先能跑并打日志告警；其余三种拿不到价都是配置缺失，直接拒绝。
    */
   if (input.configLoadFailed) {
-    return fallback('pricing_config_load_failed', '读取定价配置失败，按草案兜底价计费（先查数据库/服务是否异常）')
+    return draftFallback('读取定价配置失败，按草案兜底价计费（先查数据库/服务是否异常）')
   }
-  if (!spec) {
-    return fallback('pricing_model_not_configured', '该模型尚无定价配置，按草案兜底价计费（请在后台补录）')
+  // 「没有定价记录」与「档位为空」都归为未配价：两者对运营都是「去补录」同一个动作
+  if (!spec || !spec.tiers?.length) {
+    return refuse('pricing_model_not_configured')
   }
-  if (!spec.tiers?.length) {
-    return fallback('pricing_model_not_configured', '该模型尚无定价配置，按草案兜底价计费（请在后台补录）')
-  }
-  // 有档位却没声明匹配方式：**不猜模式**（猜就是静默算错价），按未标定回落
+  // 有档位却没声明匹配方式：**不猜模式**（猜就是静默算错价），按未标定拒绝
   if (spec.matchMode !== 'none' && (!spec.matchMode || (spec.matchMode === 'label' && !spec.labelAxis))) {
-    return fallback('pricing_mode_not_calibrated', '定价未标定匹配模式，按草案兜底价计费（接入上游后需标定）')
+    return refuse('pricing_mode_not_calibrated')
   }
 
   const tier = matchPricingTier(spec, params)
   if (!tier) {
-    return fallback(
-      'tier_match_failed',
-      `规格匹配不到任何档位（${spec.matchMode}${params.label ? `，label=${params.label}` : ''}），按草案兜底价计费`,
-    )
+    return refuse('tier_match_failed')
   }
 
   return {
     points: computeTierPoints(tier.price, params),
     tier,
     usingDraft: false,
+    refuse: false,
     detail: `命中档位「${tier.resolutionLabel}」`,
   }
 }
 
 /**
- * 草案兜底价（**仅应急**：配置读不到 / 模型未配价 / 档位匹配失败时用）。
+ * 草案兜底价（**仅用于「读取定价配置失败」这一种真异常**）。
  *
- * 数值待从旧项目（SceneFlow）经过真实流量验证的那份价目表照搬 —— 那份知道盈亏边界。
- * 在此之前一律给一个**非零**的上界值：宁可略高，也不静默 0 分白送（这是踩过的坑）。
+ * 模型未配价 / 未标定 / 规格匹配失败都改成了拒绝生成（见 getGenerationCost），
+ * 不再套用这个价 —— 那样做等于「视频按图片价卖」，平台倒贴。
+ * 数值仍保留为非零上界值：宁可略高，也不静默 0 分白送（这是踩过的坑）。
  */
 export const DRAFT_MODEL_PRICING: TierPrice = { perImage: 6 }
 

@@ -155,6 +155,8 @@ export const deleteAdminProviderModel = async (providerId: string, id: string) =
 export interface AdminModelPricingPreview {
   pointCost: number
   usingDraft: boolean
+  /** 是否拒绝计费（未配价/未标定/匹配失败）—— 为 true 时该模型生成会被拒绝，pointCost 为 0 */
+  refused: boolean
   detail: string
   params: Record<string, any>
 }
@@ -166,7 +168,7 @@ export interface AdminModelPricingItem {
   modelName: string
   modelKey: string
   hasPricing: boolean
-  /** 是否正在走代码草案兜底价（无定价 / 定价不合法）—— 后台要标出来提醒补录 */
+  /** 定价是否不可用（无定价 / 定价不合法）—— 为 true 时该模型会拒绝生成，后台要标出来提醒补录 */
   usingDraft: boolean
   draftReason: string
   updatedAt: string | null
@@ -188,7 +190,7 @@ export interface AdminModelPricingSaveResult {
 const buildModelPricingApiPath = (providerId: string, modelId: string) =>
   `${buildProviderModelsApiPath(providerId)}/${encodeURIComponent(modelId)}/pricing`
 
-// 定价总览：列出（可指定厂商）全部模型及其定价状态、草案兜底标记与试算价。
+// 定价总览：列出（可指定厂商）全部模型及其定价状态、不可用标记与试算价。
 export const listAdminModelPricing = async (query: { providerId?: string; category?: AdminModelCategory } = {}) => {
   const params = new URLSearchParams()
   if (query.providerId) params.set('providerId', query.providerId)
@@ -235,7 +237,7 @@ export const saveAdminModelPricing = async (
   })
 }
 
-// 删除单个模型的定价（删掉后回落草案兜底价）。
+// 删除单个模型的定价（删掉后该模型生成会被拒绝，直到重新配置）。
 export const deleteAdminModelPricing = async (providerId: string, modelId: string) => {
   const response = await fetch(buildApiUrl(buildModelPricingApiPath(providerId, modelId)), {
     method: 'DELETE',

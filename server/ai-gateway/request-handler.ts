@@ -8,7 +8,12 @@ import { forwardGatewayPayload, forwardMultipartRequest } from './forward'
 import { resolveGatewayProviderUpstream } from '../provider-config/service'
 import { requireCurrentSessionUser } from '../auth/session'
 import { consumeGenerationPoints, refundGenerationPoints, resolveModelPricingCost } from '../marketing-center/service'
-import { buildNormalizedGenerationParams } from '../../src/shared/model-pricing-rules'
+import {
+  buildNormalizedGenerationParams,
+  isModelPricingRefusedError,
+  ModelPricingRefusedError,
+  type PricingFallbackReason,
+} from '../../src/shared/model-pricing-rules'
 import { normalizeChargeableEndpointType, type AiEndpointType } from '../../src/shared/provider-endpoint-strategy'
 
 const shouldExposeGatewayDebug = () => String(process.env.AI_GATEWAY_DEBUG_HEADERS || '').trim() === 'true'
@@ -26,6 +31,23 @@ const isChargeableGenerationRequest = (input: {
 
 const buildGatewayAssociationNo = () => {
   return `GWY${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+}
+
+/**
+ * 定价不可用（未配价 / 未标定 / 规格匹配不到档位）→ 抛 ModelPricingRefusedError，由本文件 catch 转 400。
+ * 调用点都在 consumeGenerationPoints 之前，保证被拒绝的请求不会「先扣钱再失败」。
+ */
+const assertPricingNotRefused = (billingDetail: {
+  refuse?: boolean
+  refuseReason?: PricingFallbackReason
+  detail?: string
+}) => {
+  if (billingDetail.refuse) {
+    throw new ModelPricingRefusedError(
+      billingDetail.refuseReason ?? 'pricing_model_not_configured',
+      billingDetail.detail || '该模型暂不可用，请联系运营',
+    )
+  }
 }
 
 // 拒绝调用方自带上游地址：这是从源头堵 SSRF 的关键 —— 只做地址白名单不够，
@@ -130,7 +152,10 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
           // multipart 体积流未解析，拿不到 size/count —— 按默认 1 张/1 次计
           params: buildGatewayPricingParams(billedHeaderEndpointType as 'image' | 'video', null),
         })
-        : { pointCost: 0, usingDraft: false, detail: '', modelName: '' }
+        : { pointCost: 0, usingDraft: false, refuse: false, detail: '', modelName: '' }
+
+      // 定价缺失/未标定/匹配失败 → 在扣费与转发之前拒绝（详见 model-pricing-rules 的说明）
+      assertPricingNotRefused(billingDetail)
 
       const associationNo = buildGatewayAssociationNo()
       const consumedPointLog = shouldChargeHeaderRequest && billingDetail.pointCost > 0
@@ -242,7 +267,10 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
         endpointType: billedJsonEndpointType as 'image' | 'video',
         params: buildGatewayPricingParams(billedJsonEndpointType as 'image' | 'video', normalized.body),
       })
-      : { pointCost: 0, usingDraft: false, detail: '', modelName: '' }
+      : { pointCost: 0, usingDraft: false, refuse: false, detail: '', modelName: '' }
+
+    // 同 multipart 分支：定价不可用时在扣费与转发之前拒绝
+    assertPricingNotRefused(billingDetail)
 
     const associationNo = buildGatewayAssociationNo()
     const consumedPointLog = shouldChargeJsonRequest && billingDetail.pointCost > 0
@@ -318,6 +346,20 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
           message: error?.message || '积分不足',
           currentBalance: Number(error?.currentBalance || 0),
           requiredPoints: Number(error?.requiredPoints || 0),
+        },
+      })
+      return
+    }
+
+    // 定价不可用 → 400（不是 500 服务器错误），且此时尚未扣费
+    if (isModelPricingRefusedError(error)) {
+      sendJson(res, 400, {
+        message: error?.message || '该模型暂不可用',
+        error: {
+          type: 'model_pricing_refused',
+          code: (error as ModelPricingRefusedError).code,
+          reason: (error as ModelPricingRefusedError).reason,
+          message: error?.message || '该模型暂不可用',
         },
       })
       return

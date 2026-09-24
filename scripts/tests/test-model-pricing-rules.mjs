@@ -5,7 +5,7 @@
  * 这组用例要钉死的是「钱算得对不对」这件事上最容易出错的几处：
  *   · 视频时长 clamp 必须与上游实际收到的值一致（30 秒请求不能按别的数记账）
  *   · perTask 与 perImage 的语义差异（按次计费的渠道，一次出 10 张不能扣 10 倍）
- *   · 兜底绝不返回 0（静默白送是踩过的坑），且四种回落原因要分得清
+ *   · 只有「读配置本身失败」才用草案兜底；未配价 / 未标定 / 匹配失败一律拒绝（refuse）
  *   · 有档位但没标定匹配模式时**不许猜模式**
  *
  * 跑法：npx tsx scripts/tests/test-model-pricing-rules.mjs
@@ -111,37 +111,45 @@ check('小数向上取整（宁可略高，不白送）', () => {
   assert(computeTierPoints({ perImage: 1.2 }, img({ count: 1 })) === 2, '应向上取整为 2')
 })
 
-console.log('\n== 统一入口的兜底（一律不返回 0）==')
+console.log('\n== 统一入口：只有「读配置失败」走草案兜底，其余一律拒绝 ==')
 
-check('读取配置失败 → 用草案价，原因是 pricing_config_load_failed', () => {
+check('读取配置失败（真异常）→ 用草案价，原因是 pricing_config_load_failed，不拒绝', () => {
   const result = getGenerationCost({ spec: null, params: img(), configLoadFailed: true, draftPrice: DRAFT })
   assert(result.usingDraft === true && result.fallbackReason === 'pricing_config_load_failed', '原因应为读配置失败')
-  assert(result.points > 0, '绝不允许返回 0')
+  assert(result.refuse === false, '读配置失败是环境异常，应继续跑（草案兜底），不拒绝')
+  assert(result.points > 0, '草案价绝不允许返回 0')
 })
-check('配置读取成功但模型没配价 → pricing_model_not_configured（**不是**读配置失败）', () => {
+check('配置读到了但模型没配价 → 拒绝（refuse），不给假价', () => {
   const result = getGenerationCost({ spec: null, params: img(), configLoadFailed: false, draftPrice: DRAFT })
-  assert(result.fallbackReason === 'pricing_model_not_configured', `应报未配价，实际 ${result.fallbackReason}`)
-  assert(result.points > 0, '绝不为 0')
+  assert(result.refuse === true && result.refuseReason === 'pricing_model_not_configured', `应拒绝并报未配价，实际 ${JSON.stringify(result)}`)
+  assert(result.points === 0 && result.usingDraft === false, '拒绝时不给草案价、也不标 usingDraft')
+  assert(/未配置定价/.test(result.detail), `文案要说明该模型未配置定价，实际「${result.detail}」`)
 })
-check('模型没有定价记录 → pricing_model_not_configured', () => {
+check('模型没有定价记录（档位为空）→ 同样拒绝为 pricing_model_not_configured', () => {
   const result = getGenerationCost({ spec: { matchMode: 'none', tiers: [] }, params: img(), draftPrice: DRAFT })
-  assert(result.fallbackReason === 'pricing_model_not_configured' && result.points > 0, `实际 ${JSON.stringify(result)}`)
+  assert(result.refuse === true && result.refuseReason === 'pricing_model_not_configured', `实际 ${JSON.stringify(result)}`)
 })
-check('有档位但 label 模式没声明 labelAxis → pricing_mode_not_calibrated（不猜模式）', () => {
+check('有档位但 label 模式没声明 labelAxis → 拒绝（定价未标定，不猜模式）', () => {
   const spec = { matchMode: 'label', tiers: [{ resolutionLabel: 'x', upstreamLabel: 'high', price: { perImage: 5 } }] }
   const result = getGenerationCost({ spec, params: img({ label: 'high' }), draftPrice: DRAFT })
-  assert(result.fallbackReason === 'pricing_mode_not_calibrated', `未标定就不该硬匹配，实际 ${JSON.stringify(result)}`)
+  assert(result.refuse === true && result.refuseReason === 'pricing_mode_not_calibrated', `未标定就该拒绝，实际 ${JSON.stringify(result)}`)
+  assert(/未标定/.test(result.detail), `文案要说明未标定，实际「${result.detail}」`)
 })
-check('规格匹配不到档位 → tier_match_failed', () => {
+check('规格匹配不到档位 → 拒绝，且文案带出规格值', () => {
   const result = getGenerationCost({ spec: labelSpec, params: img({ label: 'nope' }), draftPrice: DRAFT })
-  assert(result.fallbackReason === 'tier_match_failed' && result.points > 0, '应回落且非 0')
+  assert(result.refuse === true && result.refuseReason === 'tier_match_failed', '匹配失败应拒绝')
+  assert(/nope/.test(result.detail), `文案要带出没匹配上的 label，实际「${result.detail}」`)
+})
+check('拒绝时不返回任何假价（points=0），避免调用方误按它扣费', () => {
+  const result = getGenerationCost({ spec: null, params: img({ count: 3 }), draftPrice: DRAFT })
+  assert(result.points === 0, `拒绝时 points 必须为 0，实际 ${result.points}`)
 })
 
 console.log('\n== 试点用例：gpt-image-2 @ ggwk1（按次 6 分）==')
 
-check('一次请求 1 张 → 6 分，且不走兜底', () => {
+check('一次请求 1 张 → 6 分，正常计价（不拒绝、不走兜底）', () => {
   const result = getGenerationCost({ spec: noneSpec, params: img(), draftPrice: DRAFT })
-  assert(result.points === 6 && result.usingDraft === false, `应命中定价 6 分，实际 ${JSON.stringify(result)}`)
+  assert(result.points === 6 && result.usingDraft === false && result.refuse === false, `应命中定价 6 分，实际 ${JSON.stringify(result)}`)
 })
 check('一次请求 10 张 → 仍是 6 分（渠道按次计费，不能按张扣 60）', () => {
   const result = getGenerationCost({ spec: noneSpec, params: img({ count: 10 }), draftPrice: DRAFT })

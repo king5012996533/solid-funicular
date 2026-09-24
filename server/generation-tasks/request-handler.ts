@@ -17,6 +17,7 @@ import {
   readGenerationTaskBody,
   sendGenerationTaskError,
   isInsufficientPointsError,
+  isModelPricingRefusedError,
   resolveGenerationTaskErrorStatus,
 } from './shared'
 
@@ -163,6 +164,22 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
           message: error?.message || '积分不足',
           currentBalance: Number(error?.currentBalance || 0),
           requiredPoints: Number(error?.requiredPoints || 0),
+        },
+      })
+      return
+    }
+    /**
+     * 定价缺失/未标定/规格匹配不到档位 → 400 + 语义化 code。
+     * 这不是服务器错误：拒绝发生在扣费之前，用户积分不会被扣，前端要能提示可读文案。
+     */
+    if (isModelPricingRefusedError(error)) {
+      sendJson(res, statusCode, {
+        message: error?.message || '该模型暂不可用',
+        error: {
+          type: 'model_pricing_refused',
+          code: error?.code,
+          reason: error?.reason,
+          message: error?.message || '该模型暂不可用',
         },
       })
       return

@@ -543,7 +543,7 @@
 
           <div v-if="pricingCurrent?.usingDraft" class="admin-form__field admin-form__field--full">
             <div class="admin-form__hint" style="color: #d9363e">
-              当前正在走代码草案兜底价：{{ pricingCurrent?.draftReason || '未配置定价' }}
+              当前定价不可用，该模型会拒绝生成：{{ pricingCurrent?.draftReason || '未配置定价' }}
             </div>
           </div>
 
@@ -774,7 +774,7 @@ const pricingForm = reactive({
   labelAxis: 'size' as 'size' | 'quality',
   tiersJson: '',
 })
-// 模型列表里的定价状态（有没有正式定价 / 是否还在走草案兜底）
+// 模型列表里的定价状态（有没有正式定价 / 定价是否不可用）
 const modelPricingMap = ref<Record<string, AdminModelPricingItem>>({})
 
 const buildDefaultTiersJson = (category: AdminModelCategory) =>
@@ -881,7 +881,7 @@ const handleDeleteModelPricing = async () => {
   if (!selectedProvider.value || !editingModelId.value) {
     return
   }
-  if (!window.confirm('确认删除该模型的定价吗？删除后将回落代码草案兜底价。')) {
+  if (!window.confirm('确认删除该模型的定价吗？删除后该模型的生成会被拒绝，直到重新配置。')) {
     return
   }
   try {
@@ -1104,7 +1104,7 @@ const loadModels = async (providerId?: string) => {
     models.value = result.models
     selectedProvider.value = result.provider
     resetModelPage()
-    // 顺带拉定价状态，列表里标出「未定价 / 走草案兜底」的模型
+    // 顺带拉定价状态，列表里标出「未定价 / 定价不可用」的模型
     void loadModelPricingMap(targetProviderId)
   } finally {
     modelLoading.value = false
@@ -1127,7 +1127,7 @@ const getModelPricingBadge = (model: AdminProviderModelItem) => {
     return ''
   }
   if (item.usingDraft) {
-    return item.hasPricing ? '定价不合法' : '未定价·走草案兜底'
+    return item.hasPricing ? '定价不合法·拒绝生成' : '未定价·拒绝生成'
   }
   return `已定价 ${item.preview?.pointCost ?? 0} 分`
 }

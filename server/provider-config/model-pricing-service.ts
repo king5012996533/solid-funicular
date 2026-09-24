@@ -152,6 +152,8 @@ const buildPricingPreview = (input: {
   return {
     pointCost: result.points,
     usingDraft: result.usingDraft,
+    // 拒绝计费（未配价/未标定/匹配失败）：界面据此提示「该模型会拒绝生成」，而不是显示假价
+    refused: result.refuse,
     detail: result.detail,
     params,
   }
@@ -176,15 +178,15 @@ const buildPricingItem = (input: {
   let spec: ModelPricingSpec | null = null
   let draftReason = ''
   if (!rawSpec) {
-    draftReason = '未配置定价，扣费会走代码草案兜底价'
+    draftReason = '未配置定价，生成会被拒绝（请在「计费定价」页签补录）'
   } else {
     spec = rawSpec as ModelPricingSpec
     if (!Array.isArray(spec.tiers) || !spec.tiers.length) {
-      draftReason = '定价档位为空，扣费会走代码草案兜底价'
+      draftReason = '定价档位为空，生成会被拒绝（请补录档位）'
     } else {
       const problems = validateModelPricing(spec)
       if (problems.length) {
-        draftReason = `现有定价配置不合法（${problems.join('；')}），仍会走草案兜底价`
+        draftReason = `现有定价配置不合法（${problems.join('；')}），生成会被拒绝（请修正后再用）`
       }
     }
   }
@@ -196,7 +198,7 @@ const buildPricingItem = (input: {
     modelName: input.model.name,
     modelKey: input.model.modelKey,
     hasPricing: Boolean(input.model.pricing),
-    // 运营要能一眼看到「这个模型现在其实按草案兜底价在扣」→ 提醒补录正式定价
+    // 运营要能一眼看到「这个模型现在不能用」→ 提醒补录正式定价
     usingDraft: Boolean(draftReason),
     draftReason,
     updatedAt: input.model.pricing?.updatedAt?.toISOString() || null,
@@ -306,7 +308,7 @@ export const saveModelPricing = async (providerId: string, modelId: string, payl
   return { saved: true, item: await getModelPricing(providerId, modelId) }
 }
 
-/** 删除单个模型的定价（删掉后扣费会回落到代码草案兜底价）。 */
+/** 删除单个模型的定价（删掉后该模型的生成会被拒绝，直到重新配置）。 */
 export const deleteModelPricing = async (providerId: string, modelId: string) => {
   const model = await findModelForPricing(providerId, modelId)
   await prisma.modelPricing.deleteMany({ where: { modelId: model.id } })

@@ -271,6 +271,9 @@ export const resolveModelPricingCost = async (input: {
   pointCost: number
   usingDraft: boolean
   fallbackReason?: PricingFallbackReason
+  /** 是否拒绝计费（模型未配价 / 未标定 / 规格匹配失败）—— 调用方必须据此拒绝生成 */
+  refuse: boolean
+  refuseReason?: PricingFallbackReason
   detail: string
   modelName: string
 }> => {
@@ -299,6 +302,8 @@ export const resolveModelPricingCost = async (input: {
     pointCost: result.points,
     usingDraft: result.usingDraft,
     fallbackReason: result.fallbackReason,
+    refuse: result.refuse,
+    refuseReason: result.refuseReason,
     detail: result.detail,
     modelName,
   }

@@ -1,6 +1,7 @@
 import { readJsonBody, sendJson } from '../ai-gateway/shared'
 import type { GenerationTaskStreamEventBase } from '../../src/shared/generation-task-stream'
 import type { ResearchTaskConfig } from '../../src/shared/research/research-types'
+import { isModelPricingRefusedError, MODEL_PRICING_REFUSED_CODE } from '../../src/shared/model-pricing-rules'
 
 // 重新导出共享协议中的类型与失败码，让服务端代码继续按原路径引用
 export type {
@@ -67,6 +68,10 @@ export const INSUFFICIENT_POINTS_CODE = 'INSUFFICIENT_POINTS'
 
 export const isInsufficientPointsError = (error: any) => error?.code === INSUFFICIENT_POINTS_CODE
 
+// 定价缺失/未标定/规格匹配失败：由 ModelPricingRefusedError 抛出（见 model-pricing-rules.ts）。
+// 接口层据此返回 400 + 语义化 error.type=model_pricing_refused，而不是 500「服务器错误」。
+export { isModelPricingRefusedError, MODEL_PRICING_REFUSED_CODE }
+
 /**
  * 生成任务接口异常 → HTTP 状态码。
  *
@@ -75,6 +80,9 @@ export const isInsufficientPointsError = (error: any) => error?.code === INSUFFI
  */
 export const resolveGenerationTaskErrorStatus = (error: any): number => {
   if (error instanceof GenerationTaskRequestError) {
+    return error.statusCode
+  }
+  if (isModelPricingRefusedError(error)) {
     return error.statusCode
   }
   if (isInsufficientPointsError(error)) {
