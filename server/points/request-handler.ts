@@ -1,6 +1,7 @@
 import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
-import { getPointBalance, resolveGenerationPointCost } from '../marketing-center/service'
+import { getPointBalance, resolveModelPricingCost } from '../marketing-center/service'
+import { buildNormalizedGenerationParams } from '../../src/shared/model-pricing-rules'
 import { POINTS_BALANCE_PATH, POINTS_ESTIMATE_PATH } from './constants'
 
 /**
@@ -52,7 +53,7 @@ export const handlePointsRequest = async (req: any, res: any) => {
  * 画布的模型选择键 → 计费函数要的三个参数。
  *
  * 画布节点存的是 `providerId::CATEGORY::modelKey`（模型选择器的选择键），
- * 而 `resolveGenerationPointCost` 要 providerId + modelKey + endpointType 三项。
+ * 而 `resolveModelPricingCost` 要 providerId + modelKey + endpointType 三项。
  * 在这里解析一次，调用方（前端）不必知道计费函数的入参形状。
  */
 const parseModelSelectionKey = (raw: string) => {
@@ -66,15 +67,14 @@ const parseModelSelectionKey = (raw: string) => {
 /**
  * `POST /api/points/estimate` —— 一批节点的预估消耗。
  *
- * 为什么必须由服务端算：真实扣费走的是 `resolveGenerationPointCost`（按模型定价）。
+ * 为什么必须由服务端算：真实扣费走的是 `resolveModelPricingCost`（读 model_pricing 定价表）。
  * 前端复写一套「张数 × 常量」迟早与计费漂移，最后表现为「预校验说 30 分、实际扣了 42 分」——
- * 用户对不上账，比不预估还糟。这里直接调同一个函数。
+ * 用户对不上账，比不预估还糟。这里直接调同一个函数，**连参数归一化都共用**（size/count 一起传进去），
+ * 所以按张/按次/按秒的区别由定价算法自己处理，接口不再另乘一次张数。
  *
- * 性能：同一批里往往多个节点用同一个模型，所以**按模型去重后再查**，
- * 10 个同模型节点只查一次库，而不是 10 次。
- *
- * 注意：`size`（画幅）目前**不参与定价** —— 计费函数只按模型定价。
- * 接口仍接收 size 是为了将来定价细化时不必改调用方，但响应里的 cost 与 size 无关，这点不能含糊。
+ * 性能：同一批里多个节点常是同一「模型 + 规格 + 张数」，所以按这个三元组去重后再查，
+ * 10 个同规格节点只查一次库。不能只按模型去重：perImage 随张数变、perTask 不变，
+ * 同模型不同张数的节点必须各算各的，否则会互相串价。
  */
 export const handlePointsEstimateRequest = async (req: any, res: any) => {
   try {
@@ -97,35 +97,41 @@ export const handlePointsEstimateRequest = async (req: any, res: any) => {
       return
     }
 
-    // 去重：同一模型只查一次定价
-    // 显式标注类型：items 是 any[]，直接用会让 Set 推成 unknown，后面传给解析函数就报错
-    const rawKeys: string[] = items.map((item: any) => String(item?.model || '').trim())
-    const uniqueKeys: string[] = [...new Set(rawKeys.filter(Boolean))]
-    const costByModel = new Map<string, number>()
-    await Promise.all(uniqueKeys.map(async (key) => {
-      const parsed = parseModelSelectionKey(key)
-      if (!parsed) {
-        costByModel.set(key, 0)
-        return
-      }
-      const resolved = await resolveGenerationPointCost({
+    // 单个节点的预估：与结算同一个解析器 + 同一套参数归一化
+    const estimateOne = async (item: any) => {
+      const model = String(item?.model || '').trim()
+      const parsed = parseModelSelectionKey(model)
+      if (!parsed) return 0
+      const resolved = await resolveModelPricingCost({
         providerId: parsed.providerId,
         modelKey: parsed.modelKey,
         endpointType: parsed.endpointType as 'chat' | 'image' | 'video',
+        params: buildNormalizedGenerationParams({
+          kind: parsed.endpointType === 'video' ? 'video' : 'image',
+          size: item?.size,
+          count: item?.count,
+        }),
       })
-      costByModel.set(key, Math.max(0, Math.trunc(Number(resolved?.pointCost) || 0)))
-    }))
+      return Math.max(0, Math.trunc(Number(resolved?.pointCost) || 0))
+    }
 
+    // 去重：同一「模型 + 规格 + 张数」只查一次定价（key 必须带上 size/count，见函数头注释）
+    const costCache = new Map<string, number>()
     let totalEstimated = 0
-    const details = items.map((item: any) => {
+    const details: Array<{ model: string; size: string; count: number; cost: number }> = []
+    for (const item of items) {
       const model = String(item?.model || '').trim()
       const size = String(item?.size || '').trim()
       const count = Math.max(1, Math.trunc(Number(item?.count) || 1))
-      const unit = costByModel.get(model) || 0
-      const cost = unit * count
+      const cacheKey = `${model}::${size}::${count}`
+      let cost = costCache.get(cacheKey)
+      if (cost === undefined) {
+        cost = await estimateOne(item)
+        costCache.set(cacheKey, cost)
+      }
       totalEstimated += cost
-      return { model, size, count, cost }
-    })
+      details.push({ model, size, count, cost })
+    }
 
     sendJson(res, 200, { success: true, totalEstimated, details })
   } catch (error: any) {

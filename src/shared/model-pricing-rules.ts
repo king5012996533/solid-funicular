@@ -98,6 +98,39 @@ export const normalizeVideoSeconds = (input: number, max = 20, min = 1): number 
   return Math.max(min, Math.min(max, value))
 }
 
+/**
+ * 把上游请求里的原始规格归一化成定价入参（结算与预估都从它拿值，避免两边各自解释请求）。
+ *
+ * - `size` 形如 `1024x1024`（个别渠道用 `×`）：拆成长宽供 longEdge/shortEdge 归档，
+ *   同时把原样字符串塞进 `label`（label 模式的上游档位值就是它）。
+ * - 视频 `seconds` 必须先经 `normalizeVideoSeconds` clamp —— 只归一化定价、不归一化时长，
+ *   就会出现「预估 30 秒、实扣 20 秒」这种对不上的账。
+ * - `count` 保底 1（perTask 渠道不随张数变化，perImage 渠道则要按张乘）。
+ */
+export const buildNormalizedGenerationParams = (input: {
+  kind: 'image' | 'video'
+  /** 上游尺寸字符串，如 `1024x1024` / `1536x1024` */
+  size?: unknown
+  /** 一次请求产出几个（图片张数）；缺省按 1 */
+  count?: unknown
+  /** 视频时长（秒），传用户原始请求值即可，clamp 由这里负责 */
+  seconds?: unknown
+}): NormalizedGenerationParams => {
+  const sizeText = String(input.size ?? '').trim()
+  const sizeMatch = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(sizeText)
+  const count = Math.max(1, Math.trunc(Number(input.count) || 1))
+  const secondsValue = Number(input.seconds)
+  return {
+    kind: input.kind,
+    count,
+    ...(sizeMatch ? { width: Number(sizeMatch[1]), height: Number(sizeMatch[2]) } : {}),
+    ...(sizeText ? { label: sizeText } : {}),
+    ...(input.kind === 'video' && Number.isFinite(secondsValue) && secondsValue > 0
+      ? { seconds: normalizeVideoSeconds(secondsValue) }
+      : {}),
+  }
+}
+
 /** 图片档位归档用的边长：图片取长边、视频取短边（竖屏 1080×1920 也算 1080p） */
 export const pickEdgeForMode = (
   mode: PricingMatchMode,

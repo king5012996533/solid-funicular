@@ -11,6 +11,7 @@
  * 跑法：npx tsx scripts/tests/test-model-pricing-rules.mjs
  */
 import {
+  buildNormalizedGenerationParams,
   computeTierPoints,
   getGenerationCost,
   matchPricingTier,
@@ -40,6 +41,22 @@ check('0 / 负数 / 非法值 → 保底 1 秒（不产生 0 或负价）', () =
 })
 check('范围内的值原样通过', () => {
   assert(normalizeVideoSeconds(8) === 8, '8 秒不该被改')
+})
+
+console.log('\n== 请求参数归一化（结算与预估从同一处解释请求）==')
+
+check('size 拆成长宽并保留原串作 label（longEdge/shortEdge 与 label 两种模式都要用）', () => {
+  const params = buildNormalizedGenerationParams({ kind: 'image', size: '2048x1152', count: 2 })
+  assert(params.width === 2048 && params.height === 1152, '应拆出长宽')
+  assert(params.label === '2048x1152' && params.count === 2, 'label 与 count 应带上')
+})
+check('视频时长在归一化时就 clamp（预估与实扣必须拿到同一个秒数）', () => {
+  assert(buildNormalizedGenerationParams({ kind: 'video', seconds: 30 }).seconds === 20, '30 秒应 clamp 到 20')
+})
+check('没有 size 时不含糊造长宽（交给档位匹配 miss 走兜底），count 保底 1', () => {
+  const params = buildNormalizedGenerationParams({ kind: 'image' })
+  assert(params.width === undefined && params.height === undefined, '没 size 就不该有长宽')
+  assert(params.count === 1, 'count 保底 1')
 })
 
 console.log('\n== 档位匹配（同名模型不同渠道，匹配方式不同）==')

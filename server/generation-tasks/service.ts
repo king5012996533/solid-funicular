@@ -7,6 +7,7 @@ import {
   consumeGenerationPoints,
   refundGenerationPoints,
   resolveGenerationPointCost,
+  resolveModelPricingCost,
 } from '../marketing-center/service'
 import { resolveGenerationTaskStrategy } from './strategy'
 import {
@@ -567,6 +568,7 @@ const buildTaskLifecycleContext = () => ({
   updateGenerationRecord: updateGenerationRecord as unknown as TaskLifecycleContext['updateGenerationRecord'],
   attachGenerationPointRecordId,
   resolveGenerationPointCost,
+  resolveModelPricingCost,
   consumeGenerationPoints,
   acquireTaskConcurrencySlots: async ({ userId, providerId, skillKey }: {
     userId: string

@@ -7,7 +7,8 @@ import {
 import { forwardGatewayPayload, forwardMultipartRequest } from './forward'
 import { resolveGatewayProviderUpstream } from '../provider-config/service'
 import { requireCurrentSessionUser } from '../auth/session'
-import { consumeGenerationPoints, refundGenerationPoints, resolveGenerationPointCost } from '../marketing-center/service'
+import { consumeGenerationPoints, refundGenerationPoints, resolveModelPricingCost } from '../marketing-center/service'
+import { buildNormalizedGenerationParams } from '../../src/shared/model-pricing-rules'
 import { normalizeChargeableEndpointType, type AiEndpointType } from '../../src/shared/provider-endpoint-strategy'
 
 const shouldExposeGatewayDebug = () => String(process.env.AI_GATEWAY_DEBUG_HEADERS || '').trim() === 'true'
@@ -25,6 +26,24 @@ const isChargeableGenerationRequest = (input: {
 
 const buildGatewayAssociationNo = () => {
   return `GWY${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+}
+
+/**
+ * 把网关请求体里的规格归一化成定价入参。
+ *
+ * 网关是低层转发：图片/视频的 size/count/seconds 散在 body 里，抽成一个函数免得两处各解释一遍。
+ * multipart 路径此刻拿不到 body（还没解析就直接透传）→ 传 null，按 1 张/1 次计。
+ */
+const buildGatewayPricingParams = (endpointType: 'image' | 'video', body: unknown) => {
+  const source = body && typeof body === 'object' && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {}
+  return buildNormalizedGenerationParams({
+    kind: endpointType,
+    size: source.size,
+    count: source.count ?? source.n,
+    seconds: source.seconds ?? source.duration,
+  })
 }
 
 export const handleAiGatewayRequest = async (req: any, res: any) => {
@@ -67,12 +86,14 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
       debugUpstreamMethod = headerMethod
 
       const billingDetail = shouldChargeHeaderRequest
-        ? await resolveGenerationPointCost({
+        ? await resolveModelPricingCost({
           providerId: headerProviderId,
           modelKey: headerModelKey,
           endpointType: billedHeaderEndpointType as 'image' | 'video',
+          // multipart 体积流未解析，拿不到 size/count —— 按默认 1 张/1 次计
+          params: buildGatewayPricingParams(billedHeaderEndpointType as 'image' | 'video', null),
         })
-        : { pointCost: 0, modelId: '', modelName: '' }
+        : { pointCost: 0, usingDraft: false, detail: '', modelName: '' }
 
       const associationNo = buildGatewayAssociationNo()
       const consumedPointLog = shouldChargeHeaderRequest && billingDetail.pointCost > 0
@@ -184,12 +205,13 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
     }
 
     const billingDetail = shouldChargeJsonRequest
-      ? await resolveGenerationPointCost({
+      ? await resolveModelPricingCost({
         providerId: normalized.providerId,
         modelKey: normalized.modelKey,
         endpointType: billedJsonEndpointType as 'image' | 'video',
+        params: buildGatewayPricingParams(billedJsonEndpointType as 'image' | 'video', normalized.body),
       })
-      : { pointCost: 0, modelId: '', modelName: '' }
+      : { pointCost: 0, usingDraft: false, detail: '', modelName: '' }
 
     const associationNo = buildGatewayAssociationNo()
     const consumedPointLog = shouldChargeJsonRequest && billingDetail.pointCost > 0

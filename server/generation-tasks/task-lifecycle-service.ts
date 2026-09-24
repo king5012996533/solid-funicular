@@ -4,6 +4,11 @@ import type { GenerationTaskStrategyKey } from './strategy'
 import type { AgentRunState } from '../../src/types/agent'
 import { GenerationTaskRequestError } from './shared'
 import { readCapabilityFlagsFromRequestBody, type ModelCapabilityFlags } from '../../src/shared/provider-capability'
+import {
+  buildNormalizedGenerationParams,
+  type NormalizedGenerationParams,
+  type PricingFallbackReason,
+} from '../../src/shared/model-pricing-rules'
 import type { RuntimeManagedTask } from './task-runtime-governor'
 
 // 统一用治理层那一份任务类型（见 task-runtime-governor.ts 的说明）
@@ -81,6 +86,26 @@ export interface TaskLifecycleContext {
     endpointType: 'chat' | 'image'
     capabilityFlags?: ModelCapabilityFlags | null
   }) => Promise<BillingDetail>
+  /**
+   * 读 `model_pricing` 定价表的结算入口（M3 试点），与上面的 resolveGenerationPointCost 是两条不同的账：
+   *   - resolveGenerationPointCost：读模型里扁平的 billingPower，且支持能力开关倍率 → **对话链路继续用它**
+   *     （能力倍率只在这条链路上有意义，且 chat 模型现全库未配价、行为要保持不变）。
+   *   - resolveModelPricingCost：读结构化定价表 + 接收真实请求参数 → 图片/视频结算与预估接口都用它，
+   *     从而与预估接口共用同一个算法，保证「预估 = 实扣」。
+   * 返回里的 usingDraft / fallbackReason 仅用于打日志（未配价的模型会走草案兜底价）。
+   */
+  resolveModelPricingCost: (input: {
+    providerId: string
+    modelKey: string
+    endpointType: 'image' | 'video'
+    params?: NormalizedGenerationParams
+  }) => Promise<{
+    pointCost: number
+    usingDraft: boolean
+    fallbackReason?: PricingFallbackReason
+    detail: string
+    modelName: string
+  }>
   consumeGenerationPoints: (input: {
     userId: string
     pointCost: number
@@ -411,10 +436,19 @@ export const startGenerationTask = async (
       skillKey,
     })
 
-    const billingDetail = await context.resolveGenerationPointCost({
+    // 图片与视频共用这一段创建路径：按任务类型取端点（视频要按秒计价，kind 必须给对）。
+    const billingEndpointType = strategy.key === 'video' ? 'video' : 'image'
+    const requestBody = payload.requestBody || {}
+    const billingDetail = await context.resolveModelPricingCost({
       providerId,
       modelKey,
-      endpointType: 'image',
+      endpointType: billingEndpointType,
+      params: buildNormalizedGenerationParams({
+        kind: billingEndpointType,
+        size: requestBody.size,
+        count: requestBody.count ?? requestBody.n,
+        seconds: requestBody.seconds ?? requestBody.duration,
+      }),
     })
     const associationNo = context.buildGatewayAssociationNo()
     const pointLog = billingDetail.pointCost > 0
