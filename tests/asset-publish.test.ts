@@ -216,7 +216,11 @@ check(
   await resolveUpstreamImageUrls({
     images: ["/uploads/generated/image/1.png"],
     publicAssetBaseUrl: "https://cdn.example.com/",
-    fetchImpl: sequenceFetch([403, 200]),
+    // 注意：探测现在是「HEAD 非 2xx 再用 GET 复核」（见 video-create-contract.ts 的
+    // probeImageReachability），所以"不可达"必须**两个方法都失败**：
+    // 第 1 次 HEAD=403、第 2 次 GET=403 → 判定不可达 → 触发发布 → 第 3 次 HEAD=200。
+    // 旧夹具写成 [403,200] 时，HEAD+GET 恰好凑成"可达"，发布分支根本不会被执行。
+    fetchImpl: sequenceFetch([403, 403, 200]),
     publishConfig,
     publishImpl: (relativePath, config) => {
       publishedPath = mapUploadPathToRemotePath(relativePath, config.remoteDir);
@@ -231,7 +235,11 @@ check(
   "没有输入基址但配了发布 → 用发布配置的基址：先探测 403，发布后复探 200",
   await resolveUpstreamImageUrls({
     images: ["/uploads/generated/image/1.png"],
-    fetchImpl: sequenceFetch([403, 200]),
+    // 注意：探测现在是「HEAD 非 2xx 再用 GET 复核」（见 video-create-contract.ts 的
+    // probeImageReachability），所以"不可达"必须**两个方法都失败**：
+    // 第 1 次 HEAD=403、第 2 次 GET=403 → 判定不可达 → 触发发布 → 第 3 次 HEAD=200。
+    // 旧夹具写成 [403,200] 时，HEAD+GET 恰好凑成"可达"，发布分支根本不会被执行。
+    fetchImpl: sequenceFetch([403, 403, 200]),
     publishConfig,
     publishImpl: () => ({ ok: true, durationMs: 1 }),
   }),
