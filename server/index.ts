@@ -156,8 +156,15 @@ const handleUploadsRequest = async (
   res: any,
   requestPath: string,
 ) => {
-  // 仅允许 GET 请求读取上传文件。
-  if (req.method !== "GET") {
+  /**
+   * 允许 GET 与 **HEAD**。
+   *
+   * 为什么必须支持 HEAD：画布 Agent 的 `preflight_check` 用 `fetch(url, { method: 'HEAD' })`
+   * 判断参考图可达性。此前只放 GET，HEAD 会掉到「前端静态兜底」并返回 404，于是校验报告
+   * 误报「参考图取不到」，Agent 据此认定**已经生成好的母版链接过期**、要求重跑（实测白花 60 积分）。
+   * 同一地址实测：HEAD=404 / GET=200 —— 图一直都在。
+   */
+  if (req.method !== "GET" && req.method !== "HEAD") {
     return false;
   }
 
@@ -191,6 +198,12 @@ const handleUploadsRequest = async (
   const fileBuffer = await fs.readFile(filePath);
   res.statusCode = 200;
   res.setHeader("Content-Type", getContentTypeByFilePath(filePath));
+  // Content-Length 两个方法都给：HEAD 的规范就是「头部与 GET 一致、不带 body」
+  res.setHeader("Content-Length", String(fileBuffer.byteLength));
+  if (req.method === "HEAD") {
+    res.end();
+    return true;
+  }
   res.end(fileBuffer);
   return true;
 };

@@ -783,11 +783,34 @@ export const executeCanvasAgentTool = async (
       const refUrls = [...new Set(targets.flatMap((node) => node.referenceImages || []))];
       const reachability: Record<string, boolean> = {};
       await Promise.all(refUrls.map(async (url) => {
+        /**
+         * 探测单个地址：先 HEAD，**失败再用 GET 复核**。
+         *
+         * 为什么必须复核：有些服务端/CDN 对 HEAD 只回 404，而那并不代表图取不到
+         * （我们自己的 `/uploads` 就曾如此，见 `server/index.ts` 的 handleUploadsRequest）。
+         * 仅凭 HEAD 判定会误报「参考图不可达」→ Agent 认定**已生成好的母版链接过期**、
+         * 要求重跑 6 张（实测白花 60 积分）。GET 只等响应头、拿到就立刻 cancel，
+         * 不把整张图下下来。
+         */
+        const probe = async (method: "HEAD" | "GET") => {
+          const res = await fetch(url, { method });
+          if (method === "GET") {
+            try {
+              await res.body?.cancel();
+            } catch {
+              // 取消失败不影响结论
+            }
+          }
+          return res.ok;
+        };
         try {
-          const res = await fetch(url, { method: "HEAD" });
-          reachability[url] = res.ok;
+          reachability[url] = (await probe("HEAD")) || (await probe("GET"));
         } catch {
-          reachability[url] = false;
+          try {
+            reachability[url] = await probe("GET");
+          } catch {
+            reachability[url] = false;
+          }
         }
       }));
 
