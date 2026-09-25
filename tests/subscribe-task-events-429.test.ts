@@ -63,6 +63,54 @@ await check('429 会被当作可重试：退避后重连成功，不抛错', asy
   }
 })
 
+/**
+ * 服务端发完终态事件**不会自己关连接**（它只发事件，靠 15s 心跳保活到寿命上限，默认 30 分钟）。
+ * 客户端若不主动断开，这条订阅就一直占着用户的实时订阅额度 —— 每条任务白占半小时，攒满 20 条
+ * 之后全线 429。这里用一个「发完 completed 就再也不关」的流模拟真实服务端，钉住主动断开行为。
+ */
+const terminalThenHangStream = (init?: { signal?: AbortSignal }) => {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        'event: completed\ndata: {"type":"completed","recordId":"task-y","done":true}\n\n',
+      ))
+      // 故意不 close()：模拟服务端挂着的连接
+      // 真实 fetch 在 signal 触发时会取消响应体，让挂起的 read() 以 AbortError 失败（这里如实模拟）
+      init?.signal?.addEventListener('abort', () => {
+        try {
+          controller.error(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
+        } catch {
+          // 流已关闭
+        }
+      })
+    },
+  })
+}
+
+await check('收到终态事件即主动断开：不再白占订阅额度半小时', async () => {
+  const originalFetch = globalThis.fetch
+  let capturedSignal: AbortSignal | undefined
+  globalThis.fetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    capturedSignal = init?.signal
+    return { ok: true, status: 200, body: terminalThenHangStream(init) } as unknown as Response
+  }) as unknown as typeof fetch
+  try {
+    let events = 0
+    const hangGuard = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('终态后订阅没有主动断开（等 3 秒仍未返回，真实场景下这会占住额度直到 30 分钟寿命上限）')), 3000)
+    })
+    await Promise.race([
+      subscribeGenerationTaskEvents('task-y', { onEvent: () => { events += 1 } }),
+      hangGuard,
+    ])
+    assert(events === 1, `应恰好派发一次终态事件，实际 ${events}`)
+    assert(capturedSignal?.aborted === true, '终态事件后应断开本轮连接（signal.aborted 应为 true）')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 await check('其它 4xx（如 404 任务不存在）仍然立即失败、不重试', async () => {
   const originalFetch = globalThis.fetch
   let calls = 0

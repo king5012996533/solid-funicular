@@ -328,6 +328,23 @@ export const subscribeGenerationTaskEvents = async (
           options.onEvent(parsed as GenerationTaskStreamEvent);
           if (TERMINAL_EVENT_TYPES.has(normalizedEventType)) {
             terminated = true;
+            /**
+             * 终态事件到手就主动断开这条连接。
+             *
+             * 服务端发完 completed/failed/stopped **不会自己 end()** —— 它只负责发事件，
+             * 连接靠 15s 心跳一直保活到寿命上限（SSE_MAX_CONNECTION_MS，默认 30 分钟）。
+             * 而每条订阅都占着用户的实时订阅额度（SSE_PER_USER_LIMIT，默认 20），
+             * 攒满之后所有订阅一律 429，就是用户看到的「订阅任务状态失败 (429)」。
+             *
+             * 之所以收口在这里、而不是让每个调用方自己记得 abort：调用点有六个
+             * （画布图片节点四处、视频节点、助手面板、生成页、工作流对话），
+             * 漏掉任何一个，那条路径就每条任务白占一个额度半小时。放在这里，
+             * 所有调用方一次性对齐 —— 谁都不必记得这件事。
+             *
+             * 注意断的是本轮的内层 controller，不是调用方传进来的 signal：
+             * 助手面板把外部 signal 同时给了画布桥，断它会把在途工具执行一起取消。
+             */
+            innerController.abort();
           }
         } catch {
           // 忽略解析失败的事件消息。

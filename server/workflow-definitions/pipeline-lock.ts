@@ -3,13 +3,15 @@ import {
   canForceReleaseLockForUser,
   evaluateCanvasWriteLock,
   isPipelineLockExpired,
+  resolvePipelineLockReleaseOutcome,
   shouldReleaseLockForTask,
   type PipelineLockInfo,
+  type PipelineLockReleaseOutcome,
 } from './pipeline-lock-rules'
 
 // 决策逻辑在 pipeline-lock-rules.ts（不依赖 IO，可单测）；这里保留同名导出，调用方无需改动
 export { canForceReleaseLockForUser, evaluateCanvasWriteLock, isPipelineLockExpired, shouldReleaseLockForTask }
-export type { PipelineLockInfo }
+export type { PipelineLockInfo, PipelineLockReleaseOutcome }
 import { toNullableJsonInput } from '../shared/json-input'
 import { writeScopedLog } from '../shared/logging'
 
@@ -162,17 +164,19 @@ export const acquirePipelineLock = async (input: {
   return { ok: true, lock }
 }
 
-/** 释放锁：只有持锁者本人（token 对得上）能放，避免误放别人的锁 */
-export const releasePipelineLock = (workflowId: string, token: string): boolean => {
-  const current = getActivePipelineLock(workflowId)
-  if (!current) {
-    return false
+/**
+ * 释放锁：只有持锁者本人（token 对得上）能放，避免误放别人的锁。
+ *
+ * 判定规则在 pipeline-lock-rules.ts 的 resolvePipelineLockReleaseOutcome（纯函数、可单测）：
+ * **锁已经不在算成功**（服务端在任务终态已释放、或 TTL 到期被清），只有「锁还在但不是我的 token」
+ * 才是 not-owner。以前两种情况都返回 false，客户端把前一种报成了红字错误。
+ */
+export const releasePipelineLock = (workflowId: string, token: string): PipelineLockReleaseOutcome => {
+  const outcome = resolvePipelineLockReleaseOutcome(getActivePipelineLock(workflowId), token)
+  if (outcome === 'released') {
+    locks.delete(workflowId)
   }
-  if (current.token !== token) {
-    return false
-  }
-  locks.delete(workflowId)
-  return true
+  return outcome
 }
 
 /**

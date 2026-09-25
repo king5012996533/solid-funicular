@@ -216,12 +216,19 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
         sendJson(res, 200, { data: { released: true, forced: true } })
         return
       }
-      const released = releasePipelineLock(workflowPipelineLockReleaseMatch.workflowId, String(payload?.token || ''))
-      if (!released) {
-        sendWorkflowDefinitionError(res, 409, '释放失败：锁不存在，或 token 不是持锁者的（不能释放别人的锁）')
+      const outcome = releasePipelineLock(workflowPipelineLockReleaseMatch.workflowId, String(payload?.token || ''))
+      if (outcome === 'not-owner') {
+        sendWorkflowDefinitionError(res, 409, '释放失败：这把锁正被别的持锁者占用（token 不是你的），不能释放别人的锁')
         return
       }
-      sendJson(res, 200, { data: { released: true } })
+      /**
+       * `already-released` 按成功返回。
+       *
+       * 这是最常见的一种：任务到达终态时服务端已经按 recordId 放过锁（见 releasePipelineLockForTask），
+       * 客户端这一发只是补刀。以前这里报 409，用户就会在画布上看到一条
+       * 「释放失败：锁不存在，或 token 不是持锁者的」的红字 —— 明明什么都没出错。
+       */
+      sendJson(res, 200, { data: { released: true, alreadyReleased: outcome === 'already-released' } })
       return
     }
 

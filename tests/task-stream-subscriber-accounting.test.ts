@@ -99,5 +99,47 @@ check('下发事件时缓冲已满（write 返回 false）的订阅者也会被�
   removeTaskStreamSubscriber('task-d', slow, userId)
 })
 
+/**
+ * 模拟真实 ServerResponse：`on('close', …)` 就像 task-stream-subscription 里那样，
+ * 由 close 处理器统一退订。用来验证「服务端在终态后主动关连接 ⇒ 用户级额度自动释放」。
+ */
+const makeResWithClose = (recordId: string, userId: string) => {
+  const closeHandlers: Array<() => void> = []
+  const res: any = {
+    ended: false,
+    statusCode: 0,
+    setHeader() {},
+    flushHeaders() {},
+    write() { return true },
+    end() {
+      res.ended = true
+      for (const handler of closeHandlers) handler()
+    },
+    on(event: string, handler: () => void) {
+      if (event === 'close') closeHandlers.push(handler)
+    },
+  }
+  closeHandlers.push(() => removeTaskStreamSubscriber(recordId, res, userId))
+  return res
+}
+
+check('终态事件后服务端主动关连接，用户级额度随之释放（不依赖前端是否升级）', () => {
+  const userId = 'accounting-user-e'
+  const first = makeResWithClose('task-e', userId)
+  const second = makeResWithClose('task-e', userId)
+  addTaskStreamSubscriber('task-e', first, userId)
+  addTaskStreamSubscriber('task-e', second, userId)
+
+  emitLocalTaskStreamEvent('task-e', { type: 'progress', recordId: 'task-e', done: false } as any)
+  assert(first.ended === false && second.ended === false, '任务还在跑时不能掐掉连接')
+
+  emitLocalTaskStreamEvent('task-e', { type: 'completed', recordId: 'task-e', done: true } as any)
+  assert(first.ended === true && second.ended === true, '终态事件发出后应由服务端关掉连接（旧版前端不会自己断）')
+  assert(
+    isUserStreamSubscriberLimitReached(userId) === false,
+    '连接关闭后该用户的订阅额度应已释放',
+  )
+})
+
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)
 process.exit(failed ? 1 : 0)

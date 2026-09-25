@@ -13,6 +13,7 @@ import {
   canForceReleaseLockForUser,
   evaluateCanvasWriteLock,
   isPipelineLockExpired,
+  resolvePipelineLockReleaseOutcome,
   shouldReleaseLockForTask,
 } from '../../server/workflow-definitions/pipeline-lock-rules.ts'
 
@@ -114,6 +115,27 @@ check('不同用户 → 拒绝（别人的锁一律不动）', () => {
 check('锁不存在 / 空 userId → 不肯放', () => {
   assert(canForceReleaseLockForUser(null, 'user_1') === false, '没有锁应返回 false')
   assert(canForceReleaseLockForUser(lock({ userId: 'user_1' }), '') === false, '空 userId 应返回 false')
+})
+
+console.log('\n== 释放锁：锁已经不在算成功（幂等） ==')
+
+check('持锁者本人释放 → released', () => {
+  assert(resolvePipelineLockReleaseOutcome(lock(), 'pl_token_A') === 'released', 'token 对得上应放锁')
+})
+
+check('锁已经不在（任务终态时服务端已放）→ already-released，**不是错误**', () => {
+  assert(
+    resolvePipelineLockReleaseOutcome(null, 'pl_token_A') === 'already-released',
+    '锁不在应算已释放：这是客户端补刀时最常见的情况，报错会让用户看到一条假红字',
+  )
+})
+
+check('锁还在但不是我的 token → not-owner（绝不谎报已释放）', () => {
+  assert(resolvePipelineLockReleaseOutcome(lock(), 'pl_token_B') === 'not-owner', '别人的锁不能被放掉')
+})
+
+check('漏传 token → not-owner（老客户端不该误放）', () => {
+  assert(resolvePipelineLockReleaseOutcome(lock(), '') === 'not-owner', '空 token 不算持锁者')
 })
 
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)

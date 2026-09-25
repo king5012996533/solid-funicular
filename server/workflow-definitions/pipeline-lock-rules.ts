@@ -65,3 +65,35 @@ export const canForceReleaseLockForUser = (
   lock: PipelineLockInfo | null | undefined,
   userId: string,
 ): boolean => Boolean(lock && userId && lock.userId === userId)
+
+/**
+ * 释放锁的结果。为什么不是布尔：调用方要区分「本来就没锁」与「锁是别人的」——
+ * 前者该按成功处理，后者才是冲突。混成一个 false，客户端就会把「锁已经被任务终态
+ * 那一路放掉了」这种完全正常的情况报成红字错误。
+ */
+export type PipelineLockReleaseOutcome = 'released' | 'already-released' | 'not-owner'
+
+/**
+ * 释放锁的判定。**幂等**：锁已经不在 = 已经释放成功。
+ *
+ * 依据：调用方（`POST …/pipeline-lock/release`）要的结果是「这通调用之后这把锁不再由我持有」。
+ * 服务端在任务终态时已经按 recordId 放过一次（见 releasePipelineLockForTask），
+ * 客户端随后补的这一发必然「锁不存在」—— 那是成功，不是失败。
+ * 实测症状：画布上弹「释放失败：锁不存在，或 token 不是持锁者的」，明明什么都没出错。
+ *
+ * 只有「锁还在、token 却对不上」才是 not-owner：那是别人的锁，不能谎报已释放。
+ * 空 token 一律不算持锁者（防止老客户端漏传字段时误放）。
+ */
+export const resolvePipelineLockReleaseOutcome = (
+  lock: PipelineLockInfo | null | undefined,
+  token: string,
+): PipelineLockReleaseOutcome => {
+  if (!lock) {
+    return 'already-released'
+  }
+  const given = String(token || '')
+  if (!given || String(lock.token || '') !== given) {
+    return 'not-owner'
+  }
+  return 'released'
+}

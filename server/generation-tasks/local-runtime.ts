@@ -31,6 +31,12 @@ const userStreamSubscribers = new Map<string, Set<any>>()
 // 每用户最多并发 SSE 订阅数（典型场景：多标签页 + 工作流多节点同时执行）
 export const SSE_PER_USER_LIMIT = Number.parseInt(process.env.SSE_PER_USER_LIMIT || '20', 10)
 
+/**
+ * 终态事件：发出这条之后这次任务就不会再有事件了。
+ * 与前端 src/api/generation-tasks.ts 的 TERMINAL_EVENT_TYPES 同口径。
+ */
+const TERMINAL_TASK_STREAM_EVENT_TYPES = new Set(['completed', 'failed', 'stopped', 'end'])
+
 export const setLocalRunningTask = (task: LocalRunningGenerationTask) => {
   runningGenerationTasks.set(task.recordId, task)
 }
@@ -126,6 +132,27 @@ export const emitLocalTaskStreamEvent = (recordId: string, event: GenerationTask
       res.end()
     } catch {
       // 已经断开就忽略
+    }
+  }
+
+  /**
+   * 终态事件发完，服务端主动关掉连接。
+   *
+   * 前端收到 completed/failed/stopped 后已经会主动断开，但**不能只靠前端**：
+   * 旧版页面、被缓存的 bundle、非浏览器的客户端都可能一直挂着这条连接 —— 而每条连接
+   * 都占着该用户的实时订阅额度（SSE_PER_USER_LIMIT，默认 20），一直占到位列寿命上限
+   * （SSE_MAX_CONNECTION_MS，默认 30 分钟）。攒满就是「订阅任务状态失败 (429)」。
+   *
+   * 终态之后本来也不会再有事件，收在这里最省事：连接一关，订阅侧的 close 处理器
+   * 自然把用户级计数与分布式订阅一起退掉。
+   */
+  if (TERMINAL_TASK_STREAM_EVENT_TYPES.has(String(event.type))) {
+    for (const res of subscribers) {
+      try {
+        res.end()
+      } catch {
+        // 已经断开就忽略
+      }
     }
   }
 
