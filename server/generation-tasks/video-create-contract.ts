@@ -6,6 +6,18 @@
  * 单测一 import 就会连带拉起 prisma 与厂商配置解析，跑不动也看不出在测什么。
  */
 
+import {
+  logAssetPublish,
+  mapUploadPathToPublicUrl,
+  mapUploadPathToRemotePath,
+  publishLocalUploadIfNeeded,
+  resolveAssetPublishConfig,
+} from "./asset-publish";
+import type {
+  AssetPublishConfig,
+  AssetPublishResult,
+} from "./asset-publish";
+
 /** 上游参考图上限（官方文档：images 最多 10 项） */
 export const VIDEO_UPSTREAM_MAX_IMAGES = 10;
 
@@ -339,19 +351,50 @@ const probeImageReachability = async (input: {
  * 现在已知两个取不到的情形：
  *   1. 我们自己的本地地址 `/uploads/...`（除非配了公网基址 PUBLIC_ASSET_BASE_URL）；
  *   2. base64 内联图（`data:...`）—— 上游只接受 URL，不接受上传。
+ *
+ * 相对地址的处理顺序（2026-09-26 起）：
+ *   有基址 → 直接拼绝对地址探测，**能取到就不重复上传**；
+ *   探测不过（或本来没基址）→ 若配了「参考图发布」（asset-publish）→ 发布到公网后再探测一次；
+ *   仍不行 → 保留清晰的报错，并把发布失败原因一并带上（不能把原因吞掉）。
+ *   未配置发布时，行为与改动前**完全一致**。
  */
 export const resolveUpstreamImageUrls = async (input: {
   images: string[];
   publicAssetBaseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** 发布配置；不传则按环境读取（未配置时行为与改动前完全一致） */
+  publishConfig?: AssetPublishConfig | null;
+  /** 发布实现（测试注入）；默认走 asset-publish 的真实 ssh/scp */
+  publishImpl?: (
+    relativePath: string,
+    config: AssetPublishConfig,
+  ) => AssetPublishResult;
+  /** 日志出口，默认 console.log */
+  log?: (line: string) => void;
 }): Promise<string[]> => {
-  const base = String(input.publicAssetBaseUrl || "")
+  const fetchImpl = input.fetchImpl || fetch;
+  const publishConfig =
+    input.publishConfig !== undefined
+      ? input.publishConfig
+      : resolveAssetPublishConfig();
+  const publishImpl =
+    input.publishImpl ||
+    ((relativePath, config) => publishLocalUploadIfNeeded(relativePath, { config }));
+  // 基址优先用调用方给的；没有时用发布配置自带的（发布配置里必须含 PUBLIC_ASSET_BASE_URL）
+  const base = String(
+    input.publicAssetBaseUrl || publishConfig?.publicBaseUrl || "",
+  )
     .trim()
     .replace(/\/+$/, "");
-  const fetchImpl = input.fetchImpl || fetch;
   const resolved: string[] = [];
   const problems: string[] = [];
+
+  const describeProbeFailure = (probe: {
+    status: number;
+    error?: string;
+  }) =>
+    probe.status ? `HTTP ${probe.status}` : `不可达：${probe.error || "未知错误"}`;
 
   for (const raw of input.images) {
     const value = String(raw || "").trim();
@@ -362,34 +405,90 @@ export const resolveUpstreamImageUrls = async (input: {
       continue;
     }
 
-    let absolute = "";
     if (/^https?:\/\//i.test(value)) {
-      absolute = value;
-    } else if (value.startsWith("/")) {
-      if (!base) {
-        problems.push(
-          `${value}（本站相对地址，上游取不到；未配置公网基址 PUBLIC_ASSET_BASE_URL）`,
-        );
+      const probe = await probeImageReachability({
+        url: value,
+        fetchImpl,
+        timeoutMs: input.timeoutMs,
+      });
+      if (!probe.ok) {
+        problems.push(`${value}（探测失败：${describeProbeFailure(probe)}）`);
         continue;
       }
-      absolute = `${base}${value}`;
-    } else {
+      resolved.push(value);
+      continue;
+    }
+
+    if (!value.startsWith("/")) {
       problems.push(`${value}（不是可访问的 http(s) 地址）`);
       continue;
     }
 
-    const probe = await probeImageReachability({
-      url: absolute,
-      fetchImpl,
-      timeoutMs: input.timeoutMs,
-    });
-    if (!probe.ok) {
-      problems.push(
-        `${absolute}（探测失败：${probe.status ? `HTTP ${probe.status}` : `不可达：${probe.error || "未知错误"}`}）`,
-      );
-      continue;
+    // 本站相对地址：先按基址探测；探测不过（或本来没基址）再尝试发布到公网
+    let directProbeFailure = "";
+    if (base) {
+      const directUrl = mapUploadPathToPublicUrl(value, base);
+      const probeStartedAt = Date.now();
+      const probe = await probeImageReachability({
+        url: directUrl,
+        fetchImpl,
+        timeoutMs: input.timeoutMs,
+      });
+      if (probe.ok) {
+        // 已经取得到：不重复上传
+        logAssetPublish(
+          "skipped",
+          {
+            relativePath: value,
+            publicUrl: directUrl,
+            remotePath: publishConfig
+              ? mapUploadPathToRemotePath(value, publishConfig.remoteDir)
+              : "",
+            durationMs: Date.now() - probeStartedAt,
+            reason: "already_reachable",
+          },
+          input.log,
+        );
+        resolved.push(directUrl);
+        continue;
+      }
+      directProbeFailure = describeProbeFailure(probe);
     }
-    resolved.push(absolute);
+
+    // 探测不过（或没有基址）：发布到公网后再探测一次
+    let publishFailure = "";
+    if (publishConfig) {
+      const published = publishImpl(value, publishConfig);
+      if (published.ok) {
+        const publishedUrl = mapUploadPathToPublicUrl(value, base);
+        const reprobe = await probeImageReachability({
+          url: publishedUrl,
+          fetchImpl,
+          timeoutMs: input.timeoutMs,
+        });
+        if (reprobe.ok) {
+          resolved.push(publishedUrl);
+          continue;
+        }
+        problems.push(
+          `${publishedUrl}（探测失败：${describeProbeFailure(reprobe)}；已发布到公网但仍不可达）`,
+        );
+        continue;
+      }
+      publishFailure = published.reason
+        ? `；已尝试发布到公网但失败：${published.reason}`
+        : "；已尝试发布到公网但失败";
+    }
+
+    if (!base) {
+      problems.push(
+        `${value}（本站相对地址，上游取不到；未配置公网基址 PUBLIC_ASSET_BASE_URL${publishFailure}）`,
+      );
+    } else {
+      problems.push(
+        `${mapUploadPathToPublicUrl(value, base)}（探测失败：${directProbeFailure}${publishFailure}）`,
+      );
+    }
   }
 
   if (problems.length) {
