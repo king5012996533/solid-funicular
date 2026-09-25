@@ -48,9 +48,9 @@ export interface CanvasAgentToolDefinition {
  */
 export const CANVAS_AGENT_STORYBOARD_PRODUCTION_PLAYBOOK = `# 完整链路（**仅当第 0 步判定为「成片生产」时**，除非用户另有要求，按这个顺序推进）
 
-## 第 1 步 · 读画布（**默认用概览，不要整张读**）
-先 get_canvas_overview 定位：看清已有什么（已有的素材、母版、分镜表），别重复造、别覆盖。
-只有需要某个节点的提示词/错误/出图地址/参考图时才读它一个：get_canvas_node(id)。
+## 第 1 步 · 需要时读画布（**不是开场动作；先单节点后概览**）
+只有要动已有节点、要避免覆盖已有内容、要连谁挂谁时才读；闲聊/问答/纯新建设计不必读。
+需要细节先读单节点 get_canvas_node(id)；不够定位再用 get_canvas_overview 看清已有什么（素材/母版/分镜表），别重复造、别覆盖。
 **不要为了拿 id 或看状态去调 get_canvas_state**（它返回整张画布，又贵又慢）；确需整张画布时才用它。
 节点 id 只能来自工具返回，**不要编造**。
 
@@ -202,7 +202,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "get_canvas_state",
     label: "读取整张画布",
     description:
-      "读取整张画布的完整现状：全部节点（含提示词/模型/状态/是否已有出图）、全部连线、当前选中的节点。**上下文开销大**，只在确实需要整张画布时才用 —— 定位节点用 get_canvas_overview，看某个节点的细节用 get_canvas_node(id)。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再提交生成。",
+      "读取整张画布的完整现状：全部节点（含提示词/模型/状态/是否已有出图）、全部连线、当前选中的节点。**上下文开销大**，**按需读取** —— 不是每轮开场动作，只在确实需要整张画布时才用 —— 定位节点用 get_canvas_overview，看某个节点的细节用 get_canvas_node(id)。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再提交生成。",
     parameters: { type: "object", properties: {}, required: [] },
     requiresClient: true,
   },
@@ -218,7 +218,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "get_canvas_overview",
     label: "读取画布概览",
     description:
-      "读取画布概览：节点总数、连线数、按类型/生成状态的计数，以及每个节点的 id / 类型 / 标题 / 生成状态 / 是否已有产物。**不含提示词、坐标与连线明细** —— 所以它便宜、可频繁调用。需要某个节点的提示词/错误/出图地址/参考图时，拿 id 调 get_canvas_node。",
+      "读取画布概览：节点总数、连线数、按类型/生成状态的计数，以及每个节点的 id / 类型 / 标题 / 生成状态 / 是否已有产物。**不含提示词、坐标与连线明细**。**按需读取** —— 只在需要定位节点或确认画布现状时才调，别把它当成每轮开场动作；闲聊/问答不必读画布。需要单个节点的细节时先读它一个（get_canvas_node），不够定位再用这个。",
     parameters: { type: "object", properties: {}, required: [] },
     requiresClient: true,
   },
@@ -232,7 +232,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "get_canvas_node",
     label: "读取单个节点",
     description:
-      "按 id 读取一个节点的全部细节：类型、标题、坐标、是否选中、提示词/内容/模型/尺寸/画质/参考图/出图地址/任务 id/生成状态/错误，以及精简的入线与出线摘要（来源/目标节点的 id 与标题）。需要某节点的提示词、错误、出图地址或参考图时用它，不要为此读整张画布。",
+      "按 id 读取一个节点的全部细节：类型、标题、坐标、是否选中、提示词/内容/模型/尺寸/画质/参考图/出图地址/任务 id/生成状态/错误，以及精简的入线与出线摘要（来源/目标节点的 id 与标题）。**按需读取** —— 只有在需要知道这个节点的现状（要改它、要连它、要挂图、要核结果）时才读它一个，不要为此读整张画布。",
     parameters: {
       type: "object",
       properties: {
@@ -411,7 +411,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "remove_node",
     label: "删除节点",
     description:
-      "删除一个节点（连带它的连线）。删之前先用 get_canvas_overview 确认 id。",
+      "删除一个节点（连带它的连线）。删之前按需确认 id（可用 get_canvas_node(id) 或概览）。",
     parameters: {
       type: "object",
       properties: { id: { type: "string" } },
