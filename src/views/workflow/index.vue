@@ -20,6 +20,7 @@ import {
   type WorkflowNodeType,
 } from './composables/useWorkflowCanvas'
 import { WORKFLOW_TEMPLATES } from './config/workflows'
+import { decideInitialCanvasEntry } from './config/canvas-entry'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
 import type { WorkflowDefinitionSummary } from './api/definitions'
 import { acquireWorkflowPipelineLock, forceReleaseWorkflowPipelineLock, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
@@ -119,6 +120,7 @@ const {
   currentWorkflowDetail,
   workflowList,
   reloadWorkflowList,
+  findMostRecentWorkflow,
   fetchWorkflowDetail,
   loadWorkflowDetail,
   applyWorkflowVersionToCanvas,
@@ -819,6 +821,33 @@ const {
     keyword: workflowListKeyword.value || undefined,
   })
 })
+
+/**
+ * 「我的画布」入口。
+ *
+ * 打开工作流的对话框一直都在（含版本历史），但**没有任何按钮能打开它** ——
+ * showWorkflowLibraryPanel 全仓库没有一处置 true，等于这个能力不存在。
+ * 这里补上入口；每次打开都拉一次列表 —— 画布的名称与更新时间刚刚可能被自动保存改过，
+ * 用缓存会显示成旧值。
+ */
+const openWorkflowLibrary = () => {
+  showWorkflowLibraryPanel.value = true
+  void handleRefreshWorkflowList()
+}
+
+/** 列表里展示节点数：优先当前版本，退回最新版本 */
+const workflowNodeCount = (workflow: WorkflowDefinitionSummary) => {
+  const nodesJson = (workflow.currentVersion || workflow.latestVersion)?.nodesJson
+  return Array.isArray(nodesJson) ? nodesJson.length : 0
+}
+
+/** 列表里展示最后更新时间（本地化到分钟） */
+const formatWorkflowUpdatedAt = (value: string) => {
+  if (!value) return '未知时间'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '未知时间'
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+}
 
 const loadWorkflowAction = useAsyncAction(async (workflow: WorkflowDefinitionSummary) => {
   const versionId = selectedLibraryWorkflowId.value === workflow.id
@@ -1637,10 +1666,80 @@ const syncNarrowViewport = (event: MediaQueryList | MediaQueryListEvent) => {
   isNarrowViewport.value = Boolean(event.matches)
 }
 
-onMounted(() => {
+/**
+ * 首次进入画布页：载入该打开的那张画布（决策见 config/canvas-entry.ts）。
+ *
+ * 「回来的路」以前是断的：无 workflowId 时什么都不载入，紧接着 initSampleData() 播种示例节点，
+ * 而画布一旦变脏、自动保存又没有 workflowId，就会 createWorkflowDefinition 新建草稿 ——
+ * 实测每次打开不带 id 的画布页都会多一张「未命名工作流」（用户名下堆了 15 张）。
+ * 现在：带 id 用它 → 否则回到该用户最近更新的那张并 router.replace 写进 URL → 一张都没有才播种。
+ */
+const restoreInitialCanvas = async (routeWorkflowId: string, routeVersionId?: string) => {
+  const normalizedRouteId = String(routeWorkflowId || '').trim()
+
+  let recentCanvasId = ''
+  if (!normalizedRouteId) {
+    try {
+      recentCanvasId = String((await findMostRecentWorkflow())?.id || '').trim()
+    } catch (error) {
+      // 拉「最近画布」失败不该把用户挡在门外：退回空白画布（但不因此建草稿），让用户能继续用
+      console.error('加载最近画布失败', error)
+    }
+  }
+
+  const decision = decideInitialCanvasEntry({
+    routeWorkflowId: normalizedRouteId,
+    recentCanvasId,
+  })
+
+  if (decision.action === 'load') {
+    await tryLoadWorkflowByRoute(decision.workflowId, {
+      // versionId 只属于 URL 上那张画布；恢复「最近一张」时不该套用
+      versionId: decision.workflowId === normalizedRouteId ? routeVersionId : undefined,
+    })
+    // 载入成功才把 id 写进 URL：失败时 tryLoadWorkflowByRoute 已把路由清掉，不能再写回一个坏 id
+    if (currentWorkflowId.value === decision.workflowId) {
+      await syncWorkflowRouteQuery(decision.workflowId)
+      return
+    }
+    // 载入失败（画布被删 / 网络）：退回空白画布，别把用户留在空屏；此时不建草稿（基线=播种态）
+    initSampleData()
+    return
+  }
+
+  // 只有「一张画布都没有」才播种示例数据（= 新建空白画布）。恢复路径绝不播种。
   initSampleData()
-  initHistory()
+}
+
+/**
+ * 画布「稳定」之后再取基线。
+ *
+ * 为什么不能立刻取：Vue Flow 会在节点渲染后把**测量尺寸**写回节点对象，
+ * 于是同一张画布在挂载前后序列化结果不同。基线若取在测量之前，这次测量就会被
+ * isCanvasDirty 误判成「用户编辑」→ 触发自动保存；而没有 workflowId 时，
+ * 自动保存的落点就是 createWorkflowDefinition —— 这就是「每次打开都建了一张草稿」的机器。
+ *
+ * 为什么只等动画帧而不是固定几百毫秒：等待窗口越长，越可能把用户/Agent 在这一拍里的
+ * 真实编辑一并吞进基线（那样改动会被判成「没变」而不保存）。测量发生在挂载后的头几帧里，
+ * 等三帧足够；万一没赶上，代价也只是空白画布首次多一次自动保存，不会新增第二张。
+ */
+const settleCanvasBaseline = async () => {
+  await nextTick()
+  const nextFrame = () => new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve())
+    } else {
+      setTimeout(resolve, 16)
+    }
+  })
+  await nextFrame()
+  await nextFrame()
+  await nextFrame()
   initialCanvasBaselineSnapshot.value = buildCanvasSnapshotNow()
+  canvasSnapshot.value = initialCanvasBaselineSnapshot.value
+}
+
+onMounted(async () => {
   // 首次也要结算一次，否则 isCanvasDirty 在第一次变更前一直比的是空串
   canvasSnapshot.value = buildCanvasSnapshotNow()
 
@@ -1649,12 +1748,17 @@ onMounted(() => {
 
   const initialWorkflowId = String(route.query.workflowId || '').trim()
   const initialVersionId = String(route.query.versionId || '').trim()
-  if (initialWorkflowId) {
-    void tryLoadWorkflowByRoute(initialWorkflowId, {
-      versionId: initialVersionId || undefined,
-    })
-  }
 
+  // 先决定并载入「该打开哪张画布」，再谈自动保存 —— 顺序反了就会拿示例数据/空画布
+  // 抢先 createWorkflowDefinition，每次打开都多一张「未命名工作流」草稿（实测堆了 15 张）。
+  await restoreInitialCanvas(initialWorkflowId, initialVersionId || undefined)
+
+  // 载入/播种之后再定基线：恢复路径的历史由 applyCanvasSnapshot 自己重建，
+  // 播种路径则把「示例数据」当成唯一基线（否则它会变成一步可撤销的编辑）。
+  initHistory()
+
+  // 基线必须在载入/播种完成之后取；autosaveReady 也只能到这时才置 true（见 settleCanvasBaseline）
+  await settleCanvasBaseline()
   autosaveReady.value = true
 
   narrowViewportQuery = window.matchMedia('(max-width: 768px)')
@@ -1854,6 +1958,15 @@ watch(canvasSnapshot, () => {
               </svg>
             </button>
             <span style="font-size: 13px; color: var(--text-primary); padding: 0 8px;">工作流</span>
+            <!-- 「我的画布」：列出历史画布（名称 / 更新时间 / 节点数 + 版本历史），点开即切过去 -->
+            <button class="wf-btn wf-btn-md" type="button" style="gap: 6px;" @click="openWorkflowLibrary" title="我的画布">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <rect x="3" y="4" width="18" height="4" rx="1" stroke="currentColor" stroke-width="2"/>
+                <rect x="3" y="11" width="18" height="4" rx="1" stroke="currentColor" stroke-width="2"/>
+                <rect x="3" y="18" width="18" height="3" rx="1" stroke="currentColor" stroke-width="2"/>
+              </svg>
+              <span style="font-size: 12px;">我的画布</span>
+            </button>
           </div>
 
           <div class="workflow-header-right">
@@ -2132,8 +2245,9 @@ watch(canvasSnapshot, () => {
                       <div class="wf-workflow-list__desc">{{ workflow.description || '暂无描述' }}</div>
                     </div>
                     <div class="wf-workflow-list__meta">
+                      <span>{{ workflowNodeCount(workflow) }} 个节点</span>
+                      <span>更新于 {{ formatWorkflowUpdatedAt(workflow.updatedAt) }}</span>
                       <span>版本 {{ workflow.latestVersionNo }}</span>
-                      <span>{{ workflow.category || '未分类' }}</span>
                     </div>
                   </button>
 
@@ -2208,6 +2322,7 @@ watch(canvasSnapshot, () => {
           :initial-message="pendingAssistantMessage"
           :canvas-brief="assistantCanvasBrief"
           :agent-context="canvasAgentContext"
+          :canvas-id="currentWorkflowId"
           @close="toggleAssistantPanel"
           @message-received="pendingAssistantMessage = ''"
           @add-image-to-canvas="handleAssistantAddImage"

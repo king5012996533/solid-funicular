@@ -19,6 +19,12 @@ import {
 } from '@/config/models'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
+import {
+  decideCanvasSession,
+  readCanvasSessionMap,
+  upsertCanvasSessionBinding,
+  writeCanvasSessionMap,
+} from '@/composables/canvas-session-binding'
 // 折叠状态与画布页共用同一份（useChatSessions 是模块级单例）：
 // 确认卡片长在这个面板里，面板收起来用户就看不见卡片 —— 而那是「不给答复就走不下去」的闸门。
 import { useChatSessions } from '@/composables/useChatSessions'
@@ -43,6 +49,12 @@ const props = defineProps({
    * 模型没要求调用工具、或这一轮没执行成功时，回退到原来的流式对话。
    */
   agentContext: { type: Object, default: null },
+  /**
+   * 当前画布 id（= 流水线锁的 workflowId）。给了它，面板就把会话绑到这张画布上：
+   * 显示这张画布那次的对话，并且 Agent 记忆（键 sessionId + 画布 id）能命中。
+   * 未保存的画布是空串 —— 此时刻意不切会话、也刻意不让 Agent 记忆启用（防串台）。
+   */
+  canvasId: { type: String, default: '' },
 })
 
 const emit = defineEmits(['close', 'message-received', 'add-image-to-canvas'])
@@ -159,15 +171,72 @@ const cleanupStreams = () => {
   if (askUserRequest.value) settleAskUser([], true)
 }
 
+/**
+ * 画布 → 会话绑定（B：会话绑到画布）。
+ *
+ * 为什么需要：助手会话一直全局只有一个，同一会话把不同画布的对话混在一起；
+ * 而 Agent 跨轮记忆的键是 **sessionId + 画布 id**（见 canvas-agent-executor 的会话恢复）——
+ * 会话不跟着画布切，换个画布就命中不到记忆。这里用 localStorage 里的
+ * 「画布 id → 会话 id」映射做最小可用：命中就复用这张画布那次的会话，
+ * 没有映射（或映射的会话已被删）就新建一条并写回。切画布 = 切会话，不混串。
+ *
+ * 不做库表迁移：Agent 转录存在 GenerationRecord.metaJson.canvasAgentSession.canvasId 上但没索引，
+ * 按画布反查会话代价大；跨设备续写的方案与代价见本次报告。
+ */
+const boundCanvasId = ref('')
+
+const bindSessionToCanvas = async (rawCanvasId) => {
+  const canvasId = String(rawCanvasId || '').trim()
+  if (!canvasId) {
+    // 未保存的画布没有 id：不动当前会话（也刻意不让 Agent 记忆启用），并允许同一画布再次进入时重绑
+    boundCanvasId.value = ''
+    return
+  }
+  if (canvasId === boundCanvasId.value) return
+  boundCanvasId.value = canvasId
+  try {
+    // 先拉一次会话列表：映射里那个会话可能已在服务端被删，得用现存列表校验
+    await loadSessions()
+    const existingSessionIds = (assistantSessions.value || []).map((item) => item.id)
+    const decision = decideCanvasSession({
+      canvasId,
+      map: readCanvasSessionMap(),
+      existingSessionIds,
+    })
+
+    let sessionId = decision.sessionId
+    if (decision.needsCreate) {
+      const created = await createNewSession(props.title ? `${props.title}` : undefined)
+      sessionId = created.id
+    }
+    if (decision.shouldBind && sessionId) {
+      writeCanvasSessionMap(upsertCanvasSessionBinding(readCanvasSessionMap(), canvasId, sessionId))
+    }
+    if (sessionId && sessionId !== activeSessionId.value) {
+      setActive(sessionId)
+    }
+    cleanupStreams()
+    await loadSessionHistory(sessionId)
+  } catch (err) {
+    console.error('[RightPanel] bind canvas session failed', err)
+  }
+}
+
+watch(() => props.canvasId, (canvasId) => {
+  void bindSessionToCanvas(canvasId)
+})
+
 onMounted(() => {
   // 先把对话模型目录拉起来：选择器要有东西可选，runCanvasAgentTurn 也要按用户选的模型走
   void refreshChatModels()
   // 后台拉取模型清单（getDefault*ModelKey 依赖此调用）
   void loadPublicModelCatalog()
-  // 拉取助手会话列表（首次会自动建默认会话），然后加载当前会话历史
+  // 拉取助手会话列表（首次会自动建默认会话），然后按当前画布绑会话 / 载入历史。
+  // 画布 id 常常后到（画布页恢复是异步的），后到时由上面的 watch(props.canvasId) 接手。
   void (async () => {
     await loadSessions()
-    if (activeSessionId.value) {
+    await bindSessionToCanvas(props.canvasId)
+    if (!String(props.canvasId || '').trim() && activeSessionId.value) {
       await loadSessionHistory(activeSessionId.value)
     }
   })()

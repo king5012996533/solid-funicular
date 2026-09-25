@@ -55,6 +55,12 @@ export interface WorkflowDefinitionListQuery {
   keyword?: string
   page?: number
   pageSize?: number
+  /**
+   * 只看「我自己的」画布，并按 updatedAt 倒序（不带系统内置）。
+   * 用在「无 workflowId 时回到上次那张画布」：默认列表把 user 与内置画布混在一起、
+   * 还先按 sortOrder 排，直接取第一条会打开一张系统画布而不是用户自己的。
+   */
+  mine?: boolean
 }
 
 export interface WorkflowDefinitionListResponse {
@@ -134,6 +140,10 @@ const buildWorkflowListUrl = (query: WorkflowDefinitionListQuery = {}) => {
 
   if (query.pageSize) {
     url.searchParams.set('pageSize', String(query.pageSize))
+  }
+
+  if (query.mine) {
+    url.searchParams.set('mine', '1')
   }
 
   return `${url.pathname}${url.search}`

@@ -6,6 +6,12 @@ export interface WorkflowDefinitionListQuery {
   keyword?: string
   page?: number
   pageSize?: number
+  /**
+   * 只看当前用户自己的画布，并按 updatedAt 倒序（`mine=1`）。
+   * 「无 id 时回到上次那张画布」要的是用户自己的最近一条；
+   * 默认列表含系统内置画布且先按 sortOrder 排，取第一条会拿到内置的。
+   */
+  mine?: boolean
 }
 
 export interface WorkflowDefinitionCreatePayload {

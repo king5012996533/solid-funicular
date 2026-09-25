@@ -108,6 +108,8 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
         keyword: requestUrl.searchParams.get('keyword') || undefined,
         page: Number(requestUrl.searchParams.get('page') || 1),
         pageSize: Number(requestUrl.searchParams.get('pageSize') || 12),
+        // mine=1：只要自己的画布并按更新时间倒序（画布页「回到上次那张」用它取最近一条）
+        mine: requestUrl.searchParams.get('mine') === '1',
       }, {
         currentUserId: currentUser.id,
       })

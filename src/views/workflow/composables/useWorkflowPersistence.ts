@@ -98,6 +98,22 @@ export const useWorkflowPersistence = () => {
     return workflowList.value
   }
 
+  /**
+   * 取「我最近更新的那张画布」，用于无 workflowId 时的恢复入口。
+   *
+   * 为什么走 mine 而不是直接 reloadWorkflowList：默认列表把用户画布与系统内置混在一起、
+   * 还先按 sortOrder 排，第一条未必是用户的 —— 那会打开一张内置画布，用户自己的作品反而丢了。
+   * 只取一条，避免把整页列表拉回来只为拿首个 id。
+   */
+  const findMostRecentWorkflow = async (): Promise<WorkflowDefinitionSummary | null> => {
+    const response = await listWorkflowDefinitions({
+      scene: 'WORKFLOW_CANVAS',
+      mine: true,
+      pageSize: 1,
+    })
+    return response.items[0] || null
+  }
+
   const loadWorkflowDetail = async (workflowId: string) => {
     loading.value = true
     try {
@@ -303,6 +319,7 @@ export const useWorkflowPersistence = () => {
     workflowList,
     buildWorkflowSnapshot,
     reloadWorkflowList,
+    findMostRecentWorkflow,
     fetchWorkflowDetail,
     loadWorkflowDetail,
     applyWorkflowDetailToCanvas,

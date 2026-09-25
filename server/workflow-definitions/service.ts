@@ -183,12 +183,15 @@ const buildWorkflowWhereInput = (
   const status = normalizeString(query.status)
   const keyword = normalizeString(query.keyword)
 
-  const where: Prisma.WorkflowDefinitionWhereInput = {
-    OR: [
-      { userId: currentUserId },
-      { userId: null },
-    ],
-  }
+  // mine：只要自己的画布（排除 userId=null 的系统内置），供「回到上次那张画布」取最近一条
+  const where: Prisma.WorkflowDefinitionWhereInput = query.mine
+    ? { userId: currentUserId }
+    : {
+      OR: [
+        { userId: currentUserId },
+        { userId: null },
+      ],
+    }
 
   if (scene) {
     where.scene = normalizeEnumValue(scene, WORKFLOW_SCENE_VALUES, 'WORKFLOW_CANVAS', '工作流场景')
@@ -303,10 +306,16 @@ export const listWorkflowDefinitions = async (
           },
         },
       },
-      orderBy: [
-        { sortOrder: 'asc' },
-        { updatedAt: 'desc' },
-      ],
+      /**
+       * mine 时只按 updatedAt 倒序 —— 用户要的是「我最近动过的那张画布」。
+       * 默认列表仍先按 sortOrder（内置模板靠它维持展示顺序），改掉会让内置画布排序错乱。
+       */
+      orderBy: query.mine
+        ? [{ updatedAt: 'desc' }]
+        : [
+          { sortOrder: 'asc' },
+          { updatedAt: 'desc' },
+        ],
       skip,
       take: pageSize,
     }),
