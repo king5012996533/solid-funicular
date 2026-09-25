@@ -500,3 +500,105 @@ export const createGatewayStreamFn = (options: GatewayStreamFnOptions) => {
     return stream;
   };
 };
+
+/**
+ * 非流式取一段文本（会话摘要专用，2026-09-26）。
+ *
+ * 复用同一条上游通道与消息转换（`toOpenAiMessages` / 鉴权头 / 错误文案），
+ * 不另起一套 —— 否则摘要调用会在上游形状差异上再踩一次坑。
+ * 上游仍可能无视 `stream:false` 直接吐 SSE（主链路就踩过），所以两种都接。
+ *
+ * 超时与外部 abort 合并成一个内部 controller：摘要是一次额外请求，必须有界，
+ * 用户停止任务时也不该再挂着。
+ */
+export const requestGatewayChatText = async (input: {
+  upstreamUrl: string;
+  apiKey: string;
+  modelKey: string;
+  /** 结构上与 Pi 转录一致（role/content/toolCallId/toolName）的纯数据消息 */
+  messages: unknown[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<string> => {
+  const timeoutMs = input.timeoutMs ?? 60_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onOuterAbort = () => controller.abort();
+  input.signal?.addEventListener("abort", onOuterAbort, { once: true });
+
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (input.apiKey) {
+      headers.Authorization = `Bearer ${input.apiKey}`;
+    }
+
+    const response = await fetch(input.upstreamUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: input.modelKey,
+        stream: false,
+        // 消息就是我们落库那种纯数据，转成上游形状即可（toolResult → role:tool）
+        messages: toOpenAiMessages(input.messages as TranscriptContext["messages"]),
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(
+        `摘要调用：上游对话接口返回 HTTP ${response.status}${errorText ? `：${errorText.slice(0, 300)}` : ""}`,
+      );
+    }
+
+    const contentType = String(
+      response.headers.get("content-type") || "",
+    ).toLowerCase();
+    if (!response.body || !contentType.includes("event-stream")) {
+      const rawText = await response.text();
+      const parsed: any = (() => {
+        try {
+          return JSON.parse(rawText);
+        } catch {
+          return null;
+        }
+      })();
+      return String(parsed?.choices?.[0]?.message?.content || "");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    let finished = false;
+    while (!finished) {
+      const read = await reader.read();
+      if (read.done) break;
+      buffer += decoder.decode(read.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const chunk = trimmed.slice(5).trim();
+        if (chunk === "[DONE]") {
+          finished = true;
+          break;
+        }
+        try {
+          const parsed: any = JSON.parse(chunk);
+          const piece = parsed?.choices?.[0]?.delta?.content;
+          if (typeof piece === "string") text += piece;
+        } catch {
+          // 非 JSON 行（心跳/注释）跳过
+        }
+      }
+    }
+    return text;
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", onOuterAbort);
+  }
+};

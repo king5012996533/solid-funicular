@@ -6,7 +6,9 @@
  *      system 头每轮重建（否则本轮新 systemPrompt 会被旧转录里那条 system 顶掉）；
  *   2. **按 sessionId + 画布隔离**：助手会话在浏览器里是全局的，不按画布隔离就会串台；
  *   3. **超预算裁剪**：按用户回合边界丢最旧的，toolCall / toolResult 必须成对留下；
- *   4. **fallback 不受条数限制**：旧的「固定 6/8 条 × 每条 500 字」不再腰斩上下文。
+ *   4. **fallback 不受条数限制**：旧的「固定 6/8 条 × 每条 500 字」不再腰斩上下文；
+ *   5. **主动压缩（2026-09-26）**：超预算时把最旧一段压成一条结构化摘要（摘要累积、失败安全回退），
+ *      以及 `transformContext` 兜底裁剪必须保留头部 system（否则工作手册与工具声明会静默消失）。
  *
  * 这些都是「不报错、形状不变、模型照样答得通，只是没记忆」的静默错误 ——
  * typecheck / 构建 / e2e 一个都抓不住，只能靠这里的断言。文件末尾有**反证**：
@@ -17,13 +19,19 @@ import {
   CANVAS_AGENT_SESSION_META_KEY,
   CANVAS_AGENT_SESSION_VERSION,
   buildCanvasAgentSessionMeta,
+  buildCanvasAgentSummaryMessage,
+  buildCanvasAgentSummarySource,
+  compactCanvasAgentTranscript,
   countTranscriptChars,
+  isCanvasAgentSummaryMessage,
+  planCanvasAgentCompaction,
   readCanvasAgentSession,
   resolveCanvasAgentCanvasId,
   resolveCanvasAgentSessionBootstrap,
   selectCanvasAgentFallbackHistory,
   toPersistedTranscriptMessages,
   trimTranscriptToBudget,
+  trimTranscriptToBudgetPreservingSystem,
 } from '../server/generation-tasks/canvas-agent-session'
 import {
   buildPromptWithExecutionDemand,
@@ -244,6 +252,151 @@ console.log('\n【9】反证：关掉恢复（拿不到画布 id）时，第二�
     '反证成立：关掉恢复就丢记忆（若恢复逻辑被删，上一行的断言会失败）',
     restored.restoredMessages.length > notRestored.restoredMessages.length,
     true,
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 【10】–【14】主动压缩（2026-09-26）：超预算时把最旧一段压成摘要，而不是直接丢
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 造一份「第一回合超预算、第二回合很短」的转录，用来断言压哪一段、留哪些 */
+const buildOverBudgetTranscript = () => {
+  const huge = 'x'.repeat(5_000)
+  return [
+    { role: 'user', content: `第一回合${huge}`, timestamp: 1 },
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 't', arguments: {} }], timestamp: 2 },
+    { role: 'toolResult', toolCallId: 'c1', toolName: 't', content: [{ type: 'text', text: huge }], isError: false, timestamp: 3 },
+    { role: 'user', content: '第二回合', timestamp: 4 },
+    { role: 'assistant', content: [{ type: 'text', text: '好' }], timestamp: 5 },
+  ]
+}
+
+console.log('\n【10】压缩决策：不超预算不压；超预算压最旧、留近期，且 toolCall/toolResult 成对')
+{
+  const under = planCanvasAgentCompaction(buildRoundOneTranscript(), { budget: 1_000_000 })
+  check('不超预算 → 不压（不花冤枉钱）', under.shouldCompact, false)
+  check('不压时原样保留非 system 消息', under.retained.length, 4)
+  check('不压时 span 为空', under.span.length, 0)
+
+  const plan = planCanvasAgentCompaction(buildOverBudgetTranscript(), { budget: 6_000, keepRecentBudget: 1_000 })
+  check('超预算 → 要压', plan.shouldCompact, true)
+  check('压的是最旧一段', rolesOf(plan.span), ['user', 'assistant', 'toolResult'])
+  check('保留近期段', rolesOf(plan.retained), ['user', 'assistant'])
+  check('发起工具调用的 assistant 落在待压段（不会与结果拆开）', JSON.stringify(plan.span).includes('c1'), true)
+  check('近期段里没有被拆开的 toolResult', plan.retained.some((m) => (m as { role?: string }).role === 'toolResult'), false)
+  check('单回合超预算 → 无更旧段可压，不压', planCanvasAgentCompaction(
+    [{ role: 'user', content: 'x'.repeat(9_000) }],
+    { budget: 6_000, keepRecentBudget: 1_000 },
+  ).shouldCompact, false)
+}
+
+console.log('\n【11】摘要累积：第二次压缩把「旧摘要 + 中间那段」一起重压，不丢之前的结论')
+{
+  const oldSummary = buildCanvasAgentSummaryMessage('第一轮摘要：主角阿星、画幅 16:9')
+  const messages = [
+    oldSummary,
+    { role: 'user', content: '第二轮：改用 9:16'.repeat(600), timestamp: 1 },
+    { role: 'assistant', content: [{ type: 'text', text: '好' }], timestamp: 2 },
+    { role: 'user', content: '第三轮：输出一张图', timestamp: 3 },
+  ]
+
+  const plan = planCanvasAgentCompaction(messages, { budget: 5_000, keepRecentBudget: 500 })
+  check('要压', plan.shouldCompact, true)
+  check('旧摘要落进待压段（累积的根据）', isCanvasAgentSummaryMessage(plan.span[0]), true)
+  check('标记本轮是累积压缩', plan.carriesPreviousSummary, true)
+  check('旧摘要不会被当成近期消息留下（否则会与新摘要重复）', plan.retained.some((m) => isCanvasAgentSummaryMessage(m)), false)
+
+  let summaryInput = ''
+  const result = await compactCanvasAgentTranscript({
+    messages,
+    budget: 5_000,
+    keepRecentBudget: 500,
+    summarize: async (span) => {
+      summaryInput = buildCanvasAgentSummarySource(span)
+      return '第二轮摘要：主角阿星、画幅 9:16、已出 1 张图'
+    },
+  })
+  check('摘要调用看得到旧摘要（旧设定没丢）', summaryInput.includes('第一轮摘要'), true)
+  check('压缩后首条是新摘要', isCanvasAgentSummaryMessage(result.messages[0]), true)
+  check('近期消息跟在摘要之后', rolesOf(result.messages), ['user', 'user'])
+  check('压缩后体积落回预算内', result.afterChars <= 5_000, true)
+  check('压缩后消息数变少', result.afterMessageCount < result.beforeMessageCount, true)
+}
+
+console.log('\n【12】失败安全：摘要调用失败/返回空 → 不抛错，退回「丢最旧一段」裁剪')
+{
+  const messages = [
+    buildCanvasAgentSummaryMessage('第一轮摘要：主角阿星'),
+    { role: 'user', content: '第二轮：改用 9:16'.repeat(600), timestamp: 1 },
+    { role: 'assistant', content: [{ type: 'text', text: '好' }], timestamp: 2 },
+    { role: 'user', content: '第三轮：输出一张图', timestamp: 3 },
+  ]
+
+  const thrown = await compactCanvasAgentTranscript({
+    messages,
+    budget: 5_000,
+    keepRecentBudget: 500,
+    summarize: async () => {
+      throw new Error('上游对话接口返回 HTTP 502')
+    },
+  })
+  check('失败不抛错', thrown.compacted, false)
+  check('标记走了回退', thrown.fellBack, true)
+  check('回退结果非空', thrown.messages.length > 0, true)
+  check('回退结果在总预算内', countTranscriptChars(thrown.messages) <= 5_000, true)
+  check('失败原因带出来（供日志）', thrown.failureReason.includes('502'), true)
+
+  const empty = await compactCanvasAgentTranscript({
+    messages,
+    budget: 5_000,
+    keepRecentBudget: 500,
+    summarize: async () => '   ',
+  })
+  check('空摘要也走回退', empty.fellBack, true)
+  check('回退后仍是合法转录（首条是 user）', rolesOf(empty.messages)[0], 'user')
+}
+
+console.log('\n【13】transformContext 兜底：必须保留头部 system，否则工作手册与工具声明会被裁掉')
+{
+  const systemHead = {
+    role: 'system',
+    content: '你是制片 Agent（工作手册）',
+    toolsAdded: [{ name: 'get_canvas_overview', description: '看画布', parameters: { type: 'object' } }],
+    timestamp: 0,
+  }
+  const withSystem = [systemHead, ...buildOverBudgetTranscript()]
+
+  const kept = trimTranscriptToBudgetPreservingSystem(withSystem, 6_000)
+  check('system 头仍在最前', rolesOf(kept)[0], 'system')
+  check('非 system 部分被裁到预算内', countTranscriptChars(kept.slice(1)) <= 6_000, true)
+  check('近期对话仍在', JSON.stringify(kept).includes('第二回合'), true)
+
+  // 反证：直接拿同一个函数用的裁剪器会导致 system 头被丢掉 —— 这正是要单独一个「保留 system」函数的原因
+  const naive = trimTranscriptToBudget(withSystem, 6_000)
+  check('反证：直接裁剪会丢掉 system 头', naive.some((m) => (m as { role?: string }).role === 'system'), false)
+}
+
+console.log('\n【14】反证：把「摘要累积」改成「用新摘要覆盖旧摘要」，本条必然失败')
+{
+  // 正确的实现：待压段必须从最旧的旧摘要开始（累积），旧摘要由新的摘要「继承」。
+  // 若某次改动把待压段起点挪到旧摘要之后（覆盖式重压），旧摘要既不在 span、也不在 retained —— 直接丢失。
+  const messages = [
+    buildCanvasAgentSummaryMessage('第一轮摘要：主角阿星、画幅 16:9'),
+    { role: 'user', content: '第二轮：改用 9:16'.repeat(600), timestamp: 1 },
+    { role: 'assistant', content: [{ type: 'text', text: '好' }], timestamp: 2 },
+    { role: 'user', content: '第三轮：输出一张图', timestamp: 3 },
+  ]
+  const plan = planCanvasAgentCompaction(messages, { budget: 5_000, keepRecentBudget: 500 })
+
+  check('累积实现：待压段首条就是旧摘要', isCanvasAgentSummaryMessage(plan.span[0]), true)
+  // 模拟「覆盖式」：把旧摘要从待压段里摘出去
+  const overwriteStyleSpan = plan.span.slice(1)
+  const overwriteKeepsOldSummary = overwriteStyleSpan.some((m) => isCanvasAgentSummaryMessage(m))
+    || plan.retained.some((m) => isCanvasAgentSummaryMessage(m))
+  check(
+    '反证成立：覆盖式压缩会让旧摘要彻底消失（若实现退化成覆盖式，上面那条断言会失败）',
+    overwriteKeepsOldSummary,
+    false,
   )
 }
 

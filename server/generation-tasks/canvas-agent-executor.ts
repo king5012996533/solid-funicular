@@ -15,17 +15,22 @@ import {
 } from "../../src/shared/canvas-agent-tools";
 import { describePreflightQuotaTelemetry } from "./canvas-agent-quota-telemetry";
 import { Agent, Type, type AgentMessage, type AgentTool } from "./pi-runtime";
-import { createGatewayStreamFn } from "./pi-gateway-stream";
+import { createGatewayStreamFn, requestGatewayChatText } from "./pi-gateway-stream";
 import { createSpendGuard } from "./canvas-agent-guard";
 import {
   cancelPendingClientToolCalls,
   waitForClientToolResult,
 } from "./canvas-agent-bridge";
 import {
+  CANVAS_AGENT_SUMMARY_INPUT_CHAR_BUDGET,
+  CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET,
   buildCanvasAgentSessionMeta,
+  buildCanvasAgentSummarySource,
+  compactCanvasAgentTranscript,
   resolveCanvasAgentCanvasId,
   resolveCanvasAgentSessionBootstrap,
   selectCanvasAgentFallbackHistory,
+  trimTranscriptToBudgetPreservingSystem,
   type CanvasAgentPersistedSession,
 } from "./canvas-agent-session";
 
@@ -375,6 +380,22 @@ export const buildPromptWithHistory = (
   return `（以下是本轮之前我们说过的话，供你保持连贯，不必复述）\n${lines.join("\n")}\n\n【用户现在的要求】\n${tail}`;
 };
 
+/**
+ * 会话摘要指令（主动压缩用，2026-09-26）。
+ *
+ * 三段式是刻意定的形状：用户偏好/已确定设定、已完成的事、待办/未决问题 ——
+ * 这正是「多轮之后最不该丢」的东西。摘要会以 `[会话摘要]` 前缀的 user 消息长期携带，
+ * 所以要求它**尽量短、只写对后续有用的**，不写工具名与参数细节。
+ */
+const CANVAS_AGENT_SUMMARY_INSTRUCTION = `你在为一个「制片 Agent」压缩它较早的一段历史会话，供后续轮次继续工作。
+
+把下面这段对话压成一份结构化摘要，用中文，尽量短，只保留对后续有用的信息，严格按三段输出（某段没有内容就写「无」）：
+1. 用户偏好 / 已确定的设定：画幅、比例、风格、角色外观与名字、品牌、命名、明确的「不要」；
+2. 已完成的事：生成了什么、落在哪些画布节点（写节点 id 或名称）、关键参数与结论；
+3. 待办 / 未决问题：还没做的、在等用户确认的、失败待重试的。
+
+不要编造原文没有的信息，不要复述工具名和参数细节，直接给摘要正文，不要加标题以外的寒暄。`;
+
 export const executeCanvasAgentTaskFlow = async (
   task: CanvasAgentExecutionTask,
   payload: GenerationTaskStartPayload,
@@ -637,6 +658,25 @@ export const executeCanvasAgentTaskFlow = async (
         : {}),
     },
     streamFn,
+    /**
+     * 上下文兜底裁剪（Pi 的 `transformContext` 挂点）。
+     *
+     * 为什么这里**只裁不压**：这个挂点每次模型请求都会跑，若在这里做「摘要调用」，
+     * 就变成每请求一次额外模型调用 —— 成本与延迟都不可接受。主动压缩放在落库时（每轮最多一次）。
+     * 这里只防「单轮内转录涨过预算把上游撑爆」，是兜底而非主路径。
+     * 必须保留头部 system 消息：它带着工作手册与工具声明，被裁掉模型就瞎了（见 trimTranscriptToBudgetPreservingSystem）。
+     * 契约要求不抛错：出问题就原样返回。
+     */
+    transformContext: async (messages) => {
+      try {
+        return trimTranscriptToBudgetPreservingSystem(
+          messages,
+          CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET,
+        ) as AgentMessage[];
+      } catch {
+        return messages;
+      }
+    },
     beforeToolCall: async (hookContext) => {
       const toolName = String(hookContext.toolCall.name || "");
 
@@ -794,12 +834,57 @@ export const executeCanvasAgentTaskFlow = async (
    *   · 随后成功路径的 `updateGenerationRecord` 会 merge 已有 metaJson，这个键不会被覆盖；
    *   · 失败路径由策略层收口，同样只 merge metaJson，也不会把它清掉。
    * 只写 meta_json 一个字段（见 saveCanvasAgentSession），不碰内容/输出/状态。
+   *
+   * **主动压缩就落在这一步（落库之前）**，理由：
+   *   · 存下来的转录本身就有界，下一轮恢复出来已经是紧凑的，不必在「用户等回答」的路径上多花一次模型调用；
+   *   · 恢复路径保持纯读取（readCanvasAgentSession 是同步纯函数），压缩不掺进去，逻辑可单测；
+   *   · 每完成一轮才可能超预算，这是压缩唯一的自然时机（每轮最多压一次，不会每请求一份摘要调用）。
+   * 失败的兜底另有一处：Pi 的 `transformContext`（见 Agent 构造处），它**只裁剪、不再调模型**。
    */
   if (sessionBootstrap.canvasId && sessionId) {
     try {
+      const compaction = await compactCanvasAgentTranscript({
+        messages: agent.state?.messages,
+        summarize: (span) =>
+          requestGatewayChatText({
+            upstreamUrl,
+            apiKey: upstream.apiKey,
+            modelKey,
+            // 用户已停止时不再发这次额外请求：信号已 abort，fetch 会立刻失败并走回退
+            signal: task.abortController.signal,
+            messages: [
+              { role: "system", content: CANVAS_AGENT_SUMMARY_INSTRUCTION },
+              {
+                role: "user",
+                content:
+                  "以下是需要压缩的历史会话：\n\n"
+                  + buildCanvasAgentSummarySource(span, {
+                    maxChars: CANVAS_AGENT_SUMMARY_INPUT_CHAR_BUDGET,
+                  }),
+              },
+            ],
+          }),
+      });
+
+      // 这条日志是「主动压缩到底有没有发生」的验收证据：压缩前后消息/字符数、摘要长度、是否走了回退
+      context.logGenerationTask("canvas_agent:session_compacted", {
+        recordId: task.recordId,
+        userId: task.userId,
+        canvasId: sessionBootstrap.canvasId,
+        compacted: compaction.compacted,
+        fellBack: compaction.fellBack,
+        beforeMessageCount: compaction.beforeMessageCount,
+        afterMessageCount: compaction.afterMessageCount,
+        beforeChars: compaction.beforeChars,
+        afterChars: compaction.afterChars,
+        summaryChars: compaction.summaryChars,
+        summarizedMessageCount: compaction.summarizedMessageCount,
+        failureReason: compaction.failureReason.slice(0, 300),
+      });
+
       const session = buildCanvasAgentSessionMeta({
         canvasId: sessionBootstrap.canvasId,
-        messages: agent.state?.messages,
+        messages: compaction.messages,
       });
       if (session) {
         await context.saveCanvasAgentSession({

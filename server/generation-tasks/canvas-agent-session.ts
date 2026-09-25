@@ -41,6 +41,37 @@ export const CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET = 120_000
 /** fallback（拿不到转录）时，把面板历史并进用户消息的字符预算（替代旧的「最近 6 条 / 每条 500 字」） */
 export const CANVAS_AGENT_FALLBACK_HISTORY_CHAR_BUDGET = 24_000
 
+/**
+ * 主动压缩（2026-09-26）：超预算时把「最旧的一段」交给同一个模型压成结构化摘要。
+ *
+ * 为什么不再只做裁剪：裁剪（trimTranscriptToBudget）是**丢**历史 —— 会话能跨轮了，
+ * 但轮数一多，最旧那段（用户定的画幅/角色/已生成的节点）会被直接扔掉，
+ * 表现为「跑到第 5 轮它就忘了第 1 轮定的设定」。摘要把这段**压成一条**留下来，
+ * 会话因此能持续多轮，而不是被截断丢历史。
+ */
+
+/** 摘要消息的前缀。用 role=user 的纯文本承载：上游只认 user/assistant/tool，不引入新形状；
+ * 且它**不是 system**，所以不会顶掉每轮重建的 systemPrompt（见文件头那条 Pi 语义）。 */
+export const CANVAS_AGENT_SUMMARY_PREFIX = '[会话摘要]'
+
+/**
+ * 压完保留的「近期消息」字符预算，默认取总预算的一半（60k）。
+ *
+ * 依据：压缩后的形状是 `[摘要, ...近期]`，要让结果**确实落回总预算以内**，
+ * 近期段就不能顶到上限；留一半给摘要（几千字）与每轮重建的 system 头/工具声明。
+ * 若最新一个回合本身就超过它，仍整轮保留（宁可略超，也不劈开刚发生的事）。
+ */
+export const CANVAS_AGENT_KEEP_RECENT_CHAR_BUDGET = 60_000
+
+/** 交给摘要模型的那段原文的字符上限：压缩本身也是**一次模型调用**，不能把整段原样塞回去把窗口撑爆。 */
+export const CANVAS_AGENT_SUMMARY_INPUT_CHAR_BUDGET = 80_000
+
+/** 摘要消息自身长度上限：摘要要被长期携带，必须短，超了截断而不是无限增长。 */
+export const CANVAS_AGENT_SUMMARY_MAX_CHARS = 8_000
+
+/** 拼给摘要模型的单条消息内容上限（工具结果可能有整张画布的 JSON）。 */
+export const CANVAS_AGENT_SUMMARY_SOURCE_ITEM_MAX_CHARS = 4_000
+
 /** 落进 metaJson 的会话结构 */
 export interface CanvasAgentPersistedSession {
   version: number
@@ -65,6 +96,19 @@ export const resolveCanvasAgentCanvasId = (requestBody: unknown): string => {
 
 const roleOf = (message: unknown): string =>
   String((message as { role?: unknown } | null | undefined)?.role || '')
+
+/** 只取文本块拼成纯文本（thinking 不进摘要输入，避免把思考当成事实写进摘要） */
+const textContentOf = (content: unknown): string => {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      const block = part as { type?: string; text?: string }
+      return block?.type === 'text' ? String(block.text || '') : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
 
 /**
  * 这条消息恢复到上游时，会不会变成「空消息」。
@@ -156,6 +200,32 @@ export const trimTranscriptToBudget = (
   }
 
   return messages.slice(chosen)
+}
+
+/**
+ * 给 Pi 的 `transformContext` 用的裁剪：**保留头部 system 消息**，只裁非 system 的尾部。
+ *
+ * 为什么单独一个函数：`transformContext` 拿到的是 Pi 的**运行时转录**，它以一条 system 消息开头
+ * （`agent.js` createMutableAgentState 把 systemPrompt+工具声明 unshift 进去，工具集变化时还会在它后面
+ * 再插一条 system）。若直接拿去 `trimTranscriptToBudget`，一旦裁剪点落在某个 user 边界，
+ * **领衔的 system 消息会被一起丢掉** —— 模型就再也看不到工作手册与工具声明了（静默失效，不报错）。
+ * 这里先把头部连续的 system 原样摘出来，只对后面的对话按预算裁剪，再拼回去。
+ */
+export const trimTranscriptToBudgetPreservingSystem = (
+  messages: unknown,
+  budget = CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET,
+): unknown[] => {
+  if (!Array.isArray(messages) || messages.length === 0) return []
+
+  let headEnd = 0
+  while (headEnd < messages.length && roleOf(messages[headEnd]) === 'system') headEnd += 1
+  const head = messages.slice(0, headEnd)
+  const rest = messages.slice(headEnd)
+  if (rest.length === 0) return head
+
+  // system 头本身也占体积（工具声明可能很大），从预算里扣掉，保证总量不超
+  const restBudget = Math.max(1, budget - countTranscriptChars(head))
+  return [...head, ...trimTranscriptToBudget(rest, restBudget)]
 }
 
 /** 组织成待落库的会话结构；没有画布 id 或不含任何有效消息时返回 null（不落库） */
@@ -286,4 +356,254 @@ export const selectCanvasAgentFallbackHistory = (
   }
 
   return selected
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 主动压缩（2026-09-26）
+//
+// 「决策」与「摘要动作」刻意分开：
+//   · planCanvasAgentCompaction 是**纯函数**，回答「要不要压、压哪一段、压完留什么」，可单测；
+//   · compactCanvasAgentTranscript 才真的调模型，且失败一律安全回退到既有裁剪。
+// 这样最容易静默出错的规则（成对保留、摘要累积）不依赖网络就能钉死。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 这条消息是不是我们塞进去的「会话摘要」（role=user + 前缀） */
+export const isCanvasAgentSummaryMessage = (message: unknown): boolean => {
+  if (roleOf(message) !== 'user') return false
+  const content = (message as { content?: unknown } | null | undefined)?.content
+  return typeof content === 'string' && content.trimStart().startsWith(CANVAS_AGENT_SUMMARY_PREFIX)
+}
+
+/**
+ * 造一条摘要消息。
+ *
+ * `timestamp` 固定传 0：本函数要可复现（单测/日志），也避免摘要顶着「刚发生」的时间戳
+ * 干扰后续按时间的判断。超长摘要截断 —— 它要被长期携带，体积必须有界。
+ */
+export const buildCanvasAgentSummaryMessage = (summaryText: string, timestamp = 0) => {
+  const text = String(summaryText || '').trim()
+  const clipped = text.length > CANVAS_AGENT_SUMMARY_MAX_CHARS
+    ? `${text.slice(0, CANVAS_AGENT_SUMMARY_MAX_CHARS)}…（摘要过长已截断）`
+    : text
+  return {
+    role: 'user' as const,
+    content: `${CANVAS_AGENT_SUMMARY_PREFIX}\n${clipped}`,
+    timestamp,
+  }
+}
+
+/**
+ * 把 Pi 的消息翻成给摘要模型读的纯文本。
+ *
+ * 工具结果里可能是整张画布的 JSON（正是它把上下文撑大的），所以单条内容与总量都要截断 ——
+ * 摘要调用本身也是一次模型请求，不能反过来把它撑爆。
+ */
+export const buildCanvasAgentSummarySource = (
+  span: unknown,
+  options?: { maxChars?: number; itemMaxChars?: number },
+): string => {
+  if (!Array.isArray(span)) return ''
+  const itemMaxChars = options?.itemMaxChars ?? CANVAS_AGENT_SUMMARY_SOURCE_ITEM_MAX_CHARS
+  const maxChars = options?.maxChars ?? CANVAS_AGENT_SUMMARY_INPUT_CHAR_BUDGET
+
+  const clip = (text: string) => (text.length > itemMaxChars
+    ? `${text.slice(0, itemMaxChars)}…（已截断 ${text.length - itemMaxChars} 字）`
+    : text)
+
+  const lines: string[] = []
+  for (const raw of span) {
+    const message = raw as { content?: unknown; toolName?: string; isError?: boolean }
+    const role = roleOf(raw)
+    if (role === 'user') {
+      lines.push(`用户：${clip(textContentOf(message.content))}`)
+      continue
+    }
+    if (role === 'assistant') {
+      const parts = Array.isArray(message.content) ? message.content : []
+      const calls = parts
+        .map((part) => part as { type?: string; name?: string })
+        .filter((part) => part?.type === 'toolCall')
+        .map((part) => String(part.name || ''))
+        .filter(Boolean)
+      const text = clip(textContentOf(parts))
+      lines.push(`助手：${text}${calls.length ? `（并调用工具：${calls.join('、')}）` : ''}`)
+      continue
+    }
+    if (role === 'toolResult') {
+      const name = String(message.toolName || '')
+      lines.push(
+        `工具结果${name ? `(${name})` : ''}${message.isError ? '[失败]' : ''}：${clip(textContentOf(message.content))}`,
+      )
+    }
+  }
+
+  const joined = lines.filter((line) => line.trim().length > 0).join('\n')
+  return joined.length > maxChars ? `${joined.slice(0, maxChars)}\n…（更早内容已截断）` : joined
+}
+
+/** 压缩决策的产物（纯数据，可断言） */
+export interface CanvasAgentCompactionPlan {
+  /** 是否应压缩：转录总字符超过预算 */
+  shouldCompact: boolean
+  /** 要交给模型压成摘要的最旧一段 */
+  span: unknown[]
+  /** 压缩后**原样保留**的近期消息（不含 span） */
+  retained: unknown[]
+  budget: number
+  keepRecentBudget: number
+  beforeChars: number
+  /** span 里是否含旧摘要 —— 是则本次是「摘要累积」而不是重新摘要 */
+  carriesPreviousSummary: boolean
+}
+
+/**
+ * 判断要不要压、压哪一段、压完剩什么。
+ *
+ * 规则：
+ *   1. 总字符 ≤ 预算 → 不压（不花冤枉钱）；
+ *   2. 超过 → 保留「近期」到 keepRecentBudget 以内（按用户回合边界切，toolCall 与 toolResult 成对），
+ *      其余最旧的一段作为 span 交给模型；
+ *   3. span 从第 0 条开始 → 若转录开头是上一轮的摘要消息，它必然落进 span，
+ *      于是「旧摘要 + 中间那段」被一起重压成新摘要（**摘要累积**，不丢之前的结论）；
+ *   4. 只有一个回合且超预算 → span 为空，不压（没有更旧的段可压，交给兜底裁剪）。
+ *
+ * `retained` 复用 trimTranscriptToBudget：它保证保留了整条用户回合、且不会只留 toolResult 丢掉发起它的 assistant。
+ */
+export const planCanvasAgentCompaction = (
+  messages: unknown,
+  options?: { budget?: number; keepRecentBudget?: number },
+): CanvasAgentCompactionPlan => {
+  const normalized = toPersistedTranscriptMessages(messages)
+  const budget = options?.budget ?? CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET
+  // 近期段最多留「总预算一半」且不超过 60k：给摘要与每轮重建的 system 头/工具声明留余量，
+  // 保证压缩后 `[摘要, ...近期]` 确实落回总预算以内。
+  const keepRecentBudget = options?.keepRecentBudget
+    ?? Math.max(1, Math.min(CANVAS_AGENT_KEEP_RECENT_CHAR_BUDGET, Math.floor(budget / 2)))
+  const beforeChars = countTranscriptChars(normalized)
+
+  const noopPlan: CanvasAgentCompactionPlan = {
+    shouldCompact: false,
+    span: [],
+    retained: normalized,
+    budget,
+    keepRecentBudget,
+    beforeChars,
+    carriesPreviousSummary: false,
+  }
+  if (budget <= 0 || normalized.length === 0 || beforeChars <= budget) return noopPlan
+
+  const retained = trimTranscriptToBudget(normalized, keepRecentBudget)
+  const span = normalized.slice(0, normalized.length - retained.length)
+  if (span.length === 0) return noopPlan
+
+  return {
+    shouldCompact: true,
+    span,
+    retained,
+    budget,
+    keepRecentBudget,
+    beforeChars,
+    carriesPreviousSummary: span.some((message) => isCanvasAgentSummaryMessage(message)),
+  }
+}
+
+/** 压缩动作的结果（落库与日志都用它） */
+export interface CanvasAgentCompactionResult {
+  /** 压缩后的转录 `[摘要消息, ...近期消息]`；未压缩时是净化后的原转录 */
+  messages: unknown[]
+  compacted: boolean
+  /** 摘要调用失败、已退回「丢最旧一段」裁剪 */
+  fellBack: boolean
+  beforeMessageCount: number
+  afterMessageCount: number
+  beforeChars: number
+  afterChars: number
+  /** 摘要消息本身的字符数（含前缀） */
+  summaryChars: number
+  /** 被压进摘要的旧消息条数 */
+  summarizedMessageCount: number
+  /** 失败原因（仅 fellBack=true 时有值，供日志） */
+  failureReason: string
+}
+
+/** 极端保护：`[摘要, ...近期]` 仍超预算时，只在（总预算 − 摘要）内保留近期尾部 —— 摘要一定留住 */
+const clampCompactedTranscript = (
+  summaryMessage: unknown,
+  retained: unknown[],
+  budget: number,
+): unknown[] => {
+  const combined = [summaryMessage, ...retained]
+  if (countTranscriptChars(combined) <= budget) return combined
+  const summaryChars = countTranscriptChars([summaryMessage])
+  const tail = trimTranscriptToBudget(retained, Math.max(1, budget - summaryChars))
+  return [summaryMessage, ...tail]
+}
+
+/**
+ * 真正执行压缩：调一次模型把最旧一段压成一条结构化摘要。
+ *
+ * 失败安全（契约）：`summarize` 抛错 / 返回空 → **不抛错**，退回既有的「从最旧用户回合丢」裁剪，
+ * 并在结果里标 `fellBack`（调用方据此记日志）。
+ */
+export const compactCanvasAgentTranscript = async (input: {
+  messages: unknown
+  budget?: number
+  keepRecentBudget?: number
+  /** 把一段旧消息压成摘要文本；失败/超时请抛错，本函数负责安全回退 */
+  summarize: (span: unknown[]) => Promise<string>
+}): Promise<CanvasAgentCompactionResult> => {
+  const normalized = toPersistedTranscriptMessages(input.messages)
+  const plan = planCanvasAgentCompaction(normalized, {
+    budget: input.budget,
+    keepRecentBudget: input.keepRecentBudget,
+  })
+  const base = {
+    beforeMessageCount: normalized.length,
+    beforeChars: plan.beforeChars,
+  }
+
+  if (!plan.shouldCompact) {
+    return {
+      ...base,
+      messages: plan.retained,
+      compacted: false,
+      fellBack: false,
+      afterMessageCount: plan.retained.length,
+      afterChars: plan.beforeChars,
+      summaryChars: 0,
+      summarizedMessageCount: 0,
+      failureReason: '',
+    }
+  }
+
+  try {
+    const summaryText = String((await input.summarize(plan.span)) || '').trim()
+    if (!summaryText) throw new Error('摘要模型返回空内容')
+    const summaryMessage = buildCanvasAgentSummaryMessage(summaryText)
+    const result = clampCompactedTranscript(summaryMessage, plan.retained, plan.budget)
+    return {
+      ...base,
+      messages: result,
+      compacted: true,
+      fellBack: false,
+      afterMessageCount: result.length,
+      afterChars: countTranscriptChars(result),
+      summaryChars: String((summaryMessage as { content?: unknown }).content || '').length,
+      summarizedMessageCount: plan.span.length,
+      failureReason: '',
+    }
+  } catch (error) {
+    const fallbackMessages = trimTranscriptToBudget(normalized, plan.budget)
+    return {
+      ...base,
+      messages: fallbackMessages,
+      compacted: false,
+      fellBack: true,
+      afterMessageCount: fallbackMessages.length,
+      afterChars: countTranscriptChars(fallbackMessages),
+      summaryChars: 0,
+      summarizedMessageCount: plan.span.length,
+      failureReason: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
