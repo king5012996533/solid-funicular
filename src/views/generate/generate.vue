@@ -2897,24 +2897,16 @@ const startImageGenerationTask = async (record: GeneratingRecord) => {
   }
 }
 
-// 图片生成支持跨页面中断；只要服务端任务仍在运行，就能远程停止。
-const handleStopImageGeneration = async (record: GeneratingRecord) => {
-  if (record.done) return
-  if (!record.dbId) return
-
-  try {
-    markRecordStopping(record)
-    const saved = await stopGenerationTask(record.dbId)
-    syncRecordWithPersisted(record, saved)
-    const controller = taskStreamControllers.get(record.dbId)
-    if (controller) {
-      controller.abort()
-      taskStreamControllers.delete(record.dbId)
-    }
-  } catch {
-    // 停止失败时保持当前状态，等待 SSE 或后续同步刷新。
-  }
-}
+/**
+ * 付费图片生成**没有**「停止」这个出口（2026-09-26 按产品要求删掉了按钮）。
+ *
+ * 原因与钱有关：任务一旦提交，上游就已经在生成 —— 钱付给对方了，而且结果是有保证的。
+ * 此时停止会走 abort → refundTaskPointsIfNeeded('task_aborted')：退给用户、上游照付、
+ * 成果拿不到，净亏三头。等它出结果即可；真卡死由任务侧的超时兜底。
+ * 免积分的那类任务（对话 / 研究 / Agent 回合）仍然可以停 —— 停它们不花钱。
+ *
+ * 这里曾经是 handleStopImageGeneration（调 stopGenerationTask + 中断订阅），已一并删除。
+ */
 
 const handleStopAgentExecution = async (record: GeneratingRecord) => {
   if (!record.agentRun || record.done || !record.dbId) return
@@ -3171,7 +3163,6 @@ onUnmounted(() => {
                     @edit="handleEditImageRecord(record)"
                     @regenerate="handleRegenerateImageRecord(record)"
                     @more="handleOpenImageRecordMore(record)"
-                    @stop="handleStopImageGeneration(record)"
                 />
               </div>
               <div

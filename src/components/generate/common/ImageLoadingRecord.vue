@@ -159,9 +159,11 @@
             <div class="progress-badge-RuihdC progress-badge-RQDqWu">
               {{ currentProgress }}%{{ currentProgressText || '造梦中' }}
             </div>
-            <button class="stop-generate-button-canana" type="button" @click="$emit('stop')">
-              停止生成
-            </button>
+            <!--
+              这里曾有「停止生成」按钮，2026-09-26 按产品要求删除。
+              付费图片任务提交后上游就已开始生成（钱已付、结果有保证），停止会退款给用户却拿不到成果，
+              净亏；免积分的任务（对话/研究/Agent 回合）仍然保留停止能力。
+            -->
           </div>
           <div v-if="done && !error" class="operations">
             <div class="record-bottom-slots-AYv3JV">
@@ -292,7 +294,8 @@ const props = defineProps({
   conversationEntries: { type: Array as PropType<ConversationEntry[]>, default: () => [] }
 })
 
-const emit = defineEmits(['edit', 'regenerate', 'more', 'preview', 'stop'])
+// 不再声明 'stop'：付费图片任务的停止按钮已按产品要求移除（见模板注释）。父组件也不该再绑 @stop。
+const emit = defineEmits(['edit', 'regenerate', 'more', 'preview'])
 
 const handlePreview = (index: number) => {
   emit('preview', index)
@@ -567,29 +570,8 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-.stop-generate-button-canana {
-  align-items: center;
-  background: rgba(0, 0, 0, 0.42);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  bottom: 16px;
-  color: #fff;
-  cursor: pointer;
-  display: inline-flex;
-  font-size: 12px;
-  font-weight: 600;
-  height: 32px;
-  justify-content: center;
-  left: 50%;
-  padding: 0 14px;
-  position: absolute;
-  transform: translateX(-50%);
-  z-index: 6;
-}
-
-.stop-generate-button-canana:hover {
-  background: rgba(0, 0, 0, 0.58);
-}
+/* 这里曾有 .stop-generate-button-canana（图片生成中的「停止生成」按钮），2026-09-26 按产品要求删除：
+   付费任务提交后上游已开始生成（钱已付、结果有保证），停止会退款给用户却拿不到成果，净亏。 */
 
 .image-stage-process-group {
   margin-top: 10px;

@@ -45,7 +45,6 @@ import { collectReferenceableAssets } from '../../composables/reference-resolver
 import {
   createGenerationTask,
   getGenerationTask,
-  stopGenerationTask,
   subscribeGenerationTaskEvents,
   resolveGenerationTaskModel,
   type GenerationTaskStreamEvent,
@@ -95,14 +94,18 @@ const cardSize = computed(() => resolveGenerationCardSize(appliedParams.value.ra
 
 /** 输入框浮层：固定 660 宽 + 不随画布缩放 + 被底部工具栏挡住时自动上移（规则见 useComposerPanel.ts） */
 /**
- * 生成中的「已等待时长」与取消出口。
+ * 生成中的「已等待时长」。
  *
- * 用户原话：「一直在转圈，没结果返回，用户会很焦虑，要么失败重试，要么放弃」，
- * 以及「等五十分钟用户都放弃了」。服务端任务接口**没有暴露排队位置**（我用 API 实测过，
- * 返回里没有任何 queue/wait/progress 字段），所以做不到「前面还有 N 个」；
- * 但两件真实可做的事能显著降低焦虑：
- *   1. 显示**已等待时长**（时间在走，用户知道系统没死）；
- *   2. 给一个**真的取消按钮**（走 stop 接口），而不是只能干等或刷新页面。
+ * 用户原话：「一直在转圈，没结果返回，用户会很焦虑」。服务端任务接口**没有暴露排队位置**
+ * （用 API 实测过，返回里没有任何 queue/wait/progress 字段），所以做不到「前面还有 N 个」；
+ * 能做的是把**已等待时长**显示出来（时间在走，用户知道系统没死），外加「比平时慢」的提示。
+ *
+ * **这里曾经有一个「取消」按钮，2026-09-26 按产品要求删掉了。** 原因与钱有关：
+ * 任务一旦提交，上游就已经在生成（钱已经付给对方，而且结果是有保证的）；此时用户点取消，
+ * 我们按 abort 走退款（refundTaskPointsIfNeeded('task_aborted')）—— 退给用户、上游照付、
+ * 成果还拿不到，净亏三头。所以付费生成没有「取消」这个出口，等它出结果即可。
+ * 真卡死时由 GENERATION_DEADLINE_MS 兜底落到可重试的失败态，不需要也不该由用户主动中断。
+ * 免积分的那类任务（对话 / 研究 / Agent 回合）仍然可以停 —— 停它们不花钱。
  */
 const generationElapsed = ref(0)
 /**
@@ -166,21 +169,6 @@ watch(
   },
   { immediate: true },
 )
-
-const cancelling = ref(false)
-const handleCancelRun = async () => {
-  const taskId = String(props.data?.taskRecordId || '').trim()
-  cancelling.value = true
-  try {
-    if (taskId) await stopGenerationTask(taskId)
-    taskStreamController.value?.abort()
-    failRun('已取消本次生成')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '取消失败')
-  } finally {
-    cancelling.value = false
-  }
-}
 
 const composerRef = ref<HTMLElement | null>(null)
 const { style: composerStyle } = useComposerPanel({
@@ -1020,12 +1008,7 @@ watch(
         <div class="image-node-loading-meta">
           <span class="image-node-loading-elapsed">生成中 {{ formattedElapsed }}</span>
           <span v-if="showSlowHint" class="image-node-loading-hint">比平时慢，可能在上游排队</span>
-          <button
-            type="button"
-            class="image-node-cancel nodrag nopan"
-            :disabled="cancelling"
-            @click.stop="handleCancelRun"
-          >{{ cancelling ? '取消中…' : '取消' }}</button>
+          <!-- 这里曾有「取消」按钮：上游已开始生成（钱已付、结果有保证），取消会退款给用户却拿不到成果，净亏。见脚本区注释 -->
         </div>
       </div>
       <!-- 失败态必须可操作：一直转圈会让用户既不敢走也不知道能不能等（用户反馈原话） -->
@@ -1164,18 +1147,8 @@ watch(
   font-variant-numeric: tabular-nums;
 }
 .image-node-loading-hint { color: var(--text-tertiary); font-size: 11px; }
-.image-node-cancel {
-  height: 26px;
-  padding: 0 12px;
-  border: 1px solid var(--canvas-node-border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.image-node-cancel:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
-.image-node-cancel:disabled { opacity: 0.6; cursor: default; }
+/* 这里曾有 .image-node-cancel（生成中卡片上的「取消」按钮），2026-09-26 按产品要求删除：
+   上游已开始生成（钱已付、结果有保证），取消会退款给用户却拿不到成果，净亏。见脚本区注释。 */
 .image-node-spinner { width: 18px; height: 18px; border: 2px solid var(--stroke-secondary); border-top-color: var(--brand-main-default); border-radius: 50%; animation: image-node-spin 0.8s linear infinite; }
 @keyframes image-node-spin { to { transform: rotate(360deg); } }
 /* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，
