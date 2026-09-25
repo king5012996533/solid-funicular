@@ -91,6 +91,14 @@ type RequestImageGenerationInput = {
   modelKey: string
   requestBody: Record<string, unknown>
   onRetry?: (retryState: RetryState) => Promise<void> | void
+  /**
+   * 流式响应读完后回调（因何收工 / 首图耗时 / 总耗时）。
+   *
+   * 为什么值得往外传一层：这家中转站的耗时跨度极大（实测 54~334 秒），
+   * 而它自己那行调用记录只反映模型那一段。有了这条归因，
+   * 「上游 36 秒就好了、画布却等了 5 分钟」这种问题下次能一眼看出是上游慢还是我们在干等。
+   */
+  onStreamReadFinish?: (info: StreamReadFinishInfo) => void
   fetchWithBurstRateRetry: (input: Omit<FetchWithBurstRateRetryInput, 'logGenerationTask'>) => Promise<Response>
 }
 
@@ -370,7 +378,96 @@ export const extractChatTextFromNonStreamResponse = async (response: Response) =
   return ''
 }
 
-export const extractImageUrlsFromStreamResponse = async (response: Response, signal: AbortSignal) => {
+/**
+ * 读取流结束后的归因信息（用于日志：下一次「怎么这么慢」能直接看出来）。
+ */
+export interface StreamReadFinishInfo {
+  /** 因为什么收工 */
+  endedBy: 'done_marker' | 'idle_after_result' | 'stream_closed' | 'aborted'
+  /** 解析出的图片数量 */
+  imageCount: number
+  /** 第一张图出现在第几毫秒 */
+  firstImageMs: number | null
+  /** 整段读取花了多久 */
+  totalMs: number
+}
+
+/**
+ * 已经拿到足量图片后，还能容忍多久没有新数据。
+ *
+ * 为什么需要它：上游既不发 `data: [DONE]`、也不关连接时（中转站很常见），
+ * 光靠「等流结束」会一直等到连接被空闲超时掐掉。既然图已经到手，没必要再等。
+ */
+const STREAM_IDLE_AFTER_RESULT_MS = 15_000
+
+/**
+ * 带空闲看门狗的读一帧：`idleMs` 为 null 时退化成普通 `read()`。
+ * 超时返回 `'idle'`，由调用方决定「就此收工」还是「继续等」。
+ */
+const readStreamChunkWithIdle = (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number | null,
+): Promise<ReadableStreamReadResult<Uint8Array> | 'idle'> => {
+  if (!idleMs) {
+    return reader.read()
+  }
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        resolve('idle')
+      }
+    }, idleMs)
+    reader.read().then(
+      (result) => {
+        if (!settled) {
+          settled = true
+          clearTimeout(timer)
+          resolve(result)
+        }
+      },
+      () => {
+        // 读取失败（连接被重置等）按「没有更多数据」处理，与原来的 catch→break 一致
+        if (!settled) {
+          settled = true
+          clearTimeout(timer)
+          resolve('idle')
+        }
+      },
+    )
+  })
+}
+
+/**
+ * 读取图片流式响应，解析出图片地址。
+ *
+ * **「什么时候算读完了」这里踩过一次大的**：原来只在 **上游关掉流**（`done`）时收工，
+ * 而 `data: [DONE]`（SSE 约定的流结束标记）只是 `continue` 跳过去。于是上游把图和
+ * `[DONE]` 都发完、却不关连接时，我们干等到连接被空闲超时掐掉 —— 实测一次用户等了
+ * **305 秒**，而中转站自己那行调用记录是 **36 秒**（图早就好了），画布上就是「一直在生成中」。
+ *
+ * 现在三个出口，谁先到算谁：
+ *   ① 收到 `data: [DONE]` —— 语义上的流结束，不看 socket 是否关闭；
+ *   ② 已经拿到图、之后 `STREAM_IDLE_AFTER_RESULT_MS` 没有新数据 —— 上游既不发 [DONE] 也不关连接的兜底；
+ *   ③ 上游真的关了流。
+ * 退出前一律 `reader.cancel()`，不把连接留给上游空转（顺带把中转站的并发额度还回去）。
+ */
+export const extractImageUrlsFromStreamResponse = async (
+  response: Response,
+  signal: AbortSignal,
+  options: {
+    onFinish?: (info: StreamReadFinishInfo) => void
+    idleAfterResultMs?: number
+    /**
+     * 本次请求期望出几张图（n）。**关系到钱**：n=2 时第二张可能比第一张晚很久才来，
+     * 若不看张数、只要「已经有图」就装空闲闸门，就会在第一张到手 15 秒后收工、
+     * 把第二张连同连接一起丢掉 —— 用户付了两张的钱只拿到一张。
+     * 传 0/不传时退化为「有一张就算齐」（旧行为）。
+     */
+    expectedCount?: number
+  } = {},
+) => {
   const reader = response.body?.getReader()
   if (!reader) {
     throw new Error('图片流式响应缺少可读数据')
@@ -380,44 +477,92 @@ export const extractImageUrlsFromStreamResponse = async (response: Response, sig
   let buffer = ''
   let fullContent = ''
   const imageUrls: string[] = []
+  const startedAt = Date.now()
+  const idleAfterResultMs = options.idleAfterResultMs ?? STREAM_IDLE_AFTER_RESULT_MS
+  const expectedCount = Math.max(0, Math.floor(Number(options.expectedCount) || 0))
+  let firstImageMs: number | null = null
+  let sawDoneMarker = false
+  let endedBy: StreamReadFinishInfo['endedBy'] = 'stream_closed'
 
-  while (!signal.aborted) {
-    let readResult: ReadableStreamReadResult<Uint8Array>
-    try {
-      readResult = await reader.read()
-    } catch {
-      break
-    }
+  /** 已经凑齐本次要的张数了吗（没告知张数时：有一张就算齐） */
+  const hasEnoughImages = () => (expectedCount > 0
+    ? imageUrls.length >= expectedCount
+    : imageUrls.length > 0)
 
-    const { done, value } = readResult
-    if (done) break
+  try {
+    while (!signal.aborted) {
+      let readResult: ReadableStreamReadResult<Uint8Array> | 'idle'
+      try {
+        // 只有已经拿齐了才装空闲看门狗：还没拿齐时上游可能只是慢（n>1 的第二张尤其明显），
+        // 不能急着放手，否则会把还没到的图连连接一起丢掉。
+        readResult = await readStreamChunkWithIdle(reader, hasEnoughImages() ? idleAfterResultMs : null)
+      } catch {
+        break
+      }
 
-    buffer += decoder.decode(value, { stream: true })
+      if (readResult === 'idle') {
+        endedBy = 'idle_after_result'
+        break
+      }
 
-    let boundaryIndex = -1
-    while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1) {
-      const message = buffer.slice(0, boundaryIndex)
-      buffer = buffer.slice(boundaryIndex + 2)
+      const { done, value } = readResult
+      if (done) break
 
-      for (const line of message.split('\n')) {
-        const trimmed = line.trim()
-        if (!trimmed || !trimmed.startsWith('data:')) continue
+      buffer += decoder.decode(value, { stream: true })
 
-        const chunk = trimmed.slice(5).trim()
-        if (chunk === '[DONE]') continue
+      let boundaryIndex = -1
+      while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1) {
+        const message = buffer.slice(0, boundaryIndex)
+        buffer = buffer.slice(boundaryIndex + 2)
 
-        const parsedChunk = parseUpstreamStreamChunk(chunk)
-        if (parsedChunk.text) {
-          fullContent += parsedChunk.text
-        }
-        if (parsedChunk.imageUrls.length) {
-          imageUrls.push(...parsedChunk.imageUrls)
+        for (const line of message.split('\n')) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data:')) continue
+
+          const chunk = trimmed.slice(5).trim()
+          if (chunk === '[DONE]') {
+            // 流到此为止：标记出来，处理完这一帧就收工（不再等上游关连接）
+            sawDoneMarker = true
+            continue
+          }
+
+          const parsedChunk = parseUpstreamStreamChunk(chunk)
+          if (parsedChunk.text) {
+            fullContent += parsedChunk.text
+          }
+          if (parsedChunk.imageUrls.length) {
+            if (firstImageMs === null) {
+              firstImageMs = Date.now() - startedAt
+            }
+            imageUrls.push(...parsedChunk.imageUrls)
+          }
         }
       }
+
+      if (sawDoneMarker) {
+        endedBy = 'done_marker'
+        break
+      }
     }
+
+    if (signal.aborted) {
+      endedBy = 'aborted'
+    }
+  } finally {
+    // 主动断开：我们不需要后面还有没有数据，别让上游把连接一直挂着
+    await reader.cancel().catch(() => {})
   }
 
+  // 帧里没直接给地址时，从累积正文里兜底再捞一次（原有行为，别丢）
   imageUrls.push(...extractImageUrlsFromText(fullContent))
+
+  // 归因回调放在**提取之后**：日志里的 imageCount 要与真正返回的张数一致
+  options.onFinish?.({
+    endedBy,
+    imageCount: imageUrls.length,
+    firstImageMs,
+    totalMs: Date.now() - startedAt,
+  })
 
   return imageUrls
 }
@@ -471,7 +616,12 @@ export const requestImageGeneration = async (input: RequestImageGenerationInput)
   }
 
   const imageUrls = isChatCompletionsEndpoint(upstream.endpoint)
-    ? await extractImageUrlsFromStreamResponse(response, input.signal)
+    ? await extractImageUrlsFromStreamResponse(response, input.signal, {
+        // 期望张数交给读取侧：n>1 时不能「拿到一张就收工」，否则第二张会被连连接一起丢掉
+        expectedCount: upstreamImageCount,
+        // 把「因何收工、第一张图多久到、总共多久」交回调用方记进日志
+        onFinish: (info) => input.onStreamReadFinish?.(info),
+      })
     : extractImageUrlsFromJsonResponse(await response.json())
 
   if (!imageUrls.length) {
@@ -632,39 +782,53 @@ const readChatResponseText = async (response: Response, signal: AbortSignal) => 
   let buffer = ''
   let fullContent = ''
   let streamErrorMessage = ''
+  // 收到 `data: [DONE]` 就该收工：以前只是 continue，于是上游发完 [DONE] 却不关连接时
+  // 我们会一直等到空闲超时（图片链路上实测过 305 秒，见 extractImageUrlsFromStreamResponse）。
+  let sawDoneMarker = false
 
-  while (!signal.aborted) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
-    }
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || !trimmed.startsWith('data:')) {
-        continue
-      }
-
-      const chunk = trimmed.slice(5).trim()
-      if (!chunk || chunk === '[DONE]') {
-        continue
-      }
-
-      const chunkError = parseChatChunkError(chunk)
-      if (chunkError) {
-        streamErrorMessage = chunkError
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read()
+      if (done) {
         break
       }
 
-      fullContent += parseChatChunkText(chunk)
-    }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
 
-    if (streamErrorMessage) {
-      break
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || !trimmed.startsWith('data:')) {
+          continue
+        }
+
+        const chunk = trimmed.slice(5).trim()
+        if (!chunk) {
+          continue
+        }
+        if (chunk === '[DONE]') {
+          sawDoneMarker = true
+          break
+        }
+
+        const chunkError = parseChatChunkError(chunk)
+        if (chunkError) {
+          streamErrorMessage = chunkError
+          break
+        }
+
+        fullContent += parseChatChunkText(chunk)
+      }
+
+      if (streamErrorMessage || sawDoneMarker) {
+        break
+      }
+    }
+  } finally {
+    // 已经拿到 [DONE] 就没必要再让上游把连接挂着
+    if (sawDoneMarker) {
+      await reader.cancel().catch(() => {})
     }
   }
 

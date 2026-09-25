@@ -33,6 +33,13 @@ export interface ImageTaskExecutorContext {
     modelKey: string
     requestBody: Record<string, unknown>
     onRetry?: (retryState: ImageTaskRetryState) => Promise<void> | void
+    /** 流式读取收工归因（因何收工 / 首图耗时 / 总耗时），记进日志用于定位「上游早好了、我们还在等」 */
+    onStreamReadFinish?: (info: {
+      endedBy: 'done_marker' | 'idle_after_result' | 'stream_closed' | 'aborted'
+      imageCount: number
+      firstImageMs: number | null
+      totalMs: number
+    }) => void
   }) => Promise<{ upstreamUrl: string; imageUrls: string[] }>
   requestImageEdit: (input: {
     signal: AbortSignal
@@ -146,6 +153,21 @@ export const executeImageTask = async (
       modelKey,
       requestBody,
       onRetry: (retryState) => context.markTaskRetryState(task, retryState),
+      /**
+       * 记下「这条流是怎么结束的」。
+       *
+       * 2026-09-26 的事故：一条图片任务从开始请求到拿到结果用了 **305 秒**，而中转站自己那行
+       * 调用记录是 **36 秒** —— 用户看到的就是「上游早出结果了，画布还在转」。原因是我们只在
+       * 上游**关掉流**时才收工，`data: [DONE]` 只被跳过（见 upstream-helpers 的
+       * extractImageUrlsFromStreamResponse）。修掉之后这条日志继续留着：
+       * 下次再有人说慢，`firstImageMs` 与 `totalMs` 一对比就知道是上游慢还是我们在干等。
+       */
+      onStreamReadFinish: (info) => context.logGenerationTask('image_task:stream_read_finish', {
+        recordId: task.recordId,
+        userId: task.userId,
+        modelKey,
+        ...info,
+      }),
     })
   await context.ensureTaskNotAborted(task)
 
