@@ -112,6 +112,7 @@ declare module 'vue' {
     SelectPopup: typeof import('./src/components/generate/common/SelectPopup.vue')['default']
     SidebarEmptyState: typeof import('./src/components/canana/SidebarEmptyState.vue')['default']
     SideMenu: typeof import('./src/components/home/components/SideMenu.vue')['default']
+    SystemInitUnavailableOverlay: typeof import('./src/components/common/SystemInitUnavailableOverlay.vue')['default']
     TabsSection: typeof import('./src/components/home/components/TabsSection.vue')['default']
     TaskIndicator: typeof import('./src/components/home/components/TaskIndicator.vue')['default']
     ThemeToggle: typeof import('./src/components/ThemeToggle.vue')['default']

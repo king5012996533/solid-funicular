@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useSystemInitStore } from '../stores/system-init'
 import { useLoadingStore } from '../stores/loading'
+import { resolveSystemInitRedirect } from '../shared/system-init-state'
 
 // 核心页面懒加载，避免全部进入主 bundle 拖慢首屏
 const Home = () => import('../views/home/home.vue')
@@ -285,23 +286,21 @@ router.beforeEach(async (to) => {
   useLoadingStore().start('route')
 
   const systemInitStore = useSystemInitStore()
+  // 只在「还没问到」时去问一次；失败会保持 unknown（systemInitInitialized 仍为 false），
+  // 于是下一次跳转还会重试，而不是像以前那样把失败当成「未初始化」。
   if (!systemInitStore.systemInitInitialized.value || systemInitStore.systemInitLoading.value) {
     await systemInitStore.loadStatus()
   }
 
-  if (!systemInitStore.isInitialized.value && to.path !== '/install') {
-    return {
-      path: '/install',
-      query: to.fullPath && to.fullPath !== '/install'
-        ? { redirect: to.fullPath }
-        : undefined,
-    }
-  }
-
-  if (systemInitStore.isInitialized.value && to.path === '/install') {
-    return {
-      path: '/',
-    }
+  // 只有明确 isInitialized === false 才跳安装向导；unknown（请求失败/5xx）一律放行，
+  // 由 App 级的可重试错误态兜底，避免服务抖动把用户送进 /install。
+  const systemInitRedirect = resolveSystemInitRedirect(
+    systemInitStore.systemInitPhase.value,
+    to.path,
+    to.fullPath,
+  )
+  if (systemInitRedirect) {
+    return systemInitRedirect
   }
 
   if (!to.meta?.requiresAuth) {
