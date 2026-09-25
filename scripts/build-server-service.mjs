@@ -2,6 +2,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { build as buildWithEsbuild } from 'esbuild'
 
+// ⚠️ 本地验证服务包前必须先重新执行本脚本（npm run build:service）。
+// 仓库里遗留的 dist-service/ 是旧构建产物（已被 .gitignore 忽略，Docker builder 会重建），
+// 直接拿它做本地演练会跑上次提交的后端代码 —— 2026-09-25 实测吃过这个差异：旧产物没有
+// readiness 超时逻辑，演练时表现成「启动要挂 20 秒」，与当前源码对不上。build() 会先
+// 清空输出目录（prepareOutputDir），所以每次重新构建拿到的都是当前源码。
+
 // 统一读取项目根目录。
 const rootDir = process.cwd()
 

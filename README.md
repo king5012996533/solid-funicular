@@ -277,6 +277,11 @@ npm run build:service
 npm run start
 ```
 
+> ⚠️ **本地验证必须先重新 `npm run build:service`，不要直接用仓库里遗留的 `dist-service/`。**
+> 那份是旧构建产物（已被 `.gitignore` 忽略，Docker builder 会重建），跑起来是**上一次提交**
+> 的后端代码 —— 2026-09-25 实测吃过这个差异：旧产物里没有 readiness 超时逻辑，本地演练时
+> 表现为「启动要挂 20 秒」，与当前源码行为对不上，白排查一轮。
+
 生产启动流程会自动处理：
 
 1. 加载 `.env.production` 并**校验关键变量**（`DATABASE_URL` / `JWT_SECRET` /

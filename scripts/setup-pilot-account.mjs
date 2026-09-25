@@ -1,7 +1,8 @@
 /**
  * 准备计费试点的环境（一次性、可重复执行）：
  *   1. 建一个可密码登录的测试账号（**复用 admin 的密码哈希** —— 同密码，不猜哈希算法）
- *   2. 通过积分流水给它充值（**照抄一条已有流水的枚举值** —— 不猜 changeType/action/sourceType）
+ *   2. 通过积分流水给它充值（**只照抄「增加类」流水的枚举值** —— 不猜 changeType/action/sourceType，
+ *      更不能照抄扣款那条：changeAmount 存的是绝对值，分不出方向，方向只看 action）
  *   3. 给试点模型写入定价记录（gpt-image-2 @ ggwk1，6 分/次）
  *
  * 为什么都用「照抄现有数据」而不是自己构造：枚举、哈希这些一旦猜错，
@@ -46,22 +47,48 @@ if (!testUser) {
 const lastLog = await prisma.pointAccountLog.findFirst({
   where: { userId: testUser.id },
   orderBy: { createdAt: 'desc' },
-  select: { balanceAfter: true, changeType: true, action: true, sourceType: true },
+  select: { balanceAfter: true },
 })
 const balanceBefore = lastLog?.balanceAfter ?? 0
 
 if (balanceBefore >= RECHARGE_AMOUNT) {
   console.log(`余额已是 ${balanceBefore}，跳过充值（够本轮对账用）`)
 } else {
-  // 枚举值照抄：优先抄本账号的历史流水，没有就抄任意一条
-  const template = lastLog ?? await prisma.pointAccountLog.findFirst({
-    orderBy: { createdAt: 'desc' },
-    select: { changeType: true, action: true, sourceType: true },
-  })
+  // 枚举值照抄，但**只能挑「加分类」的流水**当模板。
+  // 坑（2026-09-25 实测踩到）：本仓库 changeAmount 一律存绝对值（见 appendPointLog 的
+  // Math.abs），所以「latest 那条」很可能是一条 CONSUME/DECREASE 扣款 —— 照抄它就会把
+  // 充值写成「数值 +、语义像扣」的流水，账面对不上、后台按类型筛也筛不出来。
+  // 判据必须是 action（INCREASE/DECREASE）而不是 changeAmount 的正负号。
+  const templateWhere = { action: 'INCREASE' }
+  const templateSelect = { changeType: true, action: true, sourceType: true }
+  const template =
+    // 优先抄本账号的充值类流水，其次是任何增加类流水；都没有就明确报错，绝不硬抄扣款
+    await prisma.pointAccountLog.findFirst({
+      where: { ...templateWhere, userId: testUser.id, changeType: 'RECHARGE' },
+      orderBy: { createdAt: 'desc' },
+      select: templateSelect,
+    })
+    ?? await prisma.pointAccountLog.findFirst({
+      where: { ...templateWhere, changeType: 'RECHARGE' },
+      orderBy: { createdAt: 'desc' },
+      select: templateSelect,
+    })
+    ?? await prisma.pointAccountLog.findFirst({
+      where: { ...templateWhere, userId: testUser.id },
+      orderBy: { createdAt: 'desc' },
+      select: templateSelect,
+    })
+    ?? await prisma.pointAccountLog.findFirst({
+      where: templateWhere,
+      orderBy: { createdAt: 'desc' },
+      select: templateSelect,
+    })
+
   if (!template) {
-    console.error('库里没有任何积分流水，无法照抄枚举值')
+    console.error('库里没有任何「增加类」（action=INCREASE）的积分流水，无法安全照抄枚举值；本次充值已取消（不猜测、不硬抄扣款）。')
     process.exit(1)
   }
+
   const delta = RECHARGE_AMOUNT - balanceBefore
   await prisma.pointAccountLog.create({
     data: {
@@ -76,7 +103,7 @@ if (balanceBefore >= RECHARGE_AMOUNT) {
       remark: '计费试点环境准备（e2e，可回滚）',
     },
   })
-  console.log(`已充值 ${delta} → 余额 ${RECHARGE_AMOUNT}（沿用流水枚举：${template.changeType}/${template.action}/${template.sourceType}）`)
+  console.log(`已充值 ${delta} → 余额 ${RECHARGE_AMOUNT}（沿用增加类流水枚举：${template.changeType}/${template.action}/${template.sourceType}）`)
 }
 
 // ---------- 3) 试点模型定价 ----------

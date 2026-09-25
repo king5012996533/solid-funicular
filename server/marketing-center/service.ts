@@ -6,6 +6,7 @@ import {
   type PricingFallbackReason,
 } from '../../src/shared/model-pricing-rules'
 import prisma from '../db/prisma'
+import { decideRefundIdempotency, REFUND_CHANGE_TYPE } from './refund-idempotency'
 import { invalidateRedisCachePatterns, invalidateRedisCaches } from '../redis/cache-manager'
 import { getOrSetJsonCache } from '../redis/json-cache'
 import { redisKeys } from '../redis/keys'
@@ -454,7 +455,38 @@ export const refundGenerationPoints = async (input: {
 
   const result = await prisma.$transaction(async (tx) => {
     // 退款也走行锁：避免与并发扣点交错，让账本写入按事务严格串行。
+    // 同一用户的并发退款也会在这里排队，从而让下面的幂等判定看到已提交的退款。
     await lockUserBillingRow(tx, input.userId)
+
+    // 幂等：同一笔原始消费（扣费时的 associationNo）最多退一次。
+    // 行锁保证了该用户账本写入串行，这里读到的是「本次事务开始前已提交」的退款流水；
+    // 第二次调用命中 already_refunded → 安全 no-op，绝不重复加钱。
+    const existingRefundLogs = await tx.pointAccountLog.findMany({
+      where: {
+        userId: input.userId,
+        associationNo: input.associationNo,
+        changeType: REFUND_CHANGE_TYPE,
+      },
+      select: { associationNo: true, changeType: true, action: true },
+    })
+    const idempotency = decideRefundIdempotency({
+      userId: input.userId,
+      associationNo: input.associationNo,
+      existingRefundLogs,
+    })
+    if (!idempotency.allowed) {
+      if (idempotency.reason === 'already_refunded') {
+        // 已退过：不写第二条 REFUND、不动余额，直接返回 null 表示「无需处理」。
+        console.warn('[refund-idempotency] 该消费已退款，跳过重复退款', {
+          userId: input.userId,
+          associationNo: input.associationNo,
+          idempotencyKey: idempotency.idempotencyKey,
+        })
+        return null
+      }
+      // 没有单号就无法保证「最多退一次」，宁可显式报错也不冒险重复加钱。
+      throw new Error('退款缺少原始消费单号（associationNo），无法保证幂等，已拒绝退款')
+    }
 
     return appendPointLog(tx, {
       userId: input.userId,
