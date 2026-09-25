@@ -217,6 +217,16 @@ const paramChips = computed(() => {
 
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
+/**
+ * 这个错能不能靠「重新上传参考图」解决。
+ *
+ * 不能解决的是「上游取不到这张图」这一类（参考图是本站相对地址、且没有配可被上游访问的公网基址）：
+ * 重新上传仍然落在同一个 `/uploads/...`，点了只会再报一次同样的错（实测踩过）。
+ * 这类错误必须走「发布到上游可达的位置 / 配置 PUBLIC_ASSET_BASE_URL」，所以不显示那个假出口。
+ */
+const canFixByReupload = computed(() =>
+  !!errorMsg.value && !/无法被上游取到|上游取不到|PUBLIC_ASSET_BASE_URL|不可达/.test(errorMsg.value),
+)
 const showVideo = computed(() => !isLoading.value && !errorMsg.value && !!videoUrl.value)
 const inputState = useNodeInputState(() => props.id)
 const { collapsed, toggleCollapse } = useNodeCollapse(() => props.id)
@@ -615,8 +625,19 @@ onBeforeUnmount(() => {
         <div class="video-node-spinner" />
         <span>{{ progressText || '生成中…' }}</span>
       </div>
-      <div v-else-if="showError" class="video-node-error" @click.stop="triggerUpload">
-        <span>{{ errorMsg }}，点击重新上传</span>
+      <!--
+        错误态：**只在这个错真的能靠重新上传解决时才提示「点击重新上传」**。
+        2026-09-26 实测的坑：参考图不可达时（`/uploads/...` 相对地址 + 未配 PUBLIC_ASSET_BASE_URL），
+        重新上传仍然落在同一个 `/uploads/...`，点一次报一次同样的错 —— 用户被这个假出口来回折腾。
+        那类错误的正确答案是「把图发布到上游取得到的地方 / 配置公网基址」，不是再传一遍。
+      -->
+      <div
+        v-else-if="showError"
+        class="video-node-error"
+        :class="{ 'is-clickable': canFixByReupload }"
+        @click.stop="canFixByReupload ? triggerUpload() : undefined"
+      >
+        <span>{{ errorMsg }}<template v-if="canFixByReupload">，点击重新上传</template></span>
       </div>
       <video
         v-else
@@ -910,9 +931,10 @@ onBeforeUnmount(() => {
   color: var(--text-tertiary);
   font-size: 12px;
 }
+.video-node-error.is-clickable { cursor: pointer; }
+
 .video-node-error {
   color: #ef4444;
-  cursor: pointer;
 }
 .video-node-spinner {
   width: 18px;
