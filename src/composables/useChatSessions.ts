@@ -42,7 +42,26 @@ export interface ChatSession {
 
 const sessions = ref<ChatSession[]>([])
 const activeSessionId = ref<string | null>(null)
-const isPanelCollapsed = ref(true)
+/**
+ * 面板是否收起。
+ *
+ * **默认展开**（2026-09-26 按产品要求改）—— 原来默认 `true`（收起），后果很直接：
+ * 新用户进画布页**根本看不到 Agent 在哪**（整块面板被推到视口外，我实测截图全黑就是这个原因），
+ * 而"画布 Agent"恰恰是这个产品最主要的入口。不需要的人可以自己收掉，收掉后**记住**（见下）。
+ *
+ * 读 localStorage 恢复用户上一次的显式选择；没有记录时按「展开」处理——
+ * 这样"默认给出来、不需要再退出"和"退出后别再弹回来"两件事同时成立。
+ */
+const PANEL_COLLAPSED_STORAGE_KEY = 'canana:assistant:panel-collapsed'
+const readStoredPanelCollapsed = () => {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(PANEL_COLLAPSED_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+const isPanelCollapsed = ref(readStoredPanelCollapsed())
 
 /**
  * 助手面板宽度。
@@ -151,6 +170,14 @@ export function useChatSessions() {
 
   const togglePanel = () => {
     isPanelCollapsed.value = !isPanelCollapsed.value
+    // 只记「用户显式收/展」这一次选择；程序自己展开（例如弹出确认卡）不该覆盖用户偏好
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(PANEL_COLLAPSED_STORAGE_KEY, String(isPanelCollapsed.value))
+      } catch {
+        // 隐私模式等场景写不进去，忽略即可
+      }
+    }
   }
 
   const setPanelWidth = (width: number) => {
