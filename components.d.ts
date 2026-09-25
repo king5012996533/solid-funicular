@@ -26,6 +26,7 @@ declare module 'vue' {
     AgentLoadingIcon: typeof import('./src/components/generate/common/AgentLoadingIcon.vue')['default']
     AgentLoadingRecord: typeof import('./src/components/generate/common/AgentLoadingRecord.vue')['default']
     AgentToolbar: typeof import('./src/components/generate/toolbars/AgentToolbar.vue')['default']
+    AgentToolTrace: typeof import('./src/components/canana/AgentToolTrace.vue')['default']
     ArtForm: typeof import('./src/components/art-design/ArtForm.vue')['default']
     AssetSelector: typeof import('./src/components/generate/common/AssetSelector.vue')['default']
     AssistantSessionList: typeof import('./src/components/canvas/AssistantSessionList.vue')['default']

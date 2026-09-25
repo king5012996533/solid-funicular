@@ -2,6 +2,7 @@
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import SidebarEmptyState from '@/components/canana/SidebarEmptyState.vue'
+import AgentToolTrace from '@/components/canana/AgentToolTrace.vue'
 import AssistantSessionList from '@/components/canvas/AssistantSessionList.vue'
 import {
   createGenerationTask,
@@ -147,7 +148,54 @@ const messages = ref([])
 
 const inputMessage = ref('')
 const messagesContainer = ref(null)
+const composerInputRef = ref(null)
 const toggleCollapse = (msg) => { msg.collapsed = !msg.collapsed }
+
+// 「画布 Agent」发言形态：时间戳、hover 复制（本批只做复制，复制该条正文）
+const formatClock = (value) => {
+  const date = new Date(Number(value) || Date.now())
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+const copiedMessageId = ref(null)
+let copyResetTimer = null
+const copyMessage = async (msg) => {
+  const text = String(msg?.content || '')
+  if (!text) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      // 非安全上下文没有 clipboard API：退回一个临时 textarea，别让按钮点了没反应
+      const holder = document.createElement('textarea')
+      holder.value = text
+      holder.style.position = 'fixed'
+      holder.style.opacity = '0'
+      document.body.appendChild(holder)
+      holder.select()
+      document.execCommand('copy')
+      document.body.removeChild(holder)
+    }
+    copiedMessageId.value = msg.id
+    if (copyResetTimer) clearTimeout(copyResetTimer)
+    copyResetTimer = setTimeout(() => { copiedMessageId.value = null }, 1500)
+  } catch (err) {
+    console.error('[RightPanel] copy message failed', err)
+  }
+}
+
+// 空态的示例 chip：点一下只填进输入框，不自动发送（用户还能改）
+const examplePrompts = [
+  '帮我做个 30 秒广告',
+  '给这个节点出一张图',
+  '整理一下画布',
+]
+const applyExamplePrompt = (text) => {
+  inputMessage.value = text
+  nextTick(() => composerInputRef.value?.focus())
+}
 
 // 图片上传
 const uploadedImages = ref([])
@@ -242,7 +290,10 @@ onMounted(() => {
   })()
 })
 
-onBeforeUnmount(cleanupStreams)
+onBeforeUnmount(() => {
+  cleanupStreams()
+  if (copyResetTimer) clearTimeout(copyResetTimer)
+})
 
 // 把后端持久化的 record 映射为前端 UI 消息行
 const mapRecordToMessages = (record) => {
@@ -257,12 +308,14 @@ const mapRecordToMessages = (record) => {
         type: 'user-with-ref',
         content: record.prompt,
         referenceImages: refImages,
+        time: ts,
       })
     } else {
       out.push({
         id: `${baseId}-u`,
         type: 'user',
         content: record.prompt,
+        time: ts,
       })
     }
   }
@@ -278,6 +331,7 @@ const mapRecordToMessages = (record) => {
       totalCount: images.length,
       loading: !record.done && !images.length,
       error: record.error || '',
+      time: ts,
     })
   } else if (rtype === 'agent' || rtype === 'chat') {
     out.push({
@@ -286,6 +340,7 @@ const mapRecordToMessages = (record) => {
       content: record.content || '',
       loading: !record.done && !record.content,
       error: record.error || '',
+      time: ts,
     })
   }
   return out
@@ -538,6 +593,11 @@ const settleAskUser = (answers, skipped = false) => {
   askUserAnswers.value = []
 }
 
+// 工具轨迹的展示字段（耗时 / 执行中）只活在前端内存里：
+// step 的形状一个字不改 —— pending 只用来标「哪条细条正在跑」，stepTimes 只用来算耗时。
+const pendingToolCallIds = new Set()
+const resetToolTrace = () => { pendingToolCallIds.clear() }
+
 const agentBridge = useCanvasAgentBridge({
   // 把「确认」这项能力叠在页面注入的画布操作之上：画布上下文由 workflow 页提供，
   // 而确认卡片属于这个面板的 UI，两者在这里合体。
@@ -555,6 +615,10 @@ const agentBridge = useCanvasAgentBridge({
     const target = messages.value[messages.value.length - 1]
     if (!target || target.type !== 'ai-text') return
     target.steps = [...(target.steps || []), step]
+    const now = Date.now()
+    if (!target.turnStartedAt) target.turnStartedAt = now
+    target.stepTimes = [...(target.stepTimes || []), now]
+    target.pendingLabel = ''
     scrollToBottom()
   },
 })
@@ -609,10 +673,15 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
     }
 
     agentBridge.reset()
+    resetToolTrace()
     // 这一轮的参考图存下来：Agent 调 attach_reference_images 时由桥从这里取
     turnReferenceImages.value = Array.isArray(referenceImages) ? [...referenceImages] : []
     aiMsg.content = ''
     aiMsg.steps = []
+    // 展示字段（细条耗时 / 执行中提示）：不写回 step 的数据形状，只挂在这条消息上
+    aiMsg.turnStartedAt = Date.now()
+    aiMsg.stepTimes = []
+    aiMsg.pendingLabel = ''
 
     const saved = await createGenerationTask({
       source: ASSISTANT_SOURCE,
@@ -667,6 +736,19 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
     await subscribeGenerationTaskEvents(taskId, {
       signal: controller.signal,
       onEvent: (event) => {
+        // 展示层先记一笔「哪一步正在跑」：桥只在执行完才回调 onStep，
+        // 没有这一笔，进行中的细条就没有名字可显示。执行与回执仍归桥管。
+        if (event.type === 'tool_call' && event.agentToolCall) {
+          const call = event.agentToolCall
+          const callId = String(call.callId || '')
+          const target = messages.value[messages.value.length - 1]
+          if (target && target.type === 'ai-text' && callId && !pendingToolCallIds.has(callId)) {
+            pendingToolCallIds.add(callId)
+            target.pendingLabel = call.label || call.name || '执行中'
+            if (!target.turnStartedAt) target.turnStartedAt = Date.now()
+            scrollToBottom()
+          }
+        }
         // 服务端要它执行一个画布操作：交给桥（内部会执行 + 回执）
         if (agentBridge.handleStreamEvent(taskId, event, controller.signal)) {
           return
@@ -719,6 +801,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
     scrollToBottom()
     return true
   } finally {
+    // 这一轮无论怎么结束，「执行中…」都不能留在界面上
+    aiMsg.pendingLabel = ''
     // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
     if (confirmRequest.value) settleConfirm(false)
     if (askUserRequest.value) settleAskUser([], true)
@@ -779,8 +863,8 @@ const sendMessage = async () => {
   const userId = Date.now()
   messages.value.push(
     refImages.length
-      ? { id: userId, type: 'user-with-ref', referenceImages: refImages, content: content || '（附了参考图）' }
-      : { id: userId, type: 'user', content },
+      ? { id: userId, type: 'user-with-ref', referenceImages: refImages, content: content || '（附了参考图）', time: userId }
+      : { id: userId, type: 'user', content, time: userId },
   )
 
   // 清空输入；参考图交给这一轮的 Agent（挂到节点上是它的活），不再由面板直接拿去生成
@@ -794,6 +878,7 @@ const sendMessage = async () => {
     content: '',
     loading: true,
     error: '',
+    time: userId + 1,
   })
   scrollToBottom()
 
@@ -826,6 +911,7 @@ watch(() => props.initialMessage, async (newMessage) => {
     id: userId,
     type: 'user',
     content: newMessage,
+    time: userId,
   })
 
   emit('message-received')
@@ -837,6 +923,7 @@ watch(() => props.initialMessage, async (newMessage) => {
     content: '',
     loading: true,
     error: '',
+    time: userId + 1,
   })
   scrollToBottom()
   // 画布触发的入口也走同一个 Agent：面板只有一条对话链路，
@@ -924,18 +1011,34 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       <!-- 隐藏的文件上传输入框 -->
       <input type="file" multiple accept="image/*" class="hidden-file-input" ref="fileInputRef" @change="handleFileChange">
 
-      <!-- 空状态 - 使用可复用组件 -->
-      <SidebarEmptyState
-        v-if="!hasMessages"
-        @upload="triggerUpload"
-      />
+      <!-- 空状态：一句引导 + 示例 chip（点一下只填进输入框，不自动发送） -->
+      <div v-if="!hasMessages" class="agent-empty">
+        <div class="agent-empty__main">
+          <SidebarEmptyState @upload="triggerUpload" />
+        </div>
+        <div class="agent-empty__foot">
+          <div class="agent-empty__hint">交给 Agent 一件事，它会直接改这张画布</div>
+          <div class="agent-empty__chips">
+            <button
+              v-for="example in examplePrompts"
+              :key="example"
+              type="button"
+              class="agent-composer__chip"
+              @click="applyExamplePrompt(example)"
+            >{{ example }}</button>
+          </div>
+        </div>
+      </div>
 
       <!-- 消息列表 -->
       <div v-else class="chat-messages-list" ref="messagesContainer">
         <template v-for="msg in messages" :key="msg.id">
-          <!-- 用户消息（右对齐） -->
+          <!-- 用户消息（右对齐）：沿用设计稿的「你 · 时间」小标 + 气泡 -->
           <div v-if="msg.type === 'user'" class="message-row user-MkS7tH">
-            <div class="user-bubble">{{ msg.content }}</div>
+            <div class="user-col">
+              <div class="agent-who">你 · {{ formatClock(msg.time) }}</div>
+              <div class="user-bubble">{{ msg.content }}</div>
+            </div>
           </div>
 
           <!-- AI 图片回复 -->
@@ -994,55 +1097,78 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             </div>
           </div>
 
-          <!-- AI 文本流式回复 -->
-          <div v-else-if="msg.type === 'ai-text'" class="message-row ai">
-            <div class="ai-text-bubble">
-              <!-- Agent 真的对画布做了什么：一条条列出来，用户能核对，也能看出它是不是在乱改 -->
-              <div v-if="msg.steps?.length" class="agent-step-list">
-                <div
-                  v-for="step in msg.steps"
-                  :key="`${msg.id}-step-${step.index}`"
-                  :class="['agent-step', step.ok ? 'is-ok' : 'is-fail']"
-                >
-                  <span class="agent-step__index">{{ step.index }}</span>
-                  <span class="agent-step__label">{{ step.label }}</span>
-                  <span class="agent-step__summary">{{ step.summary }}</span>
+          <!-- Agent 回复：头像 + 名称/时间/复制，正文为主，工具调用默认收成一条细条 -->
+          <div v-else-if="msg.type === 'ai-text'" class="message-row agent-row">
+            <div class="agent-avatar" aria-hidden="true">✦</div>
+            <div class="agent-main">
+              <div class="agent-head">
+                <span class="agent-name">画布 Agent</span>
+                <span class="agent-time">{{ formatClock(msg.time) }}</span>
+                <span class="agent-actions">
+                  <button
+                    v-if="msg.content"
+                    type="button"
+                    class="agent-action"
+                    :class="{ 'is-copied': copiedMessageId === msg.id }"
+                    :title="copiedMessageId === msg.id ? '已复制' : '复制'"
+                    @click="copyMessage(msg)"
+                  >
+                    <svg v-if="copiedMessageId !== msg.id" width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M9 2.5h8.5A2.5 2.5 0 0 1 20 5v8.5a2.5 2.5 0 0 1-2.5 2.5H9a2.5 2.5 0 0 1-2.5-2.5V5A2.5 2.5 0 0 1 9 2.5Z" stroke="currentColor" stroke-width="1.6"/>
+                      <path d="M15.5 19.5A2.5 2.5 0 0 1 13 22H6.5A2.5 2.5 0 0 1 4 19.5V13a2.5 2.5 0 0 1 2.5-2.5" stroke="currentColor" stroke-width="1.6"/>
+                    </svg>
+                    <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="m5 12.5 4.5 4.5L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                </span>
+              </div>
+              <div class="agent-body">
+                <!-- 工具调用轨迹：默认一行细条，点开看逐条细节（数据形状没动，只是呈现） -->
+                <AgentToolTrace
+                  :steps="msg.steps || []"
+                  :step-times="msg.stepTimes || []"
+                  :turn-started-at="msg.turnStartedAt || 0"
+                  :pending-label="msg.pendingLabel || ''"
+                />
+                <div v-if="msg.content" class="ai-text-content">{{ msg.content }}<span v-if="msg.loading" class="ai-text-caret" aria-hidden="true"></span></div>
+                <div v-else-if="msg.loading" class="ai-text-typing">
+                  <span class="ai-text-dot" />
+                  <span class="ai-text-dot" />
+                  <span class="ai-text-dot" />
                 </div>
+                <div v-if="msg.error" class="ai-text-error">{{ msg.error }}</div>
+                <!-- 画布被占用时的自救入口：确认没有 Agent 在跑就强制释放自己那把锁，并重试这一轮 -->
+                <button
+                  v-if="msg.lockConflict && !msg.loading"
+                  type="button"
+                  class="ai-text-force-unlock"
+                  :disabled="msg.forceUnlocking"
+                  @click="forceUnlockAndRetry(msg)"
+                >
+                  {{ msg.forceUnlocking ? '释放中…' : '强制释放并重试' }}
+                </button>
               </div>
-              <div v-if="msg.content" class="ai-text-content">{{ msg.content }}</div>
-              <div v-else-if="msg.loading" class="ai-text-typing">
-                <span class="ai-text-dot" />
-                <span class="ai-text-dot" />
-                <span class="ai-text-dot" />
-              </div>
-              <div v-if="msg.error" class="ai-text-error">{{ msg.error }}</div>
-              <!-- 画布被占用时的自救入口：确认没有 Agent 在跑就强制释放自己那把锁，并重试这一轮 -->
-              <button
-                v-if="msg.lockConflict && !msg.loading"
-                type="button"
-                class="ai-text-force-unlock"
-                :disabled="msg.forceUnlocking"
-                @click="forceUnlockAndRetry(msg)"
-              >
-                {{ msg.forceUnlocking ? '释放中…' : '强制释放并重试' }}
-              </button>
             </div>
           </div>
 
           <!-- 用户消息（带参考图）：右对齐气泡 + 图片缩略图 -->
           <div v-else-if="msg.type === 'user-with-ref'" class="message-row user-with-ref-row">
-            <div class="user-with-ref-bubble">
-              <div v-if="msg.referenceImages?.length" class="user-with-ref-thumbs">
-                <div
-                  v-for="(imageSrc, index) in msg.referenceImages"
-                  :key="`${msg.id}-${index}`"
-                  class="user-with-ref-thumb"
-                  @click="openPreview(imageSrc)"
-                >
-                  <img :src="imageSrc" alt="参考图" />
+            <div class="user-col">
+              <div class="agent-who">你 · {{ formatClock(msg.time) }}</div>
+              <div class="user-with-ref-bubble">
+                <div v-if="msg.referenceImages?.length" class="user-with-ref-thumbs">
+                  <div
+                    v-for="(imageSrc, index) in msg.referenceImages"
+                    :key="`${msg.id}-${index}`"
+                    class="user-with-ref-thumb"
+                    @click="openPreview(imageSrc)"
+                  >
+                    <img :src="imageSrc" alt="参考图" />
+                  </div>
                 </div>
+                <div v-if="msg.content" class="user-with-ref-text">{{ msg.content }}</div>
               </div>
-              <div v-if="msg.content" class="user-with-ref-text">{{ msg.content }}</div>
             </div>
           </div>
 
@@ -1143,58 +1269,71 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             <button type="button" class="agent-composer__ref-remove" title="移除" @click="removeUploadedImage(img.id)">×</button>
           </div>
         </div>
-        <textarea
-          v-model="inputMessage"
-          class="agent-composer__input"
-          rows="1"
-          placeholder="交给 Agent 一件事（建节点、连线、生成、把一条片子串起来…）"
-          title="Enter 发送 · Shift+Enter 换行"
-          @keydown="handleKeydown"
-        ></textarea>
-        <div class="agent-composer__bar">
-          <!-- 用哪个对话模型由用户定：以后配了多个文本模型（能力/价格/权限不同），就在这里选 -->
-          <div
-            ref="modelTriggerRef"
-            class="agent-composer__model"
-            role="combobox"
-            tabindex="0"
-            :aria-expanded="modelSelectOpen"
-            :title="`当前对话模型：${selectedModelLabel}（点击切换）`"
-            @click="toggleChatModelSelect"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path
-                d="M13.25 2.68a2.5 2.5 0 0 0-2.5 0L4.56 6.26a2.5 2.5 0 0 0-1.25 2.16v7.15a2.5 2.5 0 0 0 1.25 2.17l6.19 3.57a2.5 2.5 0 0 0 2.5 0l6.19-3.57a2.5 2.5 0 0 0 1.25-2.17V8.42a2.5 2.5 0 0 0-1.25-2.16L13.25 2.68Z"
-                fill="currentColor"
-              />
-            </svg>
-            <span class="agent-composer__model-name">{{ selectedModelLabel }}</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M21.01 7.98A1.2 1.2 0 0 1 21 9.68l-8.16 8.06a1.2 1.2 0 0 1-1.69 0L3 9.68a1.2 1.2 0 0 1 1.69-1.71L12 15.2l7.31-7.23a1.2 1.2 0 0 1 1.7.01Z" fill="currentColor" />
-            </svg>
+        <div class="agent-composer__box">
+          <textarea
+            ref="composerInputRef"
+            v-model="inputMessage"
+            class="agent-composer__input"
+            rows="1"
+            placeholder="交给 Agent 一件事：建节点、连线、生成、把一条片子串起来…"
+            @keydown="handleKeydown"
+          ></textarea>
+          <div class="agent-composer__bar">
+            <!-- 用哪个对话模型由用户定：以后配了多个文本模型（能力/价格/权限不同），就在这里选 -->
+            <div
+              ref="modelTriggerRef"
+              class="agent-composer__model"
+              role="combobox"
+              tabindex="0"
+              :aria-expanded="modelSelectOpen"
+              :title="`当前对话模型：${selectedModelLabel}（点击切换）`"
+              @click="toggleChatModelSelect"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M13.25 2.68a2.5 2.5 0 0 0-2.5 0L4.56 6.26a2.5 2.5 0 0 0-1.25 2.16v7.15a2.5 2.5 0 0 0 1.25 2.17l6.19 3.57a2.5 2.5 0 0 0 2.5 0l6.19-3.57a2.5 2.5 0 0 0 1.25-2.17V8.42a2.5 2.5 0 0 0-1.25-2.16L13.25 2.68Z"
+                  fill="currentColor"
+                />
+              </svg>
+              <span class="agent-composer__model-name">{{ selectedModelLabel }}</span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M21.01 7.98A1.2 1.2 0 0 1 21 9.68l-8.16 8.06a1.2 1.2 0 0 1-1.69 0L3 9.68a1.2 1.2 0 0 1 1.69-1.71L12 15.2l7.31-7.23a1.2 1.2 0 0 1 1.7.01Z" fill="currentColor" />
+              </svg>
+            </div>
+            <button
+              type="button"
+              class="agent-composer__attach"
+              :class="{ 'is-active': uploadedImages.length > 0 }"
+              title="附参考图（Agent 会把它们挂到节点上用起来）"
+              @click="triggerUpload"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20.4 12.6 12.6 20.4a5 5 0 0 1-7.1-7.1l8-8a3.4 3.4 0 0 1 4.8 4.8l-8 8a1.8 1.8 0 0 1-2.5-2.5l7.2-7.2" />
+              </svg>
+              <span v-if="uploadedImages.length">{{ uploadedImages.length }}</span>
+              <span v-else>附图</span>
+            </button>
+            <!-- 提示改到输入框下方常驻一行（原来只挂在 title 上，用户根本看不到） -->
+            <span class="agent-composer__spacer"></span>
+            <!-- 停止只做视觉与禁用态：真正的 abort / 一轮内插话属于下一批（涉及画布锁并发），这里不接逻辑 -->
+            <button
+              type="button"
+              class="agent-composer__stop"
+              disabled
+              title="停止（下一批开放）"
+            >停止</button>
+            <button
+              type="button"
+              class="agent-composer__send"
+              :disabled="runningAgent || (!inputMessage.trim() && !uploadedImages.length)"
+              @click="sendMessage"
+            >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
           </div>
-          <button
-            type="button"
-            class="agent-composer__attach"
-            :class="{ 'is-active': uploadedImages.length > 0 }"
-            title="附参考图（Agent 会把它们挂到节点上用起来）"
-            @click="triggerUpload"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M20.4 12.6 12.6 20.4a5 5 0 0 1-7.1-7.1l8-8a3.4 3.4 0 0 1 4.8 4.8l-8 8a1.8 1.8 0 0 1-2.5-2.5l7.2-7.2" />
-            </svg>
-            <span v-if="uploadedImages.length">{{ uploadedImages.length }}</span>
-            <span v-else>附图</span>
-          </button>
-          <!-- 面板只有 440px 宽，这一行放不下「Enter 发送 · Shift+Enter 换行」这种提示：
-               实测它会把「交给 Agent」按钮挤到换行。提示改挂在输入框的 title 上，不占位置 -->
-          <span class="agent-composer__spacer"></span>
-          <button
-            type="button"
-            class="agent-composer__send"
-            :disabled="runningAgent || (!inputMessage.trim() && !uploadedImages.length)"
-            @click="sendMessage"
-          >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
+        </div>
+        <div class="agent-composer__hint">
+          <span>Enter 发送</span>
+          <span>Shift+Enter 换行</span>
+          <span>工具默认折叠，点开看细节</span>
         </div>
       </div>
 
@@ -1240,31 +1379,62 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 
 <style scoped>
 /**
- * Agent 输入区。
+ * 样式 token 与布局全部对齐设计稿 `refund-e2e/mock-c.html`（方案 C · 极简流）。
  *
- * 与它替换掉的 ContentGenerator 的关系：那个组件是图片生成的输入区（张数/比例/画质/高级设置），
- * 放进这个面板会让它看上去像个生成器 —— 用户的反馈正是这一句。这里只留「交办一件事」需要的三样：
- * 文字、附带的参考图、发送。生成参数由 Agent 调工具时自己决定。
+ * 结构：面板根节点挂一份 --agent-* token；消息流（头像/名称/时间/复制、工具细条、正文、
+ * 流式光标）与输入区（模型 chip / 附图 / 停止 / 主按钮 / 提示行）都从这里取色取圆角 ——
+ * 只在设计稿确实另有取值的地方（如占位色）才写单独的数值。
  *
- * 定位沿用原来那套（absolute 贴底 + 盖在消息之上），因为它已经验证过不会被消息列表压住；
- * `.chat-messages-list` 的底部内边距同步调小，否则消息和输入框之间会空一大截。
+ * 输入区仍是 absolute 贴底、盖在消息之上（已验证不会被消息列表压住）；
+ * `.chat-messages-list` 的底部内边距按新输入区高度同步收窄，否则底部会空一大截。
  */
+/* 设计稿 mock-c.html 的 token 落在面板根节点上：正文/工具/输入区都从这里继承 */
+.agent-X3m2wp {
+  --agent-bg: #0e0f12;
+  --agent-surface: #16181d;
+  --agent-surface-2: #14161b;
+  --agent-line: #24262d;
+  --agent-line-soft: #1e2027;
+  --agent-text: #e8eaed;
+  --agent-text-2: #9aa0a8;
+  --agent-text-3: #6b7280;
+  --agent-accent: #7c5cff;
+  --agent-accent-soft: #b9a6ff;
+  --agent-ok: #3ddc97;
+  --agent-warn: #ffb020;
+  --agent-r-sm: 8px;
+  --agent-r-md: 12px;
+  --agent-r-lg: 14px;
+}
+
 .agent-composer {
   position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 16px;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 10;
   display: flex;
   flex-direction: column;
-  /* 行与行之间留够：用户反馈「输入框都快挤在一起了」，原来是 8px */
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--agent-line-soft, #1e2027);
+  background: var(--agent-bg, #0e0f12);
+}
+.agent-composer__box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--agent-line, #24262d);
+  border-radius: var(--agent-r-md, 12px);
+  background: var(--agent-surface-2, #14161b);
+}
+.agent-composer__hint {
+  display: flex;
   gap: 12px;
-  padding: 14px 16px;
-  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
-  border-radius: 14px;
-  background: var(--canvas-float-block-default, rgba(24, 24, 27, 0.94));
-  backdrop-filter: blur(var(--canvas-float-backdrop-blur, 12px));
-  -webkit-backdrop-filter: blur(var(--canvas-float-backdrop-blur, 12px));
+  /* 评审说原来的提示太灰：这里用 --agent-text-2，而不是设计稿里更暗的 --agent-text-3 */
+  color: var(--agent-text-2, #9aa0a8);
+  font-size: 11px;
 }
 .agent-composer__refs {
   display: flex;
@@ -1302,58 +1472,85 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 }
 .agent-composer__input {
   width: 100%;
-  max-height: 176px;
-  /* 至少两行的高度：一行的话点进去光标就贴着边，看着很局促 */
-  min-height: 44px;
+  max-height: 160px;
+  /* 收窄到 36px：评审指出输入区太高、底部太空 */
+  min-height: 36px;
   border: 0;
   outline: none;
   resize: none;
   background: transparent;
-  color: var(--text-primary, #e5e7eb);
-  font-size: 13px;
+  color: var(--agent-text, #e8eaed);
+  font-size: 13.5px;
   line-height: 1.6;
   font-family: inherit;
 }
 .agent-composer__input::placeholder {
-  color: var(--text-tertiary, #71717a);
+  /* 设计稿的占位色 .ph：#79818c，比原来的 text-tertiary 亮一档 */
+  color: #79818c;
 }
 .agent-composer__bar {
   display: flex;
   align-items: center;
-  /* 这几个控件在 440px 的老宽度下会互相顶，间隔给到 10 并允许模型名收缩 */
-  gap: 10px;
+  /* 面板 560px 宽下这几个控件仍会互相顶，间隔 6 并允许模型名收缩 */
+  gap: 6px;
   flex-wrap: nowrap;
 }
-.agent-composer__attach {
+.agent-composer__attach,
+.agent-composer__chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   flex: 0 0 auto;
-  padding: 5px 9px;
-  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
-  border-radius: 8px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--agent-line, #24262d);
+  border-radius: 7px;
   background: transparent;
-  color: var(--text-secondary, #a1a1aa);
+  color: var(--agent-text-2, #9aa0a8);
   font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
 }
+.agent-composer__attach:hover,
+.agent-composer__chip:hover {
+  color: var(--agent-text, #e8eaed);
+  border-color: #33363f;
+}
 .agent-composer__attach.is-active {
-  color: #a5b4fc;
-  border-color: #6366f1;
+  color: var(--agent-accent-soft, #b9a6ff);
+  border-color: rgba(124, 92, 255, 0.6);
 }
 .agent-composer__spacer {
   flex: 1 1 auto;
 }
+.agent-composer__stop {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--agent-line, #24262d);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--agent-text-2, #9aa0a8);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.agent-composer__stop:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .agent-composer__send {
   /* 绝不能因为左边变长就被压缩换行 */
   flex: 0 0 auto;
-  margin-left: auto;
-  padding: 7px 16px;
+  height: 30px;
+  padding: 0 14px;
   border: 0;
   border-radius: 8px;
-  background: #4f46e5;
+  background: var(--agent-accent, #7c5cff);
   color: #fff;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
   cursor: pointer;
 }
 .agent-composer__send:disabled {
@@ -1368,17 +1565,18 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   /* 可以收缩：模型名很长时先压它，不要挤掉发送按钮 */
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 240px;
-  padding: 5px 9px;
-  border: 0.5px solid var(--stroke-secondary, rgba(255, 255, 255, 0.14));
-  border-radius: 8px;
-  color: var(--text-secondary, #a1a1aa);
+  max-width: 200px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--agent-line, #24262d);
+  border-radius: 7px;
+  color: var(--agent-text-2, #9aa0a8);
   font-size: 12px;
   cursor: pointer;
 }
 .agent-composer__model:hover {
-  color: var(--text-primary, #e5e7eb);
-  border-color: var(--text-secondary, #71717a);
+  color: var(--agent-text, #e8eaed);
+  border-color: #33363f;
 }
 .agent-composer__model-name {
   overflow: hidden;
@@ -1386,9 +1584,146 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   white-space: nowrap;
 }
 
-/* 输入区变矮了（原来那个生成器高得多），消息列表的底部留白同步收一下 */
+/* 消息区：上下 padding 与行距一起收紧（评审指出留白太松） */
 .chat-messages-list {
-  padding-bottom: 170px;
+  padding: 12px 14px 150px;
+}
+.chat-messages-list .message-row {
+  margin-bottom: 14px;
+}
+
+/* 「你 · 04:12」小标（用户消息与 Agent 共用同一套字号层级） */
+.agent-who {
+  margin-bottom: 6px;
+  color: var(--agent-text-3, #6b7280);
+  font-size: 11.5px;
+}
+.user-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  max-width: 84%;
+}
+
+/* Agent 发言形态：左侧紫头像 + 名称/时间 + hover 复制 */
+.agent-row {
+  display: flex;
+  gap: 10px;
+}
+.agent-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c5cff, #4b32c3);
+  color: #fff;
+  font-size: 12px;
+}
+.agent-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.agent-name {
+  color: var(--agent-text, #e8eaed);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.agent-time {
+  color: var(--agent-text-3, #6b7280);
+  font-size: 11px;
+}
+.agent-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0.35;
+  transition: opacity 0.15s;
+}
+.agent-row:hover .agent-actions {
+  opacity: 1;
+}
+.agent-action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--agent-text-2, #9aa0a8);
+  cursor: pointer;
+}
+.agent-action:hover {
+  border-color: var(--agent-line, #24262d);
+  background: var(--agent-surface, #16181d);
+  color: var(--agent-text, #e8eaed);
+}
+.agent-action.is-copied {
+  color: var(--agent-ok, #3ddc97);
+}
+
+/* 正文：普通消息文本，不再是卡片；工具调用由 AgentToolTrace 单独渲染在它上方 */
+.ai-text-content {
+  color: var(--agent-text, #e8eaed);
+  font-size: 13.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-text-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: var(--agent-accent, #7c5cff);
+  animation: agent-caret-blink 1s steps(2) infinite;
+}
+@keyframes agent-caret-blink {
+  50% { opacity: 0; }
+}
+
+/* 空态：引导语 + 示例 chip（点击只填入输入框） */
+.agent-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: 140px;
+}
+.agent-empty__main {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.agent-empty__main .sidebar-empty-state.empty {
+  padding-bottom: 0;
+}
+.agent-empty__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 8px;
+}
+.agent-empty__hint {
+  color: var(--agent-text-2, #9aa0a8);
+  font-size: 12px;
+}
+.agent-empty__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
 }
 
 /* 面板身份标识（Agent 创作）：放在头部，不会被底部的输入浮层盖住 */
@@ -1408,33 +1743,9 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   white-space: nowrap;
 }
 
-/* 步骤清单与确认卡片（2026-09-23，制片 Agent 的界面部分）
-   跟着面板已有的视觉语言走：浅底、细边框、等宽序号，不引入新的色彩体系。 */
-.agent-step-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed rgba(148, 163, 184, 0.4);
-}
-.agent-step {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #475569;
-}
-.agent-step.is-fail { color: #b91c1c; }
-.agent-step__index {
-  flex: 0 0 auto;
-  min-width: 16px;
-  font-variant-numeric: tabular-nums;
-  color: #94a3b8;
-}
-.agent-step__label { flex: 0 0 auto; font-weight: 600; }
-.agent-step__summary { flex: 1 1 auto; word-break: break-word; }
+/* 工具调用轨迹（细条 / 合并 / 展开详情）已抽到 AgentToolTrace.vue ——
+   这里原来那套「序号 + 标签 + 摘要」的步骤清单连同它和正文之间的虚线分隔线一并去掉，
+   正文与工具彻底分离（设计稿方案 C）。 */
 
 /**
  * 卡片浮在输入框上方。
@@ -1631,18 +1942,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .image-cell:hover .image-cell-add { opacity: 1; }
 .image-cell-add:hover { transform: scale(1.08); }
 
-/* AI 文本流式回复气泡 */
-.message-row.ai > .ai-text-bubble {
-  background: var(--bg-block-secondary, rgba(255, 255, 255, 0.04));
-  border-radius: 16px;
-  color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.6;
-  max-width: 85%;
-  padding: 12px 16px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* AI 文本流式回复：正文样式见上面的 .ai-text-content（不再用气泡卡片） */
 .ai-text-error {
   color: #ef4444;
   font-size: 12px;
@@ -1683,6 +1983,19 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   30% { opacity: 1; transform: translateY(-2px); }
 }
 
+/* 用户气泡：字号/圆角/内边距对齐设计稿（气泡尾巴在右下角），顺带收紧留白 */
+.user-col .user-bubble,
+.user-col .user-with-ref-text {
+  max-width: 100%;
+  padding: 9px 13px;
+  border: 1px solid #2b3040;
+  border-radius: 14px 14px 4px 14px;
+  background: #232733;
+  color: var(--agent-text, #e8eaed);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
 /* 用户消息（带参考图）：右对齐气泡 + 缩略图 */
 .message-row.user-with-ref-row {
   display: flex;
@@ -1693,7 +2006,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-width: 85%;
+  max-width: 100%;
 }
 .user-with-ref-thumbs {
   display: flex;
