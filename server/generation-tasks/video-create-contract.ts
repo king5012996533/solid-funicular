@@ -322,8 +322,16 @@ const probeImageReachability = async (input: {
       method: "HEAD",
       signal: controller.signal,
     });
-    // 有些静态站不支持 HEAD（405/501）：退回 GET，只看响应头，拿到就把 body 掐掉
-    if (response.status === 405 || response.status === 501) {
+    /**
+     * HEAD 不是 2xx 就退回 GET 复核。
+     *
+     * 原来只兜 405/501，**不够**：2026-09-26 实测我们自己的 `/uploads` 对 HEAD 回 **404**
+     * （服务端只放行 GET，见 `server/index.ts` 的 handleUploadsRequest），而图一直存在 ——
+     * 于是「HEAD 非 2xx 就等于取不到」这条推断会把好好的参考图判成不可达，
+     * 上游侧的表现是静默忽略参考图（成片对不上），我们侧的表现是拦住一次本可成功的生成。
+     * GET 带 `Range: bytes=0-0` 只要一个字节、拿到响应头就掐断 body，代价可忽略。
+     */
+    if (!response.ok) {
       response = await input.fetchImpl(input.url, {
         method: "GET",
         headers: { Range: "bytes=0-0" },
