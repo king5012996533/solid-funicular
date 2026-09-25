@@ -16,6 +16,12 @@ import {
 import { writeScopedLog } from '../shared/logging'
 import type { GenerationRecordPayload, GenerationOutputPayload } from './shared'
 import { toNullableJsonInput } from '../shared/json-input'
+import {
+  CANVAS_AGENT_SESSION_META_KEY,
+  readCanvasAgentSession,
+  type CanvasAgentPersistedSession,
+} from '../generation-tasks/canvas-agent-session'
+import { CANVAS_AGENT_SKILL_KEY } from '../../src/shared/canvas-agent-tools'
 
 const GENERATION_RECORDS_LIST_SCOPE = 'generation-records-list'
 const GENERATION_RECORDS_LIST_CACHE_PATTERN = redisKeys.cache(GENERATION_RECORDS_LIST_SCOPE, '*')
@@ -898,6 +904,82 @@ export const getGenerationRecordById = async (id: string, currentUserId: string)
   }
 
   return serializeGenerationRecord(record)
+}
+
+/**
+ * 取同会话、同画布上「上一轮」制片 Agent 的转录（不含本轮记录）。
+ *
+ * 为什么不用 JSON path 过滤画布 id：Prisma 的 JSON 过滤在各数据库适配器上行为不一，
+ * 这里改成「按会话取最近 N 条候选，再用纯函数逐条校验 canvasId」—— 可移植，也不会因
+ * 适配器差异静默漏配。助手会话里的记录本来就都是 agent 记录，N=20 足够覆盖。
+ */
+export const findLatestCanvasAgentSession = async (input: {
+  userId: string
+  sessionId: string
+  canvasId: string
+  excludeRecordId: string
+}): Promise<CanvasAgentPersistedSession | null> => {
+  const canvasId = String(input.canvasId || '').trim()
+  const sessionId = String(input.sessionId || '').trim()
+  if (!canvasId || !sessionId) return null
+
+  const candidates = await prisma.generationRecord.findMany({
+    where: {
+      userId: input.userId,
+      sessionId,
+      skill: CANVAS_AGENT_SKILL_KEY,
+      ...(input.excludeRecordId ? { id: { not: input.excludeRecordId } } : {}),
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+    select: { metaJson: true },
+  })
+
+  for (const candidate of candidates) {
+    const session = readCanvasAgentSession(candidate.metaJson, canvasId)
+    if (session) return session
+  }
+
+  return null
+}
+
+/**
+ * 把本轮转录写进记录 metaJson（只动 meta_json 一个字段）。
+ *
+ * 与 `updateGenerationRecord` 一样先取行锁再读改写：那一侧也会写 metaJson
+ * （thinkingContent / referenceImages），不加锁的话两边各读一份旧值、各写一份新值，
+ * 会互相丢字段（转录丢了下轮就没记忆，反而更难发现）。
+ */
+export const saveCanvasAgentSession = async (input: {
+  recordId: string
+  userId: string
+  session: CanvasAgentPersistedSession
+}): Promise<void> => {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM generation_records WHERE id = ${input.recordId} FOR UPDATE`
+
+    const record = await tx.generationRecord.findUnique({
+      where: { id: input.recordId },
+      select: { userId: true, metaJson: true },
+    })
+    if (!record || record.userId !== input.userId) {
+      return
+    }
+
+    const currentMeta = record.metaJson && typeof record.metaJson === 'object' && !Array.isArray(record.metaJson)
+      ? (record.metaJson as Record<string, unknown>)
+      : {}
+
+    await tx.generationRecord.update({
+      where: { id: input.recordId },
+      data: {
+        metaJson: toNullableJsonInput({
+          ...currentMeta,
+          [CANVAS_AGENT_SESSION_META_KEY]: input.session,
+        }),
+      },
+    })
+  })
 }
 
 // 创建一条新的生成记录，并同步写入输出与 Agent 过程

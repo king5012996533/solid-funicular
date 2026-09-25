@@ -1,4 +1,10 @@
-import { getGenerationRecordById, createGenerationRecord, updateGenerationRecord } from '../generation-records/service'
+import {
+  getGenerationRecordById,
+  createGenerationRecord,
+  updateGenerationRecord,
+  findLatestCanvasAgentSession,
+  saveCanvasAgentSession,
+} from '../generation-records/service'
 import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './shared'
 import { resolveGatewayProviderUpstream } from '../provider-config/service'
 import { resolveImageModelMaxImagesPerRequest } from '../provider-config/model-service'
@@ -342,6 +348,9 @@ const executeCanvasAgentTask = async (task: RunningGenerationTask, payload: Gene
     buildInitialRecordPayload,
     updateGenerationRecord,
     getGenerationRecordById,
+    // 制片 Agent 的跨轮记忆：转录读写都落在 GenerationRecord.metaJson（不建表、不迁移）
+    loadCanvasAgentSession: findLatestCanvasAgentSession,
+    saveCanvasAgentSession,
     logGenerationTask,
     logGenerationTaskError,
   })

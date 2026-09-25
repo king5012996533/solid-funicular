@@ -561,10 +561,15 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
         // 本轮附的参考图：服务端会告诉 Agent「用户附了 N 张图」，
         // 它再决定要不要用 attach_reference_images 挂到某个节点上
         referenceImages: turnReferenceImages.value,
-        // 最近几轮对话：服务端会把它并进本轮用户消息，保证措辞连贯
+        /**
+         * 最近几轮对话：只在服务端**没有**可恢复的 Pi 转录时当兜底用（首次 / 旧数据 / 恢复失败）。
+         *
+         * 这里不再 `.slice(-6)`：条数由服务端的字符预算说了算 —— 固定 6 条会把长任务的上下文
+         * 砍到几乎没有（一次 get_canvas_state 的返回就能顶掉好几条）。正常路径下服务端会恢复
+         * 上一轮的完整转录，这个 history 根本不会用到。
+         */
         history: (messages.value || [])
           .filter((item) => (item.type === 'user' || item.type === 'ai-text') && String(item.content || '').trim())
-          .slice(-6)
           .map((item) => ({
             role: item.type === 'user' ? 'user' : 'assistant',
             content: String(item.content || ''),

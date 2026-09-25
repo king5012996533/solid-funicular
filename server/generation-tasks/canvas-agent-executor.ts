@@ -14,13 +14,20 @@ import {
   type CanvasPreflightQuotaCheck,
 } from "../../src/shared/canvas-agent-tools";
 import { describePreflightQuotaTelemetry } from "./canvas-agent-quota-telemetry";
-import { Agent, Type, type AgentTool } from "./pi-runtime";
+import { Agent, Type, type AgentMessage, type AgentTool } from "./pi-runtime";
 import { createGatewayStreamFn } from "./pi-gateway-stream";
 import { createSpendGuard } from "./canvas-agent-guard";
 import {
   cancelPendingClientToolCalls,
   waitForClientToolResult,
 } from "./canvas-agent-bridge";
+import {
+  buildCanvasAgentSessionMeta,
+  resolveCanvasAgentCanvasId,
+  resolveCanvasAgentSessionBootstrap,
+  selectCanvasAgentFallbackHistory,
+  type CanvasAgentPersistedSession,
+} from "./canvas-agent-session";
 
 /**
  * 画布 Agent 的服务端执行器（2026-09-23，M2）
@@ -106,6 +113,22 @@ export interface CanvasAgentTaskExecutorContext {
     },
     state: PersistState,
   ) => Promise<void>;
+  /**
+   * 取「同一会话 + 同一画布」上上一轮制片 Agent 的转录（不含本轮记录）。
+   * 取不到返回 null，调用方退回 fallback 拼装路径（首次 / 旧数据 / 恢复失败都一样）。
+   */
+  loadCanvasAgentSession: (input: {
+    userId: string;
+    sessionId: string;
+    canvasId: string;
+    excludeRecordId: string;
+  }) => Promise<CanvasAgentPersistedSession | null>;
+  /** 把本轮转录写进 metaJson（只动 meta_json，不碰记录其余列与输出） */
+  saveCanvasAgentSession: (input: {
+    recordId: string;
+    userId: string;
+    session: CanvasAgentPersistedSession;
+  }) => Promise<void>;
   buildInitialRecordPayload: (
     payload: GenerationTaskStartPayload,
   ) => GenerationRecordPayload;
@@ -275,48 +298,34 @@ data.url）挂到它的分镜节点上。挂上之后执行分镜节点会走图
 ${input.brief ? `# 当前画布摘要\n${input.brief}` : ""}`;
 
 /**
- * 把对话历史并进本轮用户消息。
+ * 用户这一轮附的参考图。
  *
- * 为什么不直接写进 `agent.state.messages`：Pi 的转录里**系统提示与工具声明是同一条 system 消息**，
- * 手工塞 messages 会把它顶掉（Agent 文档写明「除非消息里已经有一条 system」）——
- * 那一顶，工具就发不出去了，模型会开始说「我看不到画布」。这段历史只影响措辞连贯性，
- * 不值得为它冒「工具消失」的风险，所以退一步：作为背景贴在用户消息里，结构上绝对安全。
+ * 必须显式告诉 Agent —— 它看不见浏览器里上传了什么。不说的话，用户附了图、Agent 却当没有，
+ * 于是它要么凭空生成（图白附了），要么反问用户「你要我参考什么」。
+ * 顺带把「用哪个工具」一起点名，省得它去猜。
  */
-export const buildPromptWithHistory = (
-  prompt: string,
+const buildReferenceNotice = (
   requestBody: Record<string, unknown> | null | undefined,
 ) => {
-  /**
-   * 用户这一轮附的参考图。
-   *
-   * 必须显式告诉 Agent —— 它看不见浏览器里上传了什么。不说的话，用户附了图、Agent 却当没有，
-   * 于是它要么凭空生成（图白附了），要么反问用户「你要我参考什么」。
-   * 顺带把「用哪个工具」一起点名，省得它去猜。
-   */
   const referenceImages = Array.isArray(requestBody?.referenceImages)
     ? (requestBody?.referenceImages as unknown[]).filter((item) => typeof item === "string" && item)
     : []
-  const referenceNotice = referenceImages.length
+  return referenceImages.length
     ? `\n\n【用户本轮附了 ${referenceImages.length} 张参考图】`
       + "需要用到它们时，用 attach_reference_images 把图挂到对应的图片节点上（默认就是取这几张），"
       + "再用 run_node 执行该节点 —— 挂上图之后那次生成会走图生图。不要假装用了图。"
     : ""
-  const history = Array.isArray(requestBody?.history)
-    ? (requestBody?.history as Array<{ role?: string; content?: string }>)
-    : [];
-  const lines = history
-    .filter(
-      (item) =>
-        (item.role === "user" || item.role === "assistant") &&
-        String(item.content || "").trim(),
-    )
-    .slice(-8)
-    .map(
-      (item) =>
-        `${item.role === "user" ? "用户" : "你"}：${String(item.content || "")
-          .trim()
-          .slice(0, 500)}`,
-    );
+}
+
+/**
+ * 本轮执行要求（贴在用户消息末尾那段）。
+ * 恢复会话时直接用这个拼「用户消息 + 执行要求」；没有转录可恢复时，`buildPromptWithHistory` 再在其前拼历史。
+ */
+export const buildPromptWithExecutionDemand = (
+  prompt: string,
+  requestBody: Record<string, unknown> | null | undefined,
+) => {
+  const referenceNotice = buildReferenceNotice(requestBody)
 
   /**
    * 执行要求贴在**用户消息**里，而不是只写在系统提示里。
@@ -340,10 +349,30 @@ export const buildPromptWithHistory = (
     + "**不要用读取工具反复轮询等结果** —— 提交完继续做下一步；要看结果就读一次单节点（get_canvas_node），"
     + "还是 generating 就先做别的。定位画布用 get_canvas_overview，看细节用 get_canvas_node，别用 get_canvas_state 整张读。"
 
+  return `${prompt}${referenceNotice}${executionDemand}`;
+};
+
+/**
+ * 没有可恢复的转录时，把面板历史并进本轮用户消息（**兜底路径**）。
+ *
+ * 这条路径只在「首次 / 旧数据 / 恢复失败 / 拿不到画布 id」时走。它当年是主路径，
+ * 现在退居兜底 —— 有转录可恢复时由 `executeCanvasAgentTaskFlow` 直接恢复 Pi 转录，
+ * 连历史都不用再拼。历史条数不再固定砍 6/8 条、单条也不再砍 500 字，
+ * 由 `selectCanvasAgentFallbackHistory` 按总字符预算取最近的若干条。
+ */
+export const buildPromptWithHistory = (
+  prompt: string,
+  requestBody: Record<string, unknown> | null | undefined,
+) => {
+  const tail = buildPromptWithExecutionDemand(prompt, requestBody);
+  const lines = selectCanvasAgentFallbackHistory(requestBody?.history).map(
+    (item) => `${item.role === "user" ? "用户" : "你"}：${item.content}`,
+  );
+
   if (!lines.length) {
-    return `${prompt}${referenceNotice}${executionDemand}`;
+    return tail;
   }
-  return `（以下是本轮之前我们说过的话，供你保持连贯，不必复述）\n${lines.join("\n")}\n\n【用户现在的要求】\n${prompt}${referenceNotice}${executionDemand}`;
+  return `（以下是本轮之前我们说过的话，供你保持连贯，不必复述）\n${lines.join("\n")}\n\n【用户现在的要求】\n${tail}`;
 };
 
 export const executeCanvasAgentTaskFlow = async (
@@ -552,12 +581,60 @@ export const executeCanvasAgentTaskFlow = async (
     task.abortController.abort("user_stop");
   }, TASK_WALL_CLOCK_MS);
 
+  /**
+   * 会话恢复（跨轮记忆的入口）。
+   *
+   * 取「同一会话 + 同一画布」上上一轮的转录，塞进 `initialState.messages` —— 这样 Pi 一上来就带着
+   * 上一轮的工具调用与结果，不必靠自己反复读画布去重建上下文（实测旧路径它一轮读了 39 次画布）。
+   * 键必须是 **sessionId + 画布 id**：助手会话在浏览器里是全局的（不随画布切换），
+   * 只用 sessionId 会让 A 画布的记忆串到 B 画布；拿不到画布 id（未保存的画布 / 没取到锁）时不恢复，
+   * 退回 fallback 拼装路径 —— 宁可少带记忆，也不串台。
+   */
+  const sessionId = String(payload.sessionId || "").trim();
+  const canvasId = resolveCanvasAgentCanvasId(payload.requestBody);
+  let previousSession: CanvasAgentPersistedSession | null = null;
+  if (canvasId && sessionId) {
+    try {
+      previousSession = await context.loadCanvasAgentSession({
+        userId: task.userId,
+        sessionId,
+        canvasId,
+        excludeRecordId: task.recordId,
+      });
+    } catch (error) {
+      // 恢复失败不该让整轮 Agent 挂掉：拿不到就退回 fallback，本轮照常跑
+      context.logGenerationTaskError("canvas_agent:session_restore_failed", error, {
+        recordId: task.recordId,
+        userId: task.userId,
+        canvasId,
+      });
+    }
+  }
+  const sessionBootstrap = resolveCanvasAgentSessionBootstrap({
+    requestBody: payload.requestBody,
+    sessionId,
+    previousSession,
+  });
+  if (sessionBootstrap.source === "session") {
+    context.logGenerationTask("canvas_agent:session_restored", {
+      recordId: task.recordId,
+      userId: task.userId,
+      canvasId: sessionBootstrap.canvasId,
+      messageCount: sessionBootstrap.restoredMessages.length,
+    });
+  }
+
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt({
         brief: String((payload.requestBody || {}).canvasBrief || "").trim(),
       }),
       tools: buildAgentTools(),
+      // 恢复转录时**只给非 system 消息**：若保留旧 system 头，Pi 会把它当成会话自带系统提示，
+      // 本轮新的 systemPrompt（含最新画布摘要）反而不生效（agent.js: messages[0] 已是 system 就不再插入）。
+      ...(sessionBootstrap.restoredMessages.length
+        ? { messages: sessionBootstrap.restoredMessages as AgentMessage[] }
+        : {}),
     },
     streamFn,
     beforeToolCall: async (hookContext) => {
@@ -691,8 +768,14 @@ export const executeCanvasAgentTaskFlow = async (
      * 后果是**整条任务被完整跑两遍**：模型把「读画布 → 加节点 → 选中」做两次，
      * 一次请求加出来两个节点，答复里同一句话出现两遍。而且它不报任何错 ——
      * 只有把每一轮发给上游的消息角色打出来，才能看到结尾多出一条 user。
+     *
+     * 有转录可恢复时，历史已经在那条转录里，本轮只发「用户消息 + 执行要求」；
+     * 走到 fallback（无转录）时才把面板历史拼回用户消息里。
      */
-    await agent.prompt(buildPromptWithHistory(userPrompt, payload.requestBody));
+    const promptText = sessionBootstrap.source === "session"
+      ? buildPromptWithExecutionDemand(userPrompt, payload.requestBody)
+      : buildPromptWithHistory(userPrompt, payload.requestBody);
+    await agent.prompt(promptText);
     await agent.waitForIdle?.();
   } finally {
     clearTimeout(wallClockTimer);
@@ -701,6 +784,44 @@ export const executeCanvasAgentTaskFlow = async (
       task.recordId,
       "任务已结束，未完成的客户端工具调用被取消",
     );
+  }
+
+  /**
+   * 把本轮转录落库，供下一轮恢复。
+   *
+   * 放在这里（Agent 循环结束之后、终态写入之前）是有意的：
+   *   · 无论本轮是成功还是「模型没产出」，转录都已经产生，尽早存下来，下一轮才有记忆；
+   *   · 随后成功路径的 `updateGenerationRecord` 会 merge 已有 metaJson，这个键不会被覆盖；
+   *   · 失败路径由策略层收口，同样只 merge metaJson，也不会把它清掉。
+   * 只写 meta_json 一个字段（见 saveCanvasAgentSession），不碰内容/输出/状态。
+   */
+  if (sessionBootstrap.canvasId && sessionId) {
+    try {
+      const session = buildCanvasAgentSessionMeta({
+        canvasId: sessionBootstrap.canvasId,
+        messages: agent.state?.messages,
+      });
+      if (session) {
+        await context.saveCanvasAgentSession({
+          recordId: task.recordId,
+          userId: task.userId,
+          session,
+        });
+        context.logGenerationTask("canvas_agent:session_saved", {
+          recordId: task.recordId,
+          userId: task.userId,
+          canvasId: session.canvasId,
+          messageCount: session.messages.length,
+        });
+      }
+    } catch (error) {
+      // 存转录失败不该改写本轮结果：下一轮退回 fallback，本轮该报什么照报什么
+      context.logGenerationTaskError("canvas_agent:session_save_failed", error, {
+        recordId: task.recordId,
+        userId: task.userId,
+        canvasId: sessionBootstrap.canvasId,
+      });
+    }
   }
 
   const finalText = fullText.trim();
