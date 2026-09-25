@@ -46,6 +46,10 @@ const MAX_BATCH_COLUMNS = 4;
 const MAX_BATCH_RUNS = 12;
 /** 一次批量连线的上限 */
 const MAX_BATCH_LINKS = 40;
+/** 一次问用户的问题数上限：问题越多越像审问，用户越容易直接跳过 */
+const MAX_ASK_QUESTIONS = 3;
+/** 单个问题的可点选项上限（模型偶尔会一口气列一长串） */
+const MAX_ASK_OPTIONS = 6;
 /**
  * 预校验里余额/预估两个接口各自的超时预算。
  *
@@ -85,6 +89,31 @@ export interface CanvasAgentNodeSnapshot {
   textLength?: number;
   /** 挂着的参考图（预校验要 HEAD 探可达性，运行期还要复核一次） */
   referenceImages?: string[];
+}
+
+/**
+ * `ask_user` 的参数与回执。
+ *
+ * 为什么和 request_confirmation 放在同一层却单独定义：它问的是**猜不出来的关键信息**
+ * （要做什么 / 成片还是单张 / 多大规模），需要在同一轮里拿到答复才能继续 ——
+ * 所以数据形状必须两侧一致（面板渲染卡片、工具层读答复），任一侧改字段都要编译失败。
+ */
+export interface AgentAskUserRequest {
+  /** 为什么需要问（一句话，帮用户快速判断该答什么） */
+  context?: string;
+  /** 要问的问题（最多 3 个） */
+  questions: Array<{ question: string; options?: string[] }>;
+}
+
+export interface AgentAskUserAnswer {
+  question: string;
+  answer: string;
+}
+
+export interface AgentAskUserResult {
+  answers: AgentAskUserAnswer[];
+  /** 用户点了「跳过」没作答时为 true */
+  skipped?: boolean;
 }
 
 export interface CanvasAgentContext {
@@ -168,6 +197,14 @@ export interface CanvasAgentContext {
   requestConfirmation?: (
     request: AgentConfirmationRequest,
   ) => Promise<AgentConfirmationDecision>;
+  /**
+   * 向用户提问（关键信息不足时）。
+   *
+   * 与 requestConfirmation 一样是**阻塞式**的：卡片弹出来、等用户答完、答案回灌同一轮，
+   * 所以「问」不再等于结束这一轮。不注入它的话，该工具必须明确失败 ——
+   * 绝不能静默「当作已答」，否则模型会拿着编出来的答案往下做。
+   */
+  askUser?: (request: AgentAskUserRequest) => Promise<AgentAskUserResult>;
 }
 
 export interface CanvasAgentToolSchema {
@@ -375,6 +412,58 @@ export const executeCanvasAgentTool = async (
         summary: decision.approved
           ? `用户同意：${request.title}`
           : `用户拒绝：${request.title}${decision.note ? `（${decision.note}）` : ""}`,
+      };
+    }
+    case "ask_user": {
+      /**
+       * 提问是**阻塞式**的（卡片弹出来 → 等用户答 → 答案回灌同一轮），所以它不会像
+       * 纯文本提问那样把一次委托拆成好几轮。但答复必须真的来自用户：没有注入提问入口时
+       * 一律明确失败，绝不能「当作已答」把编出来的答案喂给模型。
+       */
+      const rawQuestions = Array.isArray(args.questions) ? args.questions : [];
+      const questions = rawQuestions
+        .map((item) => {
+          const raw = (item || {}) as Record<string, unknown>;
+          const question = String(raw.question || "").trim();
+          const options = Array.isArray(raw.options)
+            ? raw.options
+                .map((option) => String(option ?? "").trim())
+                .filter(Boolean)
+                .slice(0, MAX_ASK_OPTIONS)
+            : [];
+          return { question, ...(options.length ? { options } : {}) };
+        })
+        .filter((item) => item.question)
+        .slice(0, MAX_ASK_QUESTIONS);
+      if (!questions.length) {
+        return fail("ask_user 必须带至少一个 question");
+      }
+      const truncated = rawQuestions.filter((item) => String((item as Record<string, unknown>)?.question || "").trim()).length > MAX_ASK_QUESTIONS;
+      if (!ctx.askUser) {
+        return fail(
+          "当前环境不支持向用户提问（没有注入提问入口）。请把问题写在回复里，让用户回答后你再继续。",
+        );
+      }
+      const outcome = await ctx.askUser({
+        context: args.context ? String(args.context).trim() : undefined,
+        questions,
+      });
+      const answers = Array.isArray(outcome?.answers) ? outcome.answers : [];
+      if (outcome?.skipped === true || !answers.length) {
+        return {
+          ok: false,
+          // result 也必须是 JSON：服务端/模型要能稳定判断「到底有没有答复」
+          result: JSON.stringify({ answered: false, answers: [] }),
+          summary: "用户没有回答（可以按默认值继续，或询问是否需要停止）",
+        };
+      }
+      const head = `已向用户提问 ${questions.length} 个问题并拿到答复：${questions[0].question} → ${answers[0]?.answer || ""}`;
+      const note = truncated ? `（问题多于 ${MAX_ASK_QUESTIONS} 个，只问了前 ${MAX_ASK_QUESTIONS} 个）` : "";
+      const summary = `${head.length > 120 ? `${head.slice(0, 120)}…` : head}${note}`;
+      return {
+        ok: true,
+        result: JSON.stringify({ answered: true, answers }),
+        summary,
       };
     }
     case "get_canvas_state": {

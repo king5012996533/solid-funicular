@@ -81,6 +81,39 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     requiresClient: true,
   },
   {
+    name: "ask_user",
+    label: "向用户提问",
+    description:
+      "【关键信息不足时用】当「要做什么 / 产出成片还是单张 / 大概多大规模」这类**猜不出来**的信息缺失时，用这个工具问用户。它会在**同一轮里等用户回答**，拿到答案你继续往下做，不会把一次委托拆成好几轮 —— 所以在回复里用纯文字提问是错的，要用这个工具。一次把想问的问全（最多 3 个），每个问题给 2~4 个可点选项，用户也可以自己输入。有常识默认值的偏好（风格 / 画幅 / 画质 / 镜头数 / 时长）**不要问**，按默认值做并在最后汇报里说明。",
+    parameters: {
+      type: "object",
+      properties: {
+        context: {
+          type: "string",
+          description: "为什么需要问（一句话，帮用户快速判断该答什么）",
+        },
+        questions: {
+          type: "array",
+          description: "要问的问题，最多 3 个",
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "问题本身，一句话" },
+              options: {
+                type: "array",
+                items: { type: "string" },
+                description: "可点选的答案（2~4 个），用户也可以自己输入",
+              },
+            },
+            required: ["question"],
+          },
+        },
+      },
+      required: ["questions"],
+    },
+    requiresClient: true,
+  },
+  {
     name: "get_canvas_state",
     label: "读取画布",
     description:

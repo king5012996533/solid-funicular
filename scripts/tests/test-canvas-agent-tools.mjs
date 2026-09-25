@@ -418,5 +418,71 @@ await (async () => {
     } finally { restore() }
 })()
 
+console.log('== ask_user：关键信息不足时提问（同一轮里等答复，不把委托拆成好几轮）==')
+await (async () => {
+    const { ctx } = createFakeContext()
+    const res = await run(ctx, 'ask_user', {})
+    assert(!res.ok, '没有任何问题时应失败')
+    assert(res.result.includes('question'), `失败原因要可读（模型据此改正）：${res.result}`)
+    passed += 1
+    console.log('  ok   ask_user 没问题 → 失败且原因可读')
+})()
+
+await (async () => {
+    const { ctx } = createFakeContext()
+    let asked = null
+    ctx.askUser = async (request) => {
+        asked = request
+        return { answers: request.questions.map((item) => ({ question: item.question, answer: '随便' })) }
+    }
+    const res = await run(ctx, 'ask_user', {
+        questions: [
+            { question: '要做什么产品？' },
+            { question: '成片还是单张？' },
+            { question: '大概多少镜头？' },
+            { question: '给谁用？' },
+        ],
+    })
+    assert(res.ok, `应成功：${res.summary}`)
+    assert(asked.questions.length === 3, `最多问 3 个，实际问出 ${asked.questions.length} 个`)
+    assert(res.summary.includes('3'), `摘要应说清实际问了几问：${res.summary}`)
+    passed += 1
+    console.log('  ok   问题超过 3 个 → 截断到 3 个（摘要里说明）')
+})()
+
+await (async () => {
+    const { ctx } = createFakeContext()
+    const answers = [
+        { question: '要做什么产品？', answer: '保温杯' },
+        { question: '成片还是单张？', answer: '单张' },
+    ]
+    ctx.askUser = async () => ({ answers })
+    const res = await run(ctx, 'ask_user', {
+        context: '先确认目标与产物',
+        questions: [
+            { question: '要做什么产品？', options: ['保温杯', '耳机'] },
+            { question: '成片还是单张？', options: ['成片', '单张'] },
+        ],
+    })
+    assert(res.ok, '正常调用应成功')
+    const parsed = JSON.parse(res.result)
+    assert(parsed.answered === true, `回执必须是 JSON 且 answered:true：${res.result}`)
+    assert(
+        JSON.stringify(parsed.answers) === JSON.stringify(answers),
+        `回执里的 answers 应与注入回调的返回值一致：${res.result}`,
+    )
+    passed += 1
+    console.log('  ok   ask_user 正常调用 → JSON 回执、answers 与注入回调一致')
+})()
+
+await (async () => {
+    const { ctx } = createFakeContext()
+    const res = await run(ctx, 'ask_user', { questions: [{ question: '要做什么产品？' }] })
+    assert(!res.ok, '没注入 askUser 必须明确失败 —— 绝不能静默「当作用户已答」')
+    assert(res.result.includes('不支持'), `失败原因要说明当前环境不支持提问：${res.result}`)
+    passed += 1
+    console.log('  ok   没注入 askUser → 明确失败（不当作已答）')
+})()
+
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)
 process.exit(failed ? 1 : 0)

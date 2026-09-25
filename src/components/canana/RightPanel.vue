@@ -155,6 +155,8 @@ const cleanupStreams = () => {
     const c = activeStreams.shift()
     try { c?.abort() } catch { /* ignore */ }
   }
+  // 卸载/切会话时把还没答复的提问卡按「未回答」结掉：否则那个 Promise 会一直挂着
+  if (askUserRequest.value) settleAskUser([], true)
 }
 
 onMounted(() => {
@@ -435,6 +437,38 @@ const settleConfirm = (approved) => {
   confirmRemembered.value = false
 }
 
+const askUserRequest = ref(null)     // { context, questions, resolve }
+const askUserAnswers = ref([])       // 与问题一一对应：点选项即填入，也允许自由输入
+
+/**
+ * 服务端 Agent 通过桥要提问时调用；返回的 Promise 一直挂到用户提交或跳过。
+ *
+ * 提问是「关键信息不足」时的补救 —— 它和确认卡一样是阻塞式的（同一轮里等答复），
+ * 所以卡片必须让人看得见：面板收起时它在屏幕外，用户只会看到画布一动不动，然后十分钟后收到超时。
+ * 上一次的提问卡还没答复就再来一张时，先把上一张按「未回答」结掉，避免谁也答不了。
+ */
+const askUser = (request) =>
+  new Promise((resolve) => {
+    isPanelCollapsed.value = false
+    askUserRequest.value?.resolve?.({ answers: [], skipped: true })
+    const questions = Array.isArray(request?.questions) ? request.questions.slice(0, 3) : []
+    askUserAnswers.value = questions.map(() => '')
+    askUserRequest.value = { context: request?.context, questions, resolve }
+    scrollToBottom()
+  })
+
+const settleAskUser = (answers, skipped = false) => {
+  const pending = askUserRequest.value
+  if (!pending) return
+  askUserRequest.value = null
+  const payload = (pending.questions || []).map((item, index) => ({
+    question: item.question,
+    answer: String((answers || [])[index] ?? '').trim(),
+  }))
+  pending.resolve(skipped ? { answers: [], skipped: true } : { answers: payload })
+  askUserAnswers.value = []
+}
+
 const agentBridge = useCanvasAgentBridge({
   // 把「确认」这项能力叠在页面注入的画布操作之上：画布上下文由 workflow 页提供，
   // 而确认卡片属于这个面板的 UI，两者在这里合体。
@@ -442,6 +476,7 @@ const agentBridge = useCanvasAgentBridge({
     ? {
         ...props.agentContext,
         requestConfirmation,
+        askUser,
         // 参考图只有面板知道（用户是在这里上传的），节点操作只有画布页知道，
         // 两边各出一半，工具层在中间把它们拼起来
         referenceImages: () => turnReferenceImages.value,
@@ -612,6 +647,7 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   } finally {
     // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
     if (confirmRequest.value) settleConfirm(false)
+    if (askUserRequest.value) settleAskUser([], true)
     // 主动关掉本轮的事件流：正常终止订阅本身会返回，但异常/提前返回时不能把连接留在服务端
     try { streamController?.abort() } catch { /* 已结束 */ }
     // 释放画布锁（成功/失败都要放，否则用户会被自己的锁挡在外面）
@@ -985,6 +1021,37 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         <div class="agent-confirm-card__actions">
           <button type="button" class="agent-confirm-card__btn is-reject" @click="settleConfirm(false)">拒绝</button>
           <button type="button" class="agent-confirm-card__btn is-approve" @click="settleConfirm(true)">同意并继续</button>
+        </div>
+      </div>
+
+      <!-- 关键信息不足：Agent 在同一轮里等用户回答（与确认卡并列，样式沿用同一套类名） -->
+      <div v-if="askUserRequest" class="agent-ask-card">
+        <div class="agent-ask-card__head">
+          <span class="agent-ask-card__title">需要你补充一点信息</span>
+        </div>
+        <div v-if="askUserRequest.context" class="agent-ask-card__context">{{ askUserRequest.context }}</div>
+        <div v-for="(item, index) in askUserRequest.questions" :key="index" class="agent-ask-card__q">
+          <div class="agent-ask-card__question">{{ item.question }}</div>
+          <div v-if="item.options?.length" class="agent-ask-card__options">
+            <button
+              v-for="(option, oi) in item.options"
+              :key="oi"
+              type="button"
+              :class="['agent-ask-card__option', { 'is-active': askUserAnswers[index] === option }]"
+              @click="askUserAnswers[index] = option"
+            >{{ option }}</button>
+          </div>
+          <input
+            v-model="askUserAnswers[index]"
+            class="agent-ask-card__input"
+            type="text"
+            placeholder="也可以直接输入你的答案"
+            @keydown.enter.stop.prevent="settleAskUser(askUserAnswers)"
+          />
+        </div>
+        <div class="agent-ask-card__actions">
+          <button type="button" class="agent-ask-card__btn is-skip" @click="settleAskUser([], true)">跳过</button>
+          <button type="button" class="agent-ask-card__btn is-submit" @click="settleAskUser(askUserAnswers)">提交</button>
         </div>
       </div>
 
@@ -1383,6 +1450,64 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   color: #fff;
 }
 .agent-confirm-card__btn.is-approve:hover { background: #4338ca; }
+/* 提问卡：与确认卡同一套定位/配色（关键信息不足时在同一轮里问，卡片同样不能消失在屏幕外） */
+.agent-ask-card {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 160px;
+  z-index: 20;
+  max-height: 46%;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
+}
+.agent-ask-card__head { margin-bottom: 6px; }
+.agent-ask-card__title { font-size: 13px; font-weight: 700; color: #312e81; }
+.agent-ask-card__context { font-size: 12px; line-height: 1.6; color: #3730a3; }
+.agent-ask-card__q { margin-top: 10px; }
+.agent-ask-card__question { font-size: 12px; font-weight: 600; color: #334155; }
+.agent-ask-card__options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.agent-ask-card__option {
+  padding: 4px 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 999px;
+  background: #fff;
+  color: #4338ca;
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-ask-card__option.is-active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+.agent-ask-card__input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  font-size: 12px;
+  background: #fff;
+  color: #334155;
+}
+.agent-ask-card__input:focus { outline: none; border-color: #6366f1; }
+.agent-ask-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.agent-ask-card__btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.agent-ask-card__btn.is-skip { background: #fff; border-color: #cbd5e1; color: #475569; }
+.agent-ask-card__btn.is-submit { background: #4f46e5; color: #fff; }
+.agent-ask-card__btn.is-submit:hover { background: #4338ca; }
 /* AI 图片加载/错误态 */
 .ai-images-loading {
   align-items: center;

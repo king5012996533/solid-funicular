@@ -194,7 +194,8 @@ await check('没有历史时也把「本轮执行要求」附上（实测缺了�
   const result = buildPromptWithHistory('干个活', null)
   assert(result.startsWith('干个活'), `用户的要求要原样在最前面，实际：${result.slice(0, 40)}`)
   assert(result.includes('【本轮执行要求】'), '要贴上执行要求')
-  assert(result.includes('不要中途收尾汇报'), '执行要求要说清「别中途收尾」')
+  assert(result.includes('不要中途停下来汇报'), '执行要求要说清「别中途收尾」')
+  assert(result.includes('ask_user'), '执行要求要写清「猜不出来的信息用 ask_user 问」')
 })
 
 await check('有历史时贴成背景，并标明「用户现在的要求」', () => {
