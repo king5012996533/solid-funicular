@@ -151,9 +151,14 @@ export interface CanvasAgentContext {
   referenceImages?: () => string[];
   /**
    * 把参考图写到某个图片节点上。由画布页实现（只有它拿得到节点）。
-   * 返回 false 表示节点不存在。
+   *
+   * images 里既可以是图片地址，也可以是**节点 id**（画布页会把 id 解析成该节点已生成的那张图）；
+   * 返回 ok:false 时 reason 说明哪一项没用上。
    */
-  attachReferenceImages?: (id: string, images: string[]) => boolean;
+  attachReferenceImages?: (
+    id: string,
+    images: string[],
+  ) => { ok: boolean; reason?: string };
   /**
    * 向用户要一个确认（半自动闸门）。
    *
@@ -386,6 +391,15 @@ export const executeCanvasAgentTool = async (
           size: node.size || undefined,
           quality: node.quality || undefined,
           status: node.status || undefined,
+          /**
+           * 已经有出图结果 / 已经挂了参考图 —— 这两项是模型判断「这个节点还需不需要跑」的唯一依据。
+           *
+           * 之前快照只给 status，而「跑完但没报错」的节点 status 跟「从没跑过」完全一样（都是空），
+           * 模型据此误判为没跑，对同一批母版补跑了一次 run_node（实测：三张母版各建了两张单）。
+           * 把「有没有图」显式给出来，它才有证据不去重复执行。
+           */
+          hasImage: Boolean(node.imageUrl),
+          referenceImageCount: Array.isArray(node.referenceImages) ? node.referenceImages.length : 0,
         })),
         edges,
         selectedNodeIds: selected,
@@ -568,7 +582,8 @@ export const executeCanvasAgentTool = async (
       };
     }
     case "run_nodes": {
-      const ids = (Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean);
+      // 去重：同一个 id 在参数里出现多次只执行一次（模型偶尔会把同一个节点写两遍）
+      const ids = [...new Set((Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
       if (!ids.length) return fail("ids 不能为空");
       if (ids.length > MAX_BATCH_RUNS) {
         return fail(`一次最多执行 ${MAX_BATCH_RUNS} 个节点（收到 ${ids.length} 个），分批来。`);
@@ -700,13 +715,16 @@ export const executeCanvasAgentTool = async (
       if (!ctx.attachReferenceImages) {
         return fail("当前环境不支持把参考图挂到节点上");
       }
-      if (!ctx.attachReferenceImages(id, images)) {
-        return fail(`挂参考图失败：找不到节点 ${id}`);
+      const attached = ctx.attachReferenceImages(id, images);
+      if (!attached.ok) {
+        return fail(`挂参考图失败：${attached.reason || "找不到节点 " + id}`);
       }
       return {
         ok: true,
-        result: JSON.stringify({ id, referenceImageCount: images.length }),
-        summary: `给节点 ${id} 挂了 ${images.length} 张参考图（执行该节点会走图生图）`,
+        result: JSON.stringify({ id, referenceImageCount: images.length, note: attached.reason || undefined }),
+        summary: attached.reason
+          ? `给节点 ${id} 挂了参考图：${attached.reason}`
+          : `给节点 ${id} 挂了 ${images.length} 张参考图（执行该节点会走图生图）`,
       };
     }
     case "run_node": {

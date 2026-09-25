@@ -467,6 +467,13 @@ const agentBridge = useCanvasAgentBridge({
  * 回退用的是同一个模型，只会把同一句错误再报一遍。
  */
 const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
+  /**
+   * 本轮的订阅控制器提到 try 外面，好让 finally 一定能把它 abort 掉。
+   *
+   * 服务端不会在任务终态时结束 SSE，不主动关就留下一条长连接一直占着「用户级实时订阅」额度
+   * （每轮一条，攒到 20 就全线 429，「订阅任务状态失败 (429)」就是这么冒出来的）。
+   */
+  let streamController = null
   try {
     // 用用户在面板上选的那个模型（没选过就是全站默认），不再写死「默认对话模型」
     const preferredKey = String(selectedModelKey.value || getAgentModel() || getDefaultChatModelKey() || '').trim()
@@ -545,6 +552,7 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
     if (!taskId) throw new Error('Agent 任务创建失败')
 
     const controller = new AbortController()
+    streamController = controller
     registerStream(controller)
 
     await subscribeGenerationTaskEvents(taskId, {
@@ -604,6 +612,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   } finally {
     // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
     if (confirmRequest.value) settleConfirm(false)
+    // 主动关掉本轮的事件流：正常终止订阅本身会返回，但异常/提前返回时不能把连接留在服务端
+    try { streamController?.abort() } catch { /* 已结束 */ }
     // 释放画布锁（成功/失败都要放，否则用户会被自己的锁挡在外面）
     await props.agentContext?.endPipelineRun?.()
   }

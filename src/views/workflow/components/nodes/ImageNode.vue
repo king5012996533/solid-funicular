@@ -608,6 +608,20 @@ const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
           : {}),
       })
       isGenerating.value = false
+    } else if (event.done && event.type === 'completed') {
+      // 完成了却一张图都没有：不能留个永远转圈的节点，按同一个口径落可重试的失败态
+      failRun('生成任务已结束但没有产出图片，可以重试')
+      return
+    }
+    /**
+     * 任务已经结束就把本次订阅主动关掉。
+     *
+     * 服务端不会在任务终态时结束这条 SSE（它只发事件），不主动 abort 的话这条长连接会一直挂到
+     * 服务端的寿命上限 —— 每个节点占一个「用户级实时订阅」额度，攒到 20 就全线 429。
+     * 只在 done 时才 abort：运行中的 snapshot（event.done=false）不能掐，否则订阅会立刻断。
+     */
+    if (event.done) {
+      taskStreamController.value?.abort()
     }
     return
   }
@@ -792,6 +806,15 @@ const runOnceForAgent = async () => {
     resolution: String(props.data?.quality || '') || undefined,
     count: 1,
   })
+  /**
+   * 失败要如实抛出。
+   *
+   * runGeneration 把异常收敛成了节点上的错误态（failRun），自己不再抛 —— 于是 run_node 会拿到
+   * ok:true，把「提交了但很快就失败」当成「已触发」报给用户（实测一整批 8 张就是这个表现）。
+   * 提交时已把节点 error 清空，跑完还留着 error 就一定是这一轮的失败原因。
+   */
+  const failure = String(props.data?.error || '').trim()
+  if (failure) throw new Error(failure)
 }
 
 onMounted(() => {

@@ -103,6 +103,9 @@ export const emitLocalTaskStreamEvent = (recordId: string, event: GenerationTask
   // 写入 SSE 标准 id 字段，让客户端跟踪 lastEventId 用于断线重连定位
   const idLine = event.id !== undefined ? `id: ${event.id}\n` : ''
   const payload = `${idLine}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+  // 写入失败（连接已断）与缓冲已满一样，都走「主动断开」这条路径：
+  // 调 res.end() 触发订阅侧的 close 处理器统一退订。只在本地集合里 delete、不 end()，
+  // 会让用户级计数（userStreamSubscribers）永远留下这一项 —— 是「攒到 20 就 429」的成因之一。
   const slowSubscribers: any[] = []
   for (const res of subscribers) {
     try {
@@ -112,7 +115,7 @@ export const emitLocalTaskStreamEvent = (recordId: string, event: GenerationTask
         slowSubscribers.push(res)
       }
     } catch {
-      subscribers.delete(res)
+      slowSubscribers.push(res)
     }
   }
 

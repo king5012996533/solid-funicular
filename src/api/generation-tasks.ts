@@ -219,6 +219,29 @@ const RETRY_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
 const WATCHDOG_TIMEOUT_MS = 30000;
 const WATCHDOG_CHECK_INTERVAL_MS = 5000;
 
+/**
+ * 429（当前用户实时订阅已达上限）的专用错误。
+ *
+ * 与「任务不存在 / 鉴权失败」这类永久性 4xx 区别对待：它多半是别的页面还挂着连接，
+ * 退避后重连通常就能接上，所以走可重试分支；重试仍失败才提示用户。
+ */
+class SubscriptionCapacityError extends Error {}
+
+const readErrorMessageFromBody = async (response: Response): Promise<string> => {
+  try {
+    const text = (await response.text()).trim();
+    if (!text) return "";
+    try {
+      const parsed = JSON.parse(text) as { message?: unknown };
+      return typeof parsed?.message === "string" ? parsed.message.trim() : "";
+    } catch {
+      return text;
+    }
+  } catch {
+    return "";
+  }
+};
+
 export const subscribeGenerationTaskEvents = async (
   taskId: string,
   options: RequestOptions & {
@@ -230,6 +253,8 @@ export const subscribeGenerationTaskEvents = async (
   let terminated = false;
   // 跟踪最后一个收到事件的 id，重连时传给服务端用于重放遗漏事件
   let lastEventId = 0;
+  // 最近一次「订阅额度已满」的错误：重试都失败时用它拼一条可读提示
+  let lastCapacityError: SubscriptionCapacityError | null = null;
 
   while (!terminated) {
     if (externalSignal?.aborted) return;
@@ -262,6 +287,14 @@ export const subscribeGenerationTaskEvents = async (
       });
 
       if (!response.ok) {
+        if (response.status === 429) {
+          // 用户级实时订阅已满：当作可重试（多数是别的页面/Tab 还挂着连接，稍等就腾出来了），
+          // 文案取服务端给的那句中文，别再抛「订阅任务状态失败 (429)」这种读不懂的。
+          const detail = await readErrorMessageFromBody(response);
+          throw new SubscriptionCapacityError(
+            detail || "当前实时订阅数量已达上限，请关闭部分页面后重试",
+          );
+        }
         // HTTP 4xx/5xx 不重试（鉴权失败 / 任务不存在等永久错误）
         throw new Error(`订阅任务状态失败 (${response.status})`);
       }
@@ -305,9 +338,14 @@ export const subscribeGenerationTaskEvents = async (
       if (externalSignal?.aborted) return;
       // 已经收到终止事件后再抛错也直接退出
       if (terminated) return;
-      // 永久性 HTTP 错误（4xx/5xx response.ok=false）不重试
-      const message = error instanceof Error ? error.message : "";
-      if (/订阅任务状态失败 \(4\d{2}\)/.test(message)) throw error;
+      if (error instanceof SubscriptionCapacityError) {
+        // 订阅额度暂时满了：记住它，走下面的退避重连，别立刻失败
+        lastCapacityError = error;
+      } else {
+        // 永久性 HTTP 错误（4xx/5xx response.ok=false）不重试
+        const message = error instanceof Error ? error.message : "";
+        if (/订阅任务状态失败 \(4\d{2}\)/.test(message)) throw error;
+      }
     } finally {
       clearInterval(watchdogTimer);
       externalSignal?.removeEventListener("abort", onExternalAbort);
@@ -317,6 +355,10 @@ export const subscribeGenerationTaskEvents = async (
 
     // 退避后重连
     if (attempt >= RETRY_DELAYS_MS.length) {
+      // 额度类错误重试到底仍然失败：给出人能看懂、能照做的提示，而不是原始状态码
+      if (lastCapacityError) {
+        throw new Error(`${lastCapacityError.message}（已自动重试 ${attempt} 次仍未成功）`);
+      }
       throw new Error("订阅任务状态失败：超过最大重试次数");
     }
     const delay = RETRY_DELAYS_MS[attempt];

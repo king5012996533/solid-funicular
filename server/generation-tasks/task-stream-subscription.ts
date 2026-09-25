@@ -86,7 +86,37 @@ export const subscribeGenerationTaskStream = async (
   }
 
   addTaskStreamSubscriber(recordId, res, currentUserId)
+
+  // 心跳与寿命计时器只在「任务仍在跑」的分支里真正启动
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let lifetimeTimer: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * 统一退订。**必须在任何 write / 提前返回之前注册好**。
+   *
+   * 早先 cleanup 挂在「任务已完成就 res.end() 并 return」那条路径之后，于是每订阅一次
+   * 已经结束的任务，连接虽然结束了、全局订阅表里的那一项却永远留着 —— 用户级订阅额度
+   * 每这样漏一次就永久少一个，攒到上限（20）后所有订阅一律 429。页面加载补订阅、
+   * 断线重连撞上刚结束的任务，都会走到这条路径。
+   */
+  const cleanup = () => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    if (lifetimeTimer) clearTimeout(lifetimeTimer)
+    removeTaskStreamSubscriber(recordId, res, currentUserId)
+    void cleanupDistributedTaskSubscriptionIfIdle(recordId)
+  }
+
+  res.on('close', cleanup)
+  res.on('error', cleanup)
+
   await ensureDistributedTaskSubscription(recordId)
+
+  // 等待期间客户端就断开了：close 可能已经跑过，这里补一次收口并直接退出，
+  // 免得刚建好的分布式订阅挂在一个已经没人听的 recordId 上。
+  if (res.writableEnded === true || res.destroyed === true) {
+    cleanup()
+    return
+  }
 
   res.write(`event: connected\ndata: ${JSON.stringify({
     type: 'connected',
@@ -125,7 +155,7 @@ export const subscribeGenerationTaskStream = async (
     return
   }
 
-  const heartbeatTimer = setInterval(() => {
+  heartbeatTimer = setInterval(() => {
     try {
       // 显式心跳事件，前端可监听并实现 watchdog；保留 SSE 注释行作 TCP 层 keep-alive 兜底
       res.write(`event: ping\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`)
@@ -135,21 +165,11 @@ export const subscribeGenerationTaskStream = async (
   }, 15000)
 
   // 最长生命周期兜底：到期强制关闭，防 TCP 半开连接导致的资源泄漏
-  const lifetimeTimer = setTimeout(() => {
+  lifetimeTimer = setTimeout(() => {
     try {
       res.end()
     } catch {
       // 已断开
     }
   }, SSE_MAX_CONNECTION_MS)
-
-  const cleanup = () => {
-    clearInterval(heartbeatTimer)
-    clearTimeout(lifetimeTimer)
-    removeTaskStreamSubscriber(recordId, res, currentUserId)
-    void cleanupDistributedTaskSubscriptionIfIdle(recordId)
-  }
-
-  res.on('close', cleanup)
-  res.on('error', cleanup)
 }

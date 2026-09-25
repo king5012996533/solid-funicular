@@ -16,6 +16,25 @@ const runners = new Map<string, () => Promise<void> | void>();
 /** 供 UI 判断「这个节点现在能不能被执行」，变化时响应式更新 */
 export const runnerNodeIds = ref<string[]>([]);
 
+/** 正在执行中的节点：同一次生成被重复触发时直接拒绝，避免重复建单、重复扣费 */
+const runningNodeIds = new Set<string>();
+/**
+ * 本轮（一次 Agent 任务）已经成功触发过执行的节点。
+ *
+ * 为什么需要「本轮」这个粒度：实测同一个 30 秒广告会话里，三张母版各被提交了两次 ——
+ * 模型先用 run_nodes 批量跑，随后从 get_canvas_state 看不到「已经跑过 / 已经有图」的证据，
+ * 以为没跑，又对同一节点补了 run_node；两条路径各提交一次，同一句提示词就建了两张单。
+ * 这里把「同一节点本轮只允许成功触发一次」钉死在唯一入口（runNodeById）上：
+ * 这样批量与单个两条路径互相去重，任一先到即占位。失败的下一次仍允许重试。
+ */
+const triggeredNodeIds = new Set<string>();
+
+/** 一轮 Agent 开始前清空去重状态（面板在每轮开跑前调用）。 */
+export const beginAgentRunRound = () => {
+  runningNodeIds.clear();
+  triggeredNodeIds.clear();
+};
+
 export const registerNodeRunner = (
   nodeId: string,
   run: () => Promise<void> | void,
@@ -39,15 +58,32 @@ export const hasNodeRunner = (nodeId: string) => runners.has(nodeId);
 export const runNodeById = async (
   nodeId: string,
 ): Promise<{ ok: boolean; reason?: string }> => {
+  // 去重闸门：同一节点「正在跑」或「本轮已经成功跑过」都只允许触发一次。
+  // 放在这里而不是工具层：批量 run_nodes 与单个 run_node 都汇到这一个入口，
+  // 谁先到谁占位，另一条路径拿到明确的失败原因（而不是静默再扣一次费）。
+  if (runningNodeIds.has(nodeId)) {
+    return { ok: false, reason: "该节点正在生成中，已忽略这次重复执行" };
+  }
+  if (triggeredNodeIds.has(nodeId)) {
+    return {
+      ok: false,
+      reason: "本轮已经触发过该节点（重复执行会重复扣费），已忽略；要重新生成请新开一轮",
+    };
+  }
   const runner = runners.get(nodeId);
   if (!runner) return { ok: false, reason: "该节点未挂载或暂不支持直接执行" };
+  runningNodeIds.add(nodeId);
   try {
     await runner();
+    triggeredNodeIds.add(nodeId);
     return { ok: true };
   } catch (error) {
+    // 失败不占位：本轮内仍允许对同一节点重试。
     return {
       ok: false,
       reason: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    runningNodeIds.delete(nodeId);
   }
 };

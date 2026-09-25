@@ -64,7 +64,8 @@ import {
 } from './config/node-suggestions'
 import type { GraphNode } from '@vue-flow/core'
 import type { CanvasAgentContext } from './agent/canvas-agent-tools'
-import { runNodeById } from './composables/useCanvasNodeRunner'
+import { runNodeById, beginAgentRunRound } from './composables/useCanvasNodeRunner'
+import { resolveAttachedReferences } from './composables/resolveAttachedReferences'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
 import { resolveModelSelectionKey, getAllImageModels, getAllVideoModels, getAllChatModels } from '@/config/models'
 
@@ -1482,6 +1483,8 @@ const canvasAgentContext: CanvasAgentContext = {
    * 面板负责「什么时候开始/结束」，画布页负责「锁与保存怎么配合」。
    */
   beginPipelineRun: async (label?: string) => {
+    // 新一轮开始：清空上一轮的「已完成触发」去重状态，让本轮可以重新执行节点。
+    beginAgentRunRound()
     const workflowId = currentWorkflowId.value
     if (!workflowId) return { ok: false, reason: 'no_workflow' as const }
     try {
@@ -1548,10 +1551,32 @@ const canvasAgentContext: CanvasAgentContext = {
    */
   attachReferenceImages: (id, images) => {
     const target = nodes.value.find((node) => node.id === id)
-    if (!target) return false
-    if (target.type !== 'image') return false
-    updateNode(id, { referenceImages: [...images] })
-    return true
+    if (!target) return { ok: false, reason: `找不到节点 ${id}` }
+    if (target.type !== 'image') return { ok: false, reason: `节点 ${id} 不是图片节点，不能挂参考图` }
+
+    /**
+     * 解析每一项：模型给「节点 id」时取该节点**已经生成的那张图**，给「图片地址」时原样保留。
+     *
+     * 为什么必须解析 id：实测模型会写 attach_reference_images({id:"node_9", images:["node_1","node_2"]}) ——
+     * 它想引用的显然是一号/二号母版出图，交上来的却是节点 id。这些 id 既不是 URL 也没有扩展名，
+     * 会一路穿到服务端，在 `new URL("node_2")` 上抛 "Failed to parse URL from node_2"，
+     * 一整批分镜图就这么全废了（实测 8 条集中失败）。规则在 resolveAttachedReferences 里。
+     */
+    const { resolved, unresolved } = resolveAttachedReferences(images, (nodeId) => {
+      const hit = nodes.value.find((node) => node.id === nodeId)
+      return {
+        exists: Boolean(hit),
+        imageUrl: String((hit?.data as { url?: string })?.url || '').trim(),
+      }
+    })
+
+    if (!resolved.length) {
+      return { ok: false, reason: `没有可用的参考图：${unresolved.join('；') || 'images 为空'}` }
+    }
+    updateNode(id, { referenceImages: [...resolved] })
+    return unresolved.length
+      ? { ok: true, reason: `已挂 ${resolved.length} 张，忽略了 ${unresolved.length} 项：${unresolved.join('；')}` }
+      : { ok: true }
   },
   applyTemplate: (templateId, position) => {
     const template = WORKFLOW_TEMPLATES.find((item) => item.id === templateId)

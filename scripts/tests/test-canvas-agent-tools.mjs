@@ -18,6 +18,7 @@ import {
     executeCanvasAgentTool,
 } from '../../src/views/workflow/agent/canvas-agent-tools.ts'
 import { CANVAS_AGENT_TOOL_DEFINITIONS } from '../../src/shared/canvas-agent-tools.ts'
+import { resolveAttachedReferences } from '../../src/views/workflow/composables/resolveAttachedReferences.ts'
 
 let passed = 0
 let failed = 0
@@ -78,6 +79,18 @@ const createFakeContext = () => {
             return true
         },
         selectNodes: (ids) => { state.selected = [...ids] },
+        // 与画布页同源：把节点 id 解析成该节点的出图地址（8 张分镜图全废就是因为这里没做）
+        attachReferenceImages: (id, images) => {
+            const hit = state.nodes.find((node) => node.id === id)
+            if (!hit) return { ok: false, reason: `找不到节点 ${id}` }
+            const { resolved, unresolved } = resolveAttachedReferences(images, (nodeId) => {
+                const node = state.nodes.find((item) => item.id === nodeId)
+                return { exists: Boolean(node), imageUrl: String(node?.imageUrl || '') }
+            })
+            if (!resolved.length) return { ok: false, reason: `没有可用的参考图：${unresolved.join('；') || 'images 为空'}` }
+            hit.referenceImages = [...resolved]
+            return unresolved.length ? { ok: true, reason: `忽略了 ${unresolved.length} 项` } : { ok: true }
+        },
         runNode: async (id) => {
             const hit = state.nodes.find((node) => node.id === id)
             if (!hit) return { ok: false, reason: '节点不存在' }
@@ -242,6 +255,43 @@ await (async () => {
     assert(Array.isArray(parsed.availableNodeTypes) && parsed.availableNodeTypes.length > 0, '快照应带上可用节点类型，否则模型会瞎猜')
     passed += 1
     console.log('  ok   快照含定位字段、长文本已截断')
+})()
+
+console.log('== 快照必须让模型看出「节点已经出过图」（否则它会重复执行、重复扣费）==')
+await (async () => {
+    const { ctx } = createFakeContext()
+    const created = await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1：28 岁亚洲女性' })
+    const id = JSON.parse(created.result).id
+    ctx.updateNode(id, { imageUrl: '/uploads/generated/image/m1.png' })
+    const snap = await run(ctx, 'get_canvas_state', {})
+    const node = JSON.parse(snap.result).nodes[0]
+    assert(node.hasImage === true, '快照必须给 hasImage，否则「跑完的节点」和「从没跑过的节点」长得一样，模型会补跑一次')
+    passed += 1
+    console.log('  ok   快照带 hasImage')
+})()
+
+console.log('== attach_reference_images：把节点 id 翻译成出图地址 ==')
+await (async () => {
+    const { ctx, state } = createFakeContext()
+    const master = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1' })).result).id
+    ctx.updateNode(master, { imageUrl: '/uploads/generated/image/m1.png' })
+    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01' })).result).id
+    const attached = await run(ctx, 'attach_reference_images', { id: shot, images: [master] })
+    assert(attached.ok, `用节点 id 挂参考图应成功：${attached.summary}`)
+    const shotNode = state.nodes.find((node) => node.id === shot)
+    assert(shotNode.referenceImages?.length === 1, '参考图应挂上 1 张')
+    assert(
+        shotNode.referenceImages[0] === '/uploads/generated/image/m1.png',
+        `挂上的应是出图地址，而不是节点 id（否则服务端会 new URL("node_x") 抛错）：${shotNode.referenceImages[0]}`,
+    )
+
+    // 未出图的节点 id + 乱写的字符串：都应被如实挑出，而不是塞进节点导致服务端失败
+    const empty = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '空节点' })).result).id
+    const bad = await run(ctx, 'attach_reference_images', { id: shot, images: [empty, 'node_2'] })
+    assert(!bad.ok, '全是无效引用时应失败')
+    assert(bad.result.includes('还没有出图') && bad.result.includes('node_2'), `失败原因要逐项说清：${bad.result}`)
+    passed += 1
+    console.log('  ok   节点 id → 出图地址；无效引用逐项挑出')
 })()
 
 console.log('== 预校验：余额/预估接入（充足 / 不足 / 降级）==')

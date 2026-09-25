@@ -84,7 +84,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "get_canvas_state",
     label: "读取画布",
     description:
-      "读取当前画布：节点清单（id / 类型 / 提示词 / 模型 / 状态）、连线、当前选中的节点。动手改画布之前先调用它。",
+      "读取当前画布：节点清单（id / 类型 / 提示词 / 模型 / 状态 / 是否已有出图 hasImage）、连线、当前选中的节点。动手改画布之前先调用它。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再调 run_node/run_nodes。",
     parameters: { type: "object", properties: {}, required: [] },
     requiresClient: true,
   },
@@ -212,7 +212,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "run_nodes",
     label: "批量执行节点",
     description:
-      "依次执行多个节点（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。会消耗积分，调用前必须先取得用户确认。",
+      "依次执行多个节点（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。会消耗积分，调用前必须先取得用户确认。同一个节点在同一轮里只会真正执行一次：重复提交会被忽略并告知原因，不要靠反复调用它来「等结果」。",
     parameters: {
       type: "object",
       properties: {
@@ -298,7 +298,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "attach_reference_images",
     label: "挂参考图",
     description:
-      "把参考图挂到某个图片节点上：挂上之后执行该节点会用这些图做参考（图生图）。默认用用户本轮上传的参考图；也可以显式给 images（图片地址）以引用别的素材。节点上已有参考图时会被替换。",
+      "把参考图挂到某个图片节点上：挂上之后执行该节点会用这些图做参考（图生图）。默认用用户本轮上传的参考图；也可以显式给 images 引用别的素材 —— images 里每一项既可以是图片地址，也可以是**已有出图的节点 id**（例如想把母版节点 node_1 的成图挂到分镜节点上，就写 node_1，不要写提示词或别的东西）。节点上已有参考图时会被替换。",
     parameters: {
       type: "object",
       properties: {
@@ -306,7 +306,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
         images: {
           type: "array",
           items: { type: "string" },
-          description: "要挂的图片地址（可选；不填则用用户本轮上传的参考图）",
+          description: "要挂的参考图：图片地址，或已有出图的节点 id（可选；不填则用用户本轮上传的参考图）",
         },
       },
       required: ["id"],
@@ -317,7 +317,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "run_node",
     label: "执行节点",
     description:
-      "执行某个节点（图片节点会真的去生成；视频节点当前服务端已接通但仍在验证中）。耗时较长，执行后如实告知结果。",
+      "执行某个节点（图片节点会真的去生成；视频节点当前服务端已接通但仍在验证中）。耗时较长，执行后如实告知结果。同一个节点在同一轮里只会真正执行一次：重复提交会被忽略并告知原因（不会重复扣费），不要靠反复调用它来「等结果」，等待请用 get_canvas_state 看状态。",
     parameters: {
       type: "object",
       properties: { id: { type: "string" } },

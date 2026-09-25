@@ -137,6 +137,18 @@ const resolveServerReferenceImageBlob = async (imageValue: string) => {
     return new Blob([fileBuffer], { type: mimeType })
   }
 
+  /**
+   * 不是站内路径、也不像地址的值在这里就拦下，并说清哪里不对。
+   *
+   * 直接交给 fetch 会抛 `TypeError: Failed to parse URL from node_2` —— 这句话进到生成记录里，
+   * 用户和模型都看不出「参考图传的是节点 id 而不是图片地址」（实测一整批 8 张分镜图就这么全废了）。
+   */
+  if (!/^https?:\/\//i.test(normalizedValue) && !normalizedValue.startsWith('/')) {
+    throw new Error(
+      `参考图地址无效：「${normalizedValue}」既不是图片地址也不是站内路径。引用别的节点出图请传该图的地址，不要传节点 id。`,
+    )
+  }
+
   const response = await fetch(normalizedValue)
   if (!response.ok) {
     throw new Error(`参考图读取失败 (${response.status})`)
