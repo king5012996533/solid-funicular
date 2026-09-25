@@ -469,8 +469,20 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
 
     // 占住画布：这一轮里只有我们自己（带 token）的保存能写进去，外部改动会被 409 拦下
     const lockResult = await props.agentContext?.beginPipelineRun?.('制片 Agent 本轮')
-    if (lockResult && !lockResult.ok && lockResult.reason === 'locked') {
-      aiMsg.error = lockResult.message || '这块画布正在被另一个流水线执行占用，请等它结束或先停止它。'
+    if (lockResult && !lockResult.ok && lockResult.reason !== 'no_workflow') {
+      if (lockResult.reason === 'locked') {
+        /**
+         * 画布被占用**不该是死胡同**：任务早跑完但锁没被正常放掉时，用户会被自己的锁挡住。
+         * 记下这一轮的输入并给出「强制释放并重试」入口 —— 服务端只放同一用户持有的锁。
+         */
+        aiMsg.error = lockResult.message || '这块画布正在被另一个流水线执行占用；如确认没有 Agent 在跑，可点下方按钮强制释放并重试。'
+        aiMsg.lockConflict = true
+        aiMsg.retryPrompt = prompt
+        aiMsg.retryRefImages = Array.isArray(referenceImages) ? [...referenceImages] : []
+      } else {
+        // 取锁失败（网络/鉴权等）：不带着「无锁」状态跑 Agent，如实报错让用户重试
+        aiMsg.error = lockResult.message || '取画布锁失败，请稍后重试'
+      }
       aiMsg.loading = false
       return true
     }
@@ -505,6 +517,15 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
             role: item.type === 'user' ? 'user' : 'assistant',
             content: String(item.content || ''),
           })),
+        /**
+         * 这一轮占住的画布锁（workflowId + token）。
+         *
+         * 服务端建单时把它绑定到任务上，任务到达任何终态都由服务端释放 —— 锁不该比任务活得久。
+         * 客户端 endPipelineRun 仍保留（正常路径及时释放），但不再是唯一出路。
+         */
+        pipelineLock: lockResult?.ok && lockResult.workflowId && lockResult.pipelineToken
+          ? { workflowId: lockResult.workflowId, token: lockResult.pipelineToken }
+          : undefined,
       },
     })
 
@@ -580,6 +601,34 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
 
 // 发送消息：面板只有一条路 —— 交给 Agent
 const runningAgent = computed(() => messages.value.some((msg) => msg.type === 'ai-text' && msg.loading))
+
+/**
+ * 强制释放画布锁，然后重试这一轮。
+ *
+ * 用在 beginPipelineRun 返回 locked 时：用户看到可操作的按钮，而不是干等 TTL。
+ * 服务端只放同一用户持有的锁，因此不会误伤别人的并发保护。
+ */
+const forceUnlockAndRetry = async (aiMsg) => {
+  if (!aiMsg || aiMsg.forceUnlocking) return
+  aiMsg.forceUnlocking = true
+  try {
+    const result = await props.agentContext?.forceReleasePipelineRun?.()
+    if (!result?.ok) {
+      aiMsg.error = result?.message || '强制释放失败，请稍后再试'
+      return
+    }
+    aiMsg.error = ''
+    aiMsg.lockConflict = false
+    // 重新起一轮：锁已释放，同样的输入直接再来一次
+    if (aiMsg.retryPrompt) {
+      aiMsg.loading = true
+      scrollToBottom()
+      await runCanvasAgentTurn(aiMsg.retryPrompt, aiMsg, aiMsg.retryRefImages || [])
+    }
+  } finally {
+    aiMsg.forceUnlocking = false
+  }
+}
 
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
@@ -837,6 +886,16 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
                 <span class="ai-text-dot" />
               </div>
               <div v-if="msg.error" class="ai-text-error">{{ msg.error }}</div>
+              <!-- 画布被占用时的自救入口：确认没有 Agent 在跑就强制释放自己那把锁，并重试这一轮 -->
+              <button
+                v-if="msg.lockConflict && !msg.loading"
+                type="button"
+                class="ai-text-force-unlock"
+                :disabled="msg.forceUnlocking"
+                @click="forceUnlockAndRetry(msg)"
+              >
+                {{ msg.forceUnlocking ? '释放中…' : '强制释放并重试' }}
+              </button>
             </div>
           </div>
 
@@ -1369,6 +1428,20 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   color: #ef4444;
   font-size: 12px;
   margin-top: 6px;
+}
+.ai-text-force-unlock {
+  background: rgba(0, 202, 224, 0.12);
+  border: 1px solid rgba(0, 202, 224, 0.4);
+  border-radius: 6px;
+  color: #00cae0;
+  cursor: pointer;
+  font-size: 12px;
+  margin-top: 8px;
+  padding: 4px 10px;
+}
+.ai-text-force-unlock:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .ai-text-typing {
   align-items: center;

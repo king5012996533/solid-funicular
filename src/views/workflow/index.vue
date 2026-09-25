@@ -22,7 +22,7 @@ import {
 import { WORKFLOW_TEMPLATES } from './config/workflows'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
 import type { WorkflowDefinitionSummary } from './api/definitions'
-import { acquireWorkflowPipelineLock, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
+import { acquireWorkflowPipelineLock, forceReleaseWorkflowPipelineLock, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
 import type { WorkflowCanvasPosition } from './composables/workflow-orchestrator-types'
 
 // 节点组件
@@ -897,6 +897,29 @@ const schedulePipelineRetry = () => {
   }, 4000)
 }
 
+/**
+ * 强制释放「自己」画布上的锁（顶部状态条 / Agent 面板都走这里）。
+ *
+ * 孤儿锁场景：任务其实早跑完了，锁却没被正常放掉，用户被自己的锁挡着干等 TTL。
+ * 服务端只放 userId 匹配的那把，所以对别人的并发保护没有任何影响。
+ */
+const handleForceReleaseLock = async (): Promise<boolean> => {
+  const workflowId = currentWorkflowId.value
+  if (!workflowId) return false
+  try {
+    await forceReleaseWorkflowPipelineLock(workflowId)
+    pipelineToken.value = ''
+    pipelineSnapshotVersionId.value = ''
+    ElMessage.success('已强制释放画布锁')
+    // 锁放掉了，把之前被 409 拦下的那笔保存补写回去
+    void flushAutosave()
+    return true
+  } catch (error: any) {
+    ElMessage.error(error?.message || '强制释放失败')
+    return false
+  }
+}
+
 const flushAutosave = async () => {
   clearAutosaveTimer()
 
@@ -923,7 +946,7 @@ const flushAutosave = async () => {
        */
       if (error?.name === 'WorkflowCanvasLockedError') {
         autosaveState.value = 'locked'
-        autosaveErrorMessage.value = 'Agent 正在改这块画布，你的改动已暂存，等它这轮结束会自动保存'
+        autosaveErrorMessage.value = 'Agent 正在改这块画布，你的改动已暂存；等它这轮结束会自动保存。如确认没有 Agent 在跑，点右侧「强制释放」'
         schedulePipelineRetry()
         return
       }
@@ -1466,9 +1489,14 @@ const canvasAgentContext: CanvasAgentContext = {
       pipelineToken.value = lock.token
       pipelineSnapshotVersionId.value = lock.snapshotVersionId
       await flushAutosave()
-      return { ok: true as const, snapshotVersionId: lock.snapshotVersionId }
+      // 把 workflowId + token 一并交回面板：建 Agent 任务时带着它，服务端据此把锁绑到任务上、终态释放
+      return { ok: true as const, snapshotVersionId: lock.snapshotVersionId, workflowId, pipelineToken: lock.token }
     } catch (error: any) {
-      return { ok: false, reason: 'locked' as const, message: error?.message || '画布已被占用' }
+      // 只有「被占用」是可操作状态；其它错误（网络/鉴权）要如实分开，别一律叫 locked
+      if (error?.name === 'WorkflowCanvasLockedError') {
+        return { ok: false, reason: 'locked' as const, message: error?.message || '画布已被占用' }
+      }
+      return { ok: false, reason: 'error' as const, message: error?.message || '取画布锁失败' }
     }
   },
   endPipelineRun: async () => {
@@ -1479,11 +1507,21 @@ const canvasAgentContext: CanvasAgentContext = {
       try {
         await releaseWorkflowPipelineLock(workflowId, token)
       } catch {
-        // 释放失败不影响本轮结果：锁有 30 分钟 TTL 兜底，不会永久占着
+        // 释放失败不影响本轮结果：锁还有 TTL 兜底，且服务端在任务终态时也会放（见 releasePipelineLockForTask）
       }
     }
     // 锁一放掉，把本轮期间被拦下的编辑补写回去
     void flushAutosave()
+  },
+  /**
+   * 强制释放「自己」画布上的锁（B 的兜底）。
+   *
+   * 孤儿锁场景：任务其实早跑完了，锁却没被正常放掉，用户被自己的锁挡住干等 TTL。
+   * 服务端只放 userId 匹配的那把，所以这里释放它不会影响别人的并发保护。
+   */
+  forceReleasePipelineRun: async () => {
+    const ok = await handleForceReleaseLock()
+    return { ok, message: ok ? undefined : '强制释放失败：请确认当前画布已保存' }
   },
   runNode: (id) => runNodeById(id),
   /**
@@ -1806,6 +1844,15 @@ watch(canvasSnapshot, () => {
                 {{ currentWorkflowTitle }}
               </span>
               <span class="wf-header-meta__status">{{ currentWorkflowStatusText }} · {{ autosaveStatusText }}</span>
+              <!-- 孤儿锁自救入口：任务早跑完但锁没放掉时，不让用户干等 TTL -->
+              <button
+                v-if="autosaveState === 'locked'"
+                type="button"
+                class="wf-header-meta__force-unlock"
+                @click="handleForceReleaseLock"
+              >
+                强制释放
+              </button>
             </div>
           </div>
         </header>

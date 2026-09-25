@@ -111,8 +111,23 @@ export interface CanvasAgentContext {
    * 由助手面板在跑 Agent 前后调用：画布页据此取得「流水线锁」并留存快照，
    * 持锁期间只有本轮自己的保存能写进画布 —— 避免 Agent 手里的节点/参考图引用被外部改动顶掉。
    */
-  beginPipelineRun?: (label?: string) => Promise<{ ok: boolean; reason?: string; message?: string; snapshotVersionId?: string }>;
+  beginPipelineRun?: (label?: string) => Promise<{
+    ok: boolean;
+    reason?: string;
+    message?: string;
+    snapshotVersionId?: string;
+    /** 取到的锁属于哪块画布、token 是什么 —— 建 Agent 任务时一并回传，服务端据此把锁绑到任务上 */
+    workflowId?: string;
+    pipelineToken?: string;
+  }>;
   endPipelineRun?: () => Promise<void>;
+  /**
+   * 强制释放本画布上的锁（可选，同一用户自救）。
+   *
+   * 面板在「画布被占用」时给用户一个可操作入口，而不是让他干等 TTL：
+   * 任务早跑完但锁没被正常放掉时，用户自己被自己的锁挡住了。
+   */
+  forceReleasePipelineRun?: () => Promise<{ ok: boolean; message?: string }>;
   /** 执行某个节点（node 组件注册进来的 runGeneration） */
   runNode: (id: string) => Promise<{ ok: boolean; reason?: string }>;
   /**

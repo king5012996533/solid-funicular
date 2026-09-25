@@ -1,4 +1,4 @@
-import { acquirePipelineLock, releasePipelineLock } from './pipeline-lock'
+import { acquirePipelineLock, forceReleasePipelineLockForUser, releasePipelineLock } from './pipeline-lock'
 import { WorkflowLockedByPipelineError } from './service'
 import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
@@ -179,15 +179,43 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
         return
       }
       if (result.reason === 'locked') {
-        sendWorkflowDefinitionError(res, 409, `这块画布正在被另一个流水线执行占用（自 ${new Date(result.holder.acquiredAt).toLocaleTimeString('zh-CN')} 起），请等它结束或先停止它。`)
+        // 与写入口被锁 409 同一套形状（code + holder）：前端据此把「等 / 强制释放」的可操作提示摆出来
+        sendJson(res, 409, {
+          code: 'canvas_locked_by_pipeline',
+          message: `这块画布正在被另一个流水线执行占用（自 ${new Date(result.holder.acquiredAt).toLocaleTimeString('zh-CN')} 起）。请等它结束；如果你确认没有 Agent 在跑，可点「强制释放」。`,
+          data: { holder: result.holder },
+        })
         return
       }
       sendWorkflowDefinitionError(res, result.reason === 'not_found' ? 404 : 403, '无法获取画布锁')
       return
     }
 
+    /**
+     * 释放画布锁。
+     *
+     * · 默认按 token 放（只有持锁者本人能放，避免误放别人的锁）—— 客户端 endPipelineRun 走这条；
+     * · `force=1`（body.force 或 query）：**同一用户的会话**可强制释放自己画布上的锁，无需 token。
+     *   这不是绕过并发保护：服务端只放 userId 匹配的那把，别人的锁一律不动。它解决的是
+     *   「任务早跑完、锁没被正常放掉，用户被自己的锁挡在门外干等 TTL」这个真实事故。
+     */
     if (req.method === 'POST' && workflowPipelineLockReleaseMatch) {
-      const payload = await readWorkflowDefinitionBody<{ token?: string }>(req)
+      const payload = await readWorkflowDefinitionBody<{ token?: string; force?: boolean }>(req)
+        .catch(() => ({} as { token?: string; force?: boolean }))
+      const force = payload?.force === true || requestUrl.searchParams.get('force') === '1'
+      if (force) {
+        const forced = forceReleasePipelineLockForUser(workflowPipelineLockReleaseMatch.workflowId, currentUser.id)
+        if (!forced.released) {
+          sendWorkflowDefinitionError(
+            res,
+            forced.reason === 'forbidden' ? 403 : 409,
+            forced.reason === 'forbidden' ? '强制释放被拒：这把锁不是你持有的' : '强制释放：当前没有锁',
+          )
+          return
+        }
+        sendJson(res, 200, { data: { released: true, forced: true } })
+        return
+      }
       const released = releasePipelineLock(workflowPipelineLockReleaseMatch.workflowId, String(payload?.token || ''))
       if (!released) {
         sendWorkflowDefinitionError(res, 409, '释放失败：锁不存在，或 token 不是持锁者的（不能释放别人的锁）')

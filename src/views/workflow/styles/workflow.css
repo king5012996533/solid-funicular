@@ -421,6 +421,22 @@ body[lv-theme='dark'] .workflow-canvas .vue-flow__background pattern circle {
   line-height: 1.2;
 }
 
+/* 孤儿锁自救入口：画布被占用且用户确认没有 Agent 在跑时，一键释放自己那把锁 */
+.wf-header-meta__force-unlock {
+  background: transparent;
+  border: 0;
+  color: var(--brand-main-default, #00cae0);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.wf-header-meta__force-unlock:hover {
+  opacity: 0.8;
+}
+
 /* ========== 设置弹窗 ========== */
 .wf-settings-overlay {
   position: absolute;

@@ -10,8 +10,10 @@
  * 跑法：npx tsx scripts/tests/test-pipeline-lock.mjs
  */
 import {
+  canForceReleaseLockForUser,
   evaluateCanvasWriteLock,
   isPipelineLockExpired,
+  shouldReleaseLockForTask,
 } from '../../server/workflow-definitions/pipeline-lock-rules.ts'
 
 let passed = 0
@@ -78,6 +80,40 @@ check('未过期的锁仍然拦人（别把兜底写成「永远放行」）', (
   const alive = lock({ expiresAt: now + 1 })
   assert(isPipelineLockExpired(alive, now) === false, '不该判定为过期')
   assert(evaluateCanvasWriteLock(alive, undefined, now).blocked === true, '未过期就该拦')
+})
+
+console.log('\n== 任务终态释放（只放自己那把） ==')
+
+check('recordId 匹配 → 允许按任务释放（任务终态收口走这条）', () => {
+  assert(shouldReleaseLockForTask(lock({ recordId: 'rec_A' }), 'rec_A') === true, '同一任务应能放')
+})
+
+check('recordId 不匹配 → **不放**（任务 A 收口不能误放 B 后来取的锁）', () => {
+  assert(shouldReleaseLockForTask(lock({ recordId: 'rec_B' }), 'rec_A') === false, '不同任务绝不能放')
+})
+
+check('没有 recordId（老客户端取锁未绑定）→ 不放，交给 TTL/客户端释放', () => {
+  assert(shouldReleaseLockForTask(lock(), 'rec_A') === false, '未绑定的锁不该被任意任务放掉')
+})
+
+check('return false 是幂等前提：锁已不在 / recordId 为空都不该误判', () => {
+  assert(shouldReleaseLockForTask(null, 'rec_A') === false, '锁不存在应返回 false')
+  assert(shouldReleaseLockForTask(lock({ recordId: 'rec_A' }), '') === false, '空 recordId 应返回 false')
+})
+
+console.log('\n== 同用户强制释放（只放自己的锁） ==')
+
+check('同一用户 → 可以强制释放自己画布上的锁', () => {
+  assert(canForceReleaseLockForUser(lock({ userId: 'user_1' }), 'user_1') === true, '自己的锁应可强制释放')
+})
+
+check('不同用户 → 拒绝（别人的锁一律不动）', () => {
+  assert(canForceReleaseLockForUser(lock({ userId: 'user_1' }), 'user_2') === false, '不能放别人的锁')
+})
+
+check('锁不存在 / 空 userId → 不肯放', () => {
+  assert(canForceReleaseLockForUser(null, 'user_1') === false, '没有锁应返回 false')
+  assert(canForceReleaseLockForUser(lock({ userId: 'user_1' }), '') === false, '空 userId 应返回 false')
 })
 
 console.log(failed ? `\n${failed} 项失败（通过 ${passed}）` : `\n全部通过（${passed} 项）`)

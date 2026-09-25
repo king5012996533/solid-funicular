@@ -94,6 +94,12 @@ import {
   requestAgentWorkspaceModelPlan,
 } from './upstream-helpers'
 import { writeScopedLog } from '../shared/logging'
+import {
+  bindPipelineLockToTask,
+  PIPELINE_LOCK_RENEW_INTERVAL_MS,
+  releasePipelineLockForTask,
+  renewPipelineLockForTask,
+} from '../workflow-definitions/pipeline-lock'
 import type { RuntimeManagedTask } from './task-runtime-governor'
 
 // 统一用治理层那一份任务类型（见 task-runtime-governor.ts 的说明）
@@ -490,11 +496,34 @@ const refundTaskPointsIfNeeded = async (task: RunningGenerationTask, reason: str
 const runTaskInBackground = (task: RunningGenerationTask, payload: GenerationTaskStartPayload) => {
   void (async () => {
     let ownsExecution = false
+    /**
+     * 这个进程是否真的把执行器跑起来了。
+     *
+     * 只有 ownsExecution 还不够：执行器抛错（失败/停止）时 runTaskWithExecutionLock 会把它
+     * 原样抛出来，外层 `ownsExecution = await ...` 根本来不及赋值；而那段
+     * `try { runner() } finally { releaseRedisLock }` 已经真跑过了。用一个在执行器入口就置真的
+     * 标志，才能保证「跑过就收口」。
+     */
+    let ranExecutor = false
+    let pipelineRenewTimer: ReturnType<typeof setInterval> | null = null
+    const isCanvasAgentTask = task.strategyKey === 'canvas-agent'
     const executionStrategy = getGenerationTaskExecutionStrategy(task.strategyKey)
     const executionStrategyContext = buildTaskExecutionStrategyContext()
 
     try {
       ownsExecution = await runTaskWithExecutionLock(task, async () => {
+        ranExecutor = true
+        /**
+         * 画布 Agent 跑起来后定期续约画布锁。
+         *
+         * TTL 只是「持有者失活」的兜底，运行中的任务不该让它自然过期 —— 否则长任务中途锁失效，
+         * 外部改动会插进来，锁就白加了。续约失败不打断任务：锁到期后还有终态释放和客户端释放兜着。
+         */
+        if (isCanvasAgentTask) {
+          pipelineRenewTimer = setInterval(() => {
+            renewPipelineLockForTask(task.recordId)
+          }, PIPELINE_LOCK_RENEW_INTERVAL_MS)
+        }
         await executionStrategy.execute(task, payload, executionStrategyContext)
       }, {
         abortTaskWithReason,
@@ -558,6 +587,28 @@ const runTaskInBackground = (task: RunningGenerationTask, payload: GenerationTas
         }
       }
     } finally {
+      if (pipelineRenewTimer) {
+        clearInterval(pipelineRenewTimer)
+      }
+      /**
+       * 任务到达终态（成功/失败/停止/超时熔断）→ **服务端**放掉这块画布上的锁。
+       *
+       * 这是修「孤儿锁」的核心：之前锁的释放只挂在客户端 endPipelineRun 上，页面刷新/两次发消息
+       * 重叠/取到的 workflowId 前后不一致，任何一条路没走到就留下孤儿锁，用户被自己的锁挡 30 分钟。
+       * 任务生命周期在服务端是权威的，锁不该比任务活得久。释放幂等，且只放 recordId 匹配的那把。
+       * 客户端 endPipelineRun 仍保留（正常路径及时释放），但不再是唯一出路。
+       */
+      if (ranExecutor && isCanvasAgentTask) {
+        try {
+          releasePipelineLockForTask(task.recordId)
+        } catch (releaseError) {
+          logGenerationTaskError('canvas_pipeline_lock_release_failed', releaseError, {
+            recordId: task.recordId,
+            userId: task.userId,
+            strategyKey: task.strategyKey,
+          })
+        }
+      }
       deleteLocalRunningTask(task.recordId)
       await releaseTaskConcurrencySlots(task.concurrencySlots)
       if (ownsExecution) {
@@ -636,8 +687,36 @@ const buildTaskLifecycleContext = () => ({
   abortTaskWithReason,
 })
 
+/**
+ * 建单后把画布锁绑定到这条任务。
+ *
+ * 前端在起 Agent 前先取锁（POST .../pipeline-lock），拿到 token 后把它连同 workflowId 一起
+ * 塞进 createGenerationTask 的 requestBody.pipelineLock；AI 任务本身不关心这个字段，只有这里消费它。
+ * 绑定成功后，任务终态时就能按 recordId 精确释放（见 runTaskInBackground 的 finally）。
+ *
+ * 为什么不放在执行器里绑定：执行器可能因为「没抢到执行锁」根本不跑。建单时绑定才不会有窗口。
+ */
+const bindCanvasPipelineLockFromTaskPayload = (
+  payload: GenerationTaskStartPayload,
+  recordId: string,
+  userId: string,
+) => {
+  const pipelineLock = (payload.requestBody || {}).pipelineLock as
+    | { workflowId?: unknown; token?: unknown }
+    | undefined
+  const workflowId = String(pipelineLock?.workflowId || '').trim()
+  const token = String(pipelineLock?.token || '').trim()
+  if (!workflowId || !token || !recordId) {
+    return
+  }
+  bindPipelineLockToTask({ workflowId, token, recordId, userId })
+}
+
 export const startGenerationTask = async (payload: GenerationTaskStartPayload, currentUserId: string) => {
-  return startGenerationTaskLifecycle(payload, currentUserId, buildTaskLifecycleContext())
+  const record = await startGenerationTaskLifecycle(payload, currentUserId, buildTaskLifecycleContext())
+  // 幂等重放会返回已存在的记录，重复绑定是幂等的（同一个 recordId 直接返回 true）
+  bindCanvasPipelineLockFromTaskPayload(payload, String(record?.id || ''), currentUserId)
+  return record
 }
 
 export const getGenerationTaskRecord = async (recordId: string, currentUserId: string) => {

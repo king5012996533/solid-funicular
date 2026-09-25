@@ -264,11 +264,32 @@ export const autosaveWorkflowDefinitionDraft = async (
  * WorkflowCanvasLockedError，前端据此暂存编辑而不是丢掉。
  */
 export const acquireWorkflowPipelineLock = async (workflowId: string, label?: string) => {
-  return await requestWorkflowApi<{ token: string; snapshotVersionId: string; expiresAt: number }>({
-    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock`,
-    method: 'POST',
-    data: { label },
-  })
+  /**
+   * 走自己的 fetch 而不是 requestWorkflowApi：409（被占用）要和「真·错误」分开。
+   * 占用是可操作状态（提示用户等 / 或强制释放），错误不是 —— 混成一条 message，
+   * 面板就只能一律显示「画布已被占用」，还错误地给出强制释放按钮。
+   */
+  const response = await fetch(
+    buildApiUrl(`${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock`),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    },
+  )
+
+  handleUnauthorizedResponse(response.status, 'workflow-definitions')
+
+  if (response.status === 409) {
+    const body = await response.json().catch(() => null)
+    throw new WorkflowCanvasLockedError(
+      body?.message || '这块画布正在被另一个流水线执行占用',
+      body?.data?.holder,
+    )
+  }
+
+  return await readApiData<{ token: string; snapshotVersionId: string; expiresAt: number }>(response)
 }
 
 export const releaseWorkflowPipelineLock = async (workflowId: string, token: string) => {
@@ -276,6 +297,21 @@ export const releaseWorkflowPipelineLock = async (workflowId: string, token: str
     url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock/release`,
     method: 'POST',
     data: { token },
+  })
+}
+
+/**
+ * 强制释放自己画布上的锁（无需 token）。
+ *
+ * 用在「任务其实早跑完、锁却没被正常放掉」这种孤儿锁场景：用户被自己的锁挡在门外时，
+ * 不该干等 TTL。服务端只放 userId 匹配的那把，不会影响别人的并发保护。
+ */
+export const forceReleaseWorkflowPipelineLock = async (workflowId: string) => {
+  return await requestWorkflowApi<{ released: boolean; forced?: boolean }>({
+    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock/release?force=1`,
+    method: 'POST',
+    data: { force: true },
+    successMessage: '已强制释放画布锁',
   })
 }
 
