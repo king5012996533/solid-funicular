@@ -27,7 +27,7 @@ import {
   updateGenerationSession as updateGenerationSessionRequest,
   type PersistedGenerationSession,
 } from '@/api/generation-sessions'
-import { createGenerationTask, resolveGenerationTaskModel, stopGenerationTask, subscribeGenerationTaskEvents, type GenerationTaskStreamEvent } from '@/api/generation-tasks'
+import { createGenerationTask, getGenerationTask, resolveGenerationTaskModel, stopGenerationTask, subscribeGenerationTaskEvents, type GenerationTaskStreamEvent } from '@/api/generation-tasks'
 import type { CreationType } from '../../components/generate/selectors'
 import type {
   AgentRunState,
@@ -46,6 +46,12 @@ import type {
 } from '@/shared/research/research-types'
 import { normalizeGenerationErrorMessage } from '@/shared/generation-error'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
+import {
+  BACKGROUND_POLL_FIRST_DELAY_MS,
+  BACKGROUND_POLL_INTERVAL_MS,
+  BACKGROUND_POLL_MAX_DURATION_MS,
+  decideBackgroundDelivery,
+} from '@/shared/background-delivery-poll'
 import { AUTH_LOGIN_SUCCESS_EVENT, useAuthStore } from '@/stores/auth'
 import { useLoginModalStore } from '@/stores/login-modal'
 import { useSystemSettingsStore } from '@/stores/system-settings'
@@ -106,6 +112,17 @@ interface GeneratingRecord {
   images: string[]
   done: boolean
   stopped?: boolean
+  /**
+   * 「不等了，后台跑完」的本地标记（2026-09-26）。
+   *
+   * 为真时：本页断掉该 record 的 SSE 订阅、不再转圈，改为按共同节奏轮询任务记录，
+   * 完成后用 syncRecordWithPersisted 刷新到界面。**只解除本地等待，绝不停止服务端任务**。
+   *
+   * 为什么只放在内存里、不写到服务端记录：这是「本页现在怎么展示」的 UI 状态，不是任务事实。
+   * 刷新页面后由既有链路接回结果 —— loadPersistedGeneratingRecords 会把未完成的记录重新加载，
+   * 并 connectGenerationTaskStream 自动重连 SSE，所以结果不会因为刷新而丢。
+   */
+  backgroundPending?: boolean
   progressStage?: string
   progressMessage?: string
   progressPercent?: number
@@ -170,6 +187,9 @@ const researchSearchRevealQueues = new Map<string, ResearchSearchSourceViewItem[
 const researchUiRevealTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const researchUiRevealQueues = new Map<number, Array<() => void>>()
 const taskStreamControllers = new Map<string, AbortController>()
+/** 「不等了，后台跑完」的轮询定时器与起点（按任务 dbId 索引；卸载时统一清） */
+const backgroundPollTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const backgroundPollStartedAt = new Map<string, number>()
 const previewVisible = ref(false)
 const previewIndex = ref(0)
 const previewImages = ref<GeneratePreviewImageItem[]>([])
@@ -2908,6 +2928,110 @@ const startImageGenerationTask = async (record: GeneratingRecord) => {
  * 这里曾经是 handleStopImageGeneration（调 stopGenerationTask + 中断订阅），已一并删除。
  */
 
+/**
+ * 「不等了，后台跑完」—— 只解除**本页的等待**，绝不停止服务端任务。
+ *
+ * 三条铁律的落点：
+ *   1. 绝不调用 stopGenerationTask（本函数只 abort 本地订阅）；
+ *   2. 绝不 abort 服务端任务 —— 断的是浏览器这条 SSE，服务端照常跑完并写记录 + 资产；
+ *   3. 结果不会因刷新而丢：这里只是本地 UI 状态，刷新后既有链路会用
+ *      loadPersistedGeneratingRecords + connectGenerationTaskStream 重新接回未完成的记录。
+ */
+const handleWaitImageRecordInBackground = (record: GeneratingRecord) => {
+  if (record.done || !record.dbId) return
+  // 铁律 1/2：只断本页订阅，不碰 stop 接口
+  const controller = taskStreamControllers.get(record.dbId)
+  if (controller) {
+    controller.abort()
+    taskStreamControllers.delete(record.dbId)
+  }
+  record.backgroundPending = true
+  // 铁律：任务在服务端继续跑，本页按共同节奏轮询，等结果自己回来
+  backgroundPollStartedAt.set(record.dbId, Date.now())
+  scheduleImageBackgroundPoll(record, BACKGROUND_POLL_FIRST_DELAY_MS)
+}
+
+const stopImageBackgroundPoll = (dbId: string) => {
+  const timer = backgroundPollTimers.get(dbId)
+  if (timer) {
+    clearTimeout(timer)
+    backgroundPollTimers.delete(dbId)
+  }
+  backgroundPollStartedAt.delete(dbId)
+}
+
+const scheduleImageBackgroundPoll = (record: GeneratingRecord, delay: number) => {
+  const dbId = record.dbId
+  if (!dbId) return
+  stopImageBackgroundPoll(dbId)
+  backgroundPollTimers.set(dbId, setTimeout(() => { void runImageBackgroundPoll(record) }, delay))
+}
+
+/** 把记录落到「可重试失败态」并清掉后台标记（服务端任务不受影响，仍会跑完入库） */
+const failImageRecordBackground = (record: GeneratingRecord, message: string, dbId: string) => {
+  record.done = true
+  record.stopped = false
+  record.error = message
+  record.progressStage = 'failed'
+  record.progressMessage = resolveTaskStageLabel('failed', message)
+  record.progressPercent = 100
+  record.backgroundPending = false
+  stopImageBackgroundPoll(dbId)
+}
+
+/**
+ * 轮询一次任务记录并按判定落地。
+ *
+ * 判定交给 shared 的纯函数（画布节点与这里共用同一套），本函数只做「查询 → 落界面」。
+ * 单次查询失败不放弃：网络抖动很常见，继续按节奏重试，直到预算用尽。
+ */
+const runImageBackgroundPoll = async (record: GeneratingRecord) => {
+  const dbId = record.dbId
+  if (!record.backgroundPending || !dbId) return
+  const startedAt = backgroundPollStartedAt.get(dbId) || Date.now()
+  if (!backgroundPollStartedAt.has(dbId)) backgroundPollStartedAt.set(dbId, startedAt)
+  try {
+    const persisted = await getGenerationTask(dbId)
+    const decision = decideBackgroundDelivery(persisted, Date.now() - startedAt)
+    if (decision === 'keep-waiting') {
+      scheduleImageBackgroundPoll(record, BACKGROUND_POLL_INTERVAL_MS)
+      return
+    }
+    if (decision === 'completed' || decision === 'stopped') {
+      // 终态记录直接用既有的同步逻辑刷新界面（图片 / 已停止）
+      syncRecordWithPersisted(record, persisted)
+      record.backgroundPending = false
+      stopImageBackgroundPoll(dbId)
+      return
+    }
+    if (decision === 'failed') {
+      syncRecordWithPersisted(record, persisted)
+      // syncRecordWithPersisted 会把「无 error 的 done」判成 completed，这里按失败口径纠正
+      failImageRecordBackground(
+        record,
+        record.error || (persisted?.done ? '生成任务已结束但没有产出图片，可以重试' : String(persisted?.error || '图片生成失败')),
+        dbId,
+      )
+      return
+    }
+    // give-up：本页不再等（服务端任务仍会跑完并入库）
+    failImageRecordBackground(record, '后台生成等待超时，可以重试（任务仍会在服务端完成）', dbId)
+  } catch {
+    if (Date.now() - startedAt >= BACKGROUND_POLL_MAX_DURATION_MS) {
+      failImageRecordBackground(record, '后台生成等待超时，可以重试（任务仍会在服务端完成）', dbId)
+      return
+    }
+    scheduleImageBackgroundPoll(record, BACKGROUND_POLL_INTERVAL_MS)
+  }
+}
+
+/** 「刷新看看」：立刻查一次（不重置预算，手动刷新绕不过 30 分钟上限） */
+const handleRefreshImageBackground = (record: GeneratingRecord) => {
+  if (!record.backgroundPending || !record.dbId) return
+  stopImageBackgroundPoll(record.dbId)
+  void runImageBackgroundPoll(record)
+}
+
 const handleStopAgentExecution = async (record: GeneratingRecord) => {
   if (!record.agentRun || record.done || !record.dbId) return
 
@@ -3046,6 +3170,10 @@ onUnmounted(() => {
 
   taskStreamControllers.forEach(controller => controller.abort())
   taskStreamControllers.clear()
+  // 只清本页的轮询定时器：服务端任务与记录照旧，刷新后会被重新接回
+  backgroundPollTimers.forEach(timer => clearTimeout(timer))
+  backgroundPollTimers.clear()
+  backgroundPollStartedAt.clear()
   narrowViewportQuery?.removeEventListener('change', syncNarrowViewport)
   narrowViewportQuery = null
 })
@@ -3159,10 +3287,13 @@ onUnmounted(() => {
                     :images="record.images"
                     :conversation-entries="getRecordConversationEntries(record)"
                     :error="record.error ? formatGenerationError(record.error, '图片生成失败') : ''"
+                    :background-pending="Boolean(record.backgroundPending)"
                     @preview="handlePreviewRecordImage(record, $event)"
                     @edit="handleEditImageRecord(record)"
                     @regenerate="handleRegenerateImageRecord(record)"
                     @more="handleOpenImageRecordMore(record)"
+                    @background="handleWaitImageRecordInBackground(record)"
+                    @refresh="handleRefreshImageBackground(record)"
                 />
               </div>
               <div

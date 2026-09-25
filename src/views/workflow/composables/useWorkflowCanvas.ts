@@ -48,6 +48,15 @@ export interface WorkflowNodeDataBase {
   autoExecute?: boolean
   executed?: boolean
   outputNodeId?: string
+  /**
+   * 「不等了，让它后台跑完」的持久化标记（2026-09-26）。
+   *
+   * 用户不想盯着转圈时，客户端断开订阅、停计时，但**服务端任务照常跑完并交付**。
+   * 标记落在节点 data 上（跟着画布保存）：刷新页面后仍记得「它还在后台跑」，
+   * 组件挂载时据此继续轮询任务记录，把结果接回来 —— 不能刷新就丢。
+   * 与 `taskRecordId` 搭配使用；此时 `submittedAt` 已置 0，避免被当成一次新等待重新挂超时。
+   */
+  backgroundPending?: boolean
 }
 
 export interface WorkflowTextNodeData extends WorkflowNodeDataBase {

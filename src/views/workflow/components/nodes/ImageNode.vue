@@ -49,6 +49,12 @@ import {
   resolveGenerationTaskModel,
   type GenerationTaskStreamEvent,
 } from '@/api/generation-tasks'
+import {
+  BACKGROUND_POLL_FIRST_DELAY_MS,
+  BACKGROUND_POLL_INTERVAL_MS,
+  BACKGROUND_POLL_MAX_DURATION_MS,
+  decideBackgroundDelivery,
+} from '@/shared/background-delivery-poll'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { registerNodeRunner, unregisterNodeRunner } from '@/views/workflow/composables/useCanvasNodeRunner'
 
@@ -62,14 +68,20 @@ const { updateNodeInternals } = useVueFlow()
 const imageUrl = ref(props.data?.url || '')
 const isLoading = ref(!!props.data?.loading)
 const errorMsg = ref(props.data?.error || '')
+/**
+ * 「不等了，让它后台跑完」的节点态（本地镜像，真源在 data.backgroundPending）。
+ * 为真时：不转圈、不骨架屏，只显示一句轻量状态，客户端轮询任务记录把结果接回来。
+ */
+const backgroundPending = ref(!!props.data?.backgroundPending)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 watch(
-  [() => props.data?.url, () => props.data?.loading, () => props.data?.error],
-  ([url, loading, error]) => {
+  [() => props.data?.url, () => props.data?.loading, () => props.data?.error, () => props.data?.backgroundPending],
+  ([url, loading, error, background]) => {
     if (url !== undefined) imageUrl.value = url
     if (loading !== undefined) isLoading.value = loading
     if (error !== undefined) errorMsg.value = error
+    if (background !== undefined) backgroundPending.value = background
   },
 )
 
@@ -82,9 +94,14 @@ const isGenerated = computed(() => props.data?.executed === true)
 
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
-const showImage = computed(() => !isLoading.value && !errorMsg.value && !!imageUrl.value)
-/** 空态：既没在跑、也没报错、也还没图 —— 才摆「尝试」两项能力 */
-const showEmpty = computed(() => !showLoading.value && !showError.value && !showImage.value)
+/**
+ * 后台生成中：不转圈，只给一句状态 + 「刷新看看」按钮。
+ * 优先级在错误之后、有图/空态之前 —— 它是「没有在等、但也没结束」的独立形态。
+ */
+const showBackground = computed(() => !isLoading.value && !errorMsg.value && backgroundPending.value)
+const showImage = computed(() => !isLoading.value && !errorMsg.value && !backgroundPending.value && !!imageUrl.value)
+/** 空态：既没在跑、也没报错、也没进后台、也还没图 —— 才摆「尝试」两项能力 */
+const showEmpty = computed(() => !showLoading.value && !showError.value && !showBackground.value && !showImage.value)
 
 /**
  * 卡片尺寸跟着「比例」参数走（对齐 LibTV 实测，见 config/node-size.ts）：
@@ -397,9 +414,12 @@ onMounted(() => {
   void loadPublicModelCatalog()
 })
 
-// 节点卸载时清掉计时器，避免后台空转
+// 节点卸载时清掉计时器（含后台轮询），避免后台空转。
+// 注意：清掉的只是**客户端**定时器；服务端任务与节点 data 上的 backgroundPending 都不动，
+// 重新挂载后会接着把结果接回来。
 onBeforeUnmount(() => {
   stopElapsedTimer()
+  stopBackgroundPolling()
 })
 
 /**
@@ -560,15 +580,39 @@ const clearDeadline = () => {
   }
 }
 
-/** 统一失败出口：停订阅、停计时、落可重试的错误态 */
+/**
+ * 后台轮询的定时器与起点。
+ *
+ * 为什么不塞进 shared 的判定模块：那里只做纯判定、可单测；定时器与副作用归组件。
+ *
+ * 铁律 3（状态要持久化）：进入后台态时把 `backgroundPending` 写进节点 data，
+ * 刷新后由挂载期的观察重新启动轮询 —— 这里的内存变量只服务于当前这次挂载。
+ */
+let backgroundPollTimer: ReturnType<typeof setTimeout> | null = null
+let backgroundPollStartedAt = 0
+const stopBackgroundPolling = () => {
+  if (backgroundPollTimer) {
+    clearTimeout(backgroundPollTimer)
+    backgroundPollTimer = null
+  }
+}
+/** 收口后台态：停轮询 + 清本地标记（节点 data 由各自落结果的 updateNode 一并清） */
+const clearBackgroundState = () => {
+  stopBackgroundPolling()
+  backgroundPending.value = false
+}
+
+/** 统一失败出口：停订阅、停计时、停后台轮询、落可重试的错误态 */
 const failRun = (message: string) => {
   clearDeadline()
   stopElapsedTimer()
+  stopBackgroundPolling()
   taskStreamController.value?.abort()
   isGenerating.value = false
   isLoading.value = false
+  backgroundPending.value = false
   errorMsg.value = message
-  updateNode(props.id, { loading: false, error: message })
+  updateNode(props.id, { loading: false, backgroundPending: false, error: message })
 }
 
 /**
@@ -581,12 +625,16 @@ const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
     if (urls.length) {
       clearDeadline()
       stopElapsedTimer()
+      // 后台轮询也可能走到这里（复用同一个落结果形态）：一并收口后台态
+      stopBackgroundPolling()
+      backgroundPending.value = false
       updateNode(props.id, {
         url: urls[0],
         loading: false,
         error: '',
         executed: true,
         submittedAt: 0,
+        backgroundPending: false,
         ...(urls.length > 1
           ? {
               isBatchRoot: true,
@@ -629,6 +677,113 @@ const startDeadline = (submittedAt: number) => {
   )
 }
 
+/**
+ * 「不等了，让它后台跑完」—— 只解除**客户端的等待**，绝不停止服务端任务。
+ *
+ * 三条铁律的落点：
+ *   1. 绝不调用 stopGenerationTask（本函数一次都不碰它，只 abort 本地订阅）；
+ *   2. 绝不 abort 服务端任务 —— `taskStreamController.abort()` 断的是浏览器这条 SSE，
+ *      服务端任务照常跑到底、照常写记录与资产；
+ *   3. 状态写进节点 data（`backgroundPending: true` 且保留 `taskRecordId`），
+ *      刷新后由下面的观察重新启动轮询，把结果接回来。
+ *
+ * `submittedAt` 必须置 0：否则节点重挂载时 `reconcileInterruptedRun` 会把它当成一次新的等待，
+ * 又挂上 15 分钟超时并抢先对账。
+ */
+const handleWaitInBackground = () => {
+  if (!isLoading.value) return
+  taskStreamController.value?.abort()
+  taskStreamController.value = null
+  clearDeadline()
+  stopElapsedTimer()
+  isLoading.value = false
+  isGenerating.value = false
+  backgroundPending.value = true
+  // 保留 taskRecordId —— 轮询与刷新后回填都靠它
+  updateNode(props.id, { loading: false, backgroundPending: true, submittedAt: 0, error: '' })
+  backgroundPollStartedAt = Date.now()
+  scheduleBackgroundPoll(BACKGROUND_POLL_FIRST_DELAY_MS)
+  ElMessage.info('已不再等待，任务会在后台跑完，完成后自动出现在这里')
+}
+
+/** 按节奏排下一次轮询（首次用首查延迟，之后用间隔） */
+const scheduleBackgroundPoll = (delay: number) => {
+  stopBackgroundPolling()
+  backgroundPollTimer = setTimeout(() => { void runBackgroundPoll() }, delay)
+}
+
+/**
+ * 轮询一次任务记录并按判定落地。
+ *
+ * 判定交给 shared 的纯函数（画布节点与生成页共用），这里只做「查询 → 落地状态」。
+ * 单次查询失败不放弃：网络抖动很常见，继续按节奏重试，直到预算用尽。
+ */
+const runBackgroundPoll = async () => {
+  if (!backgroundPending.value) return
+  const taskId = String(props.data?.taskRecordId || '').trim()
+  if (!taskId) {
+    failRun('后台任务信息不完整，可以重试')
+    return
+  }
+  if (!backgroundPollStartedAt) backgroundPollStartedAt = Date.now()
+  try {
+    const record = await getGenerationTask(taskId)
+    const decision = decideBackgroundDelivery(record, Date.now() - backgroundPollStartedAt)
+    if (decision === 'keep-waiting') {
+      scheduleBackgroundPoll(BACKGROUND_POLL_INTERVAL_MS)
+      return
+    }
+    if (decision === 'completed') {
+      // 复用 completed 的落结果形态（applyTaskEvent 内部会一并清掉后台态）
+      applyTaskEvent({ type: 'completed', record } as GenerationTaskStreamEvent)
+      return
+    }
+    if (decision === 'stopped') {
+      failRun('任务已停止，可以重试')
+      return
+    }
+    if (decision === 'failed') {
+      failRun(record?.done ? '生成任务已结束但没有产出图片，可以重试' : String(record?.error || '图片生成失败'))
+      return
+    }
+    // give-up：客户端不再等（服务端任务仍会跑完并入库），落可重试失败态
+    failRun('后台生成等待超时，可以重试（任务仍会在服务端完成）')
+  } catch {
+    if (Date.now() - backgroundPollStartedAt >= BACKGROUND_POLL_MAX_DURATION_MS) {
+      failRun('后台生成等待超时，可以重试（任务仍会在服务端完成）')
+      return
+    }
+    scheduleBackgroundPoll(BACKGROUND_POLL_INTERVAL_MS)
+  }
+}
+
+/** 「刷新看看」：立刻查一次（不重置预算，手动刷新绕不过 30 分钟上限） */
+const refreshBackgroundNow = () => {
+  if (!backgroundPending.value) return
+  stopBackgroundPolling()
+  void runBackgroundPoll()
+}
+
+/**
+ * 挂载期观察后台态：`data.backgroundPending` 为真就开始轮询 —— 刷新页面后继续接结果。
+ *
+ * 为什么先等 200ms 再启动：工作流定义是异步加载的，定义到达会整体替换 nodes，
+ * 把挂载时的状态冲掉（reconcileInterruptedRun 那段注释里踩过同样的坑）。
+ */
+watch(
+  () => [props.data?.backgroundPending, props.data?.taskRecordId] as const,
+  ([pending, taskId]) => {
+    if (!pending || !String(taskId || '').trim()) return
+    if (backgroundPollStartedAt) return // 本次挂载已在轮询，别重复启动
+    setTimeout(() => {
+      if (!backgroundPending.value) return
+      backgroundPollStartedAt = Date.now()
+      scheduleBackgroundPoll(BACKGROUND_POLL_FIRST_DELAY_MS)
+    }, 200)
+  },
+  { immediate: true, flush: 'post' },
+)
+
 /** 提交与重试共用的核心：建任务 → **立刻落 taskId/提示词** → 订阅 → 挂超时兜底 */
 const runGeneration = async (input: {
   prompt: string
@@ -640,7 +795,9 @@ const runGeneration = async (input: {
 }) => {
   isGenerating.value = true
   taskStreamController.value?.abort()
-  updateNode(props.id, { loading: true, error: '' })
+  // 重新提交就退出后台态：停掉上一轮的轮询，避免旧任务的结果覆盖新一轮
+  clearBackgroundState()
+  updateNode(props.id, { loading: true, backgroundPending: false, error: '' })
   const submittedAt = Date.now()
   runStartedAt.value = submittedAt
   try {
@@ -906,7 +1063,9 @@ const handlePromptSend = async (
   }
   isGenerating.value = true
   taskStreamController.value?.abort()
-  updateNode(props.id, { loading: true, error: '' })
+  // 重新提交就退出后台态：停掉上一轮的轮询，避免旧任务的结果覆盖新一轮
+  clearBackgroundState()
+  updateNode(props.id, { loading: true, backgroundPending: false, error: '' })
   try {
     const fallbackKey = String(options?.modelKey || '').trim() || String(props.data?.model || '').trim()
     const { providerId, modelKey } = await resolveGenerationTaskModel({
@@ -1008,7 +1167,11 @@ watch(
         <div class="image-node-loading-meta">
           <span class="image-node-loading-elapsed">生成中 {{ formattedElapsed }}</span>
           <span v-if="showSlowHint" class="image-node-loading-hint">比平时慢，可能在上游排队</span>
-          <!-- 这里曾有「取消」按钮：上游已开始生成（钱已付、结果有保证），取消会退款给用户却拿不到成果，净亏。见脚本区注释 -->
+          <!-- 「不等了」只解除本地等待：断订阅、停计时，服务端任务照常跑完并交付。
+               这里绝不调 stop 接口 —— 上游钱已付、结果有保证，取消会退款却拿不到成果，净亏。见脚本区注释。 -->
+          <button type="button" class="image-node-background-wait-btn nodrag nopan" @click.stop="handleWaitInBackground">
+            不等了，让它后台跑完
+          </button>
         </div>
       </div>
       <!-- 失败态必须可操作：一直转圈会让用户既不敢走也不知道能不能等（用户反馈原话） -->
@@ -1018,6 +1181,11 @@ watch(
           <button type="button" class="image-node-error-btn is-primary nodrag nopan" @click.stop="retryLastRun">重试</button>
           <button type="button" class="image-node-error-btn nodrag nopan" @click.stop="dismissError">放弃</button>
         </div>
+      </div>
+      <!-- 后台生成中：轻量状态，不转圈、不骨架屏 —— 任务在服务端继续跑，这里只等结果自动回来 -->
+      <div v-else-if="showBackground" class="image-node-background">
+        <div class="image-node-background-text">后台生成中，完成后会出现在这里</div>
+        <button type="button" class="image-node-background-btn nodrag nopan" @click.stop="refreshBackgroundNow">刷新看看</button>
       </div>
       <img v-else-if="showImage" :src="imageUrl" alt="生成图片" class="image-node-image" @dblclick.stop="openImagePreview()" />
 
@@ -1147,8 +1315,47 @@ watch(
   font-variant-numeric: tabular-nums;
 }
 .image-node-loading-hint { color: var(--text-tertiary); font-size: 11px; }
-/* 这里曾有 .image-node-cancel（生成中卡片上的「取消」按钮），2026-09-26 按产品要求删除：
-   上游已开始生成（钱已付、结果有保证），取消会退款给用户却拿不到成果，净亏。见脚本区注释。 */
+/* 「不等了」：生成中卡片上唯一的出口 —— 只解除本地等待，不停止服务端任务。
+   这里曾有 .image-node-cancel（真取消按钮），2026-09-26 按产品要求删除（见脚本区注释）。 */
+.image-node-background-wait-btn {
+  margin-top: 2px;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--canvas-node-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.image-node-background-wait-btn:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
+/* 后台生成中：轻量状态（不转圈、不骨架屏），让用户知道任务还在跑、只是自己不等了 */
+.image-node-background {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  text-align: center;
+}
+.image-node-background-text { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+.image-node-background-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--canvas-node-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.image-node-background-btn:hover { background: var(--bg-block-secondary-hover); color: var(--text-primary); }
 .image-node-spinner { width: 18px; height: 18px; border: 2px solid var(--stroke-secondary); border-top-color: var(--brand-main-default); border-radius: 50%; animation: image-node-spin 0.8s linear infinite; }
 @keyframes image-node-spin { to { transform: rotate(360deg); } }
 /* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，

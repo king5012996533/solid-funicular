@@ -134,36 +134,49 @@
           </div>
           <!-- 加载中 -->
           <div v-else class="image-record-content">
-            <div class="responsive-image-grid">
-              <div v-for="i in count" :key="i"
-                   class="image-card-wrapper landscape"
-                   :style="`--aspect-ratio:${aspectRatio}`">
-                <div class="image-record-item"></div>
-              </div>
-              <!-- 加载动画覆盖层 -->
-              <div class="loading-container-VeCJoq">
-                <div class="animation-wrapper">
-                  <video class="loading-animation"
-                         autoplay loop muted preload="auto"
-                         :src="loadingVideoUrl"
-                          />
+            <!-- 后台生成中：任务仍在服务端跑，这里不再转圈，只给一句状态 + 手动刷新 -->
+            <div v-if="backgroundPending" class="image-background-pending">
+              <div class="image-background-pending__text">后台生成中，完成后会出现在这里</div>
+              <button type="button" class="image-background-pending__btn" @click="$emit('refresh')">
+                刷新看看
+              </button>
+            </div>
+            <template v-else>
+              <div class="responsive-image-grid">
+                <div v-for="i in count" :key="i"
+                     class="image-card-wrapper landscape"
+                     :style="`--aspect-ratio:${aspectRatio}`">
+                  <div class="image-record-item"></div>
+                </div>
+                <!-- 加载动画覆盖层 -->
+                <div class="loading-container-VeCJoq">
+                  <div class="animation-wrapper">
+                    <video class="loading-animation"
+                           autoplay loop muted preload="auto"
+                           :src="loadingVideoUrl"
+                            />
+                  </div>
+                </div>
+                <!-- 网格分割线 -->
+                <div class="divider-container vertical-divider-container">
+                  <div v-for="i in (count - 1)" :key="i" class="vertical-divider"
+                       :style="`left:${(i / count) * 100}%;transform:translateX(-50%)`"></div>
                 </div>
               </div>
-              <!-- 网格分割线 -->
-              <div class="divider-container vertical-divider-container">
-                <div v-for="i in (count - 1)" :key="i" class="vertical-divider"
-                     :style="`left:${(i / count) * 100}%;transform:translateX(-50%)`"></div>
+              <!-- 进度徽章 -->
+              <div class="progress-badge-RuihdC progress-badge-RQDqWu">
+                {{ currentProgress }}%{{ currentProgressText || '造梦中' }}
               </div>
-            </div>
-            <!-- 进度徽章 -->
-            <div class="progress-badge-RuihdC progress-badge-RQDqWu">
-              {{ currentProgress }}%{{ currentProgressText || '造梦中' }}
-            </div>
-            <!--
-              这里曾有「停止生成」按钮，2026-09-26 按产品要求删除。
-              付费图片任务提交后上游就已开始生成（钱已付、结果有保证），停止会退款给用户却拿不到成果，
-              净亏；免积分的任务（对话/研究/Agent 回合）仍然保留停止能力。
-            -->
+              <!--
+                「不等了，后台跑完」：只解除本地等待，绝不停止服务端任务。
+                铁律：① 不调 stop 接口；② 只断客户端订阅与计时；③ 任务在服务端照常跑完并交付，
+                由父级按共同节奏轮询记录把结果接回来。付费任务此前删掉的「停止生成」不是这个语义。
+                免积分的任务（对话/研究/Agent 回合）仍然保留真正的停止能力。
+              -->
+              <button type="button" class="image-background-wait-button" @click="$emit('background')">
+                不等了，后台跑完
+              </button>
+            </template>
           </div>
           <div v-if="done && !error" class="operations">
             <div class="record-bottom-slots-AYv3JV">
@@ -286,6 +299,11 @@ const props = defineProps({
   done: { type: Boolean, default: false },
   /** 是否主动停止 */
   stopped: { type: Boolean, default: false },
+  /**
+   * 是否已进入「后台生成中」：任务仍在服务端跑，只是用户不再等。
+   * 为真时不渲染转圈/骨架屏，改为轻量状态 + 手动刷新（见模板）。
+   */
+  backgroundPending: { type: Boolean, default: false },
   /** 生成的图片 URL 列表 */
   images: { type: Array as PropType<string[]>, default: () => [] },
   /** 错误信息 */
@@ -294,8 +312,9 @@ const props = defineProps({
   conversationEntries: { type: Array as PropType<ConversationEntry[]>, default: () => [] }
 })
 
-// 不再声明 'stop'：付费图片任务的停止按钮已按产品要求移除（见模板注释）。父组件也不该再绑 @stop。
-const emit = defineEmits(['edit', 'regenerate', 'more', 'preview'])
+// 不再声明 'stop'：付费图片任务没有「停止」出口（会退款却拿不到成果，净亏）。
+// 'background' = 「不等了，后台跑完」：只断本地等待，父级按共同节奏轮询记录把结果接回来。
+const emit = defineEmits(['edit', 'regenerate', 'more', 'preview', 'background', 'refresh'])
 
 const handlePreview = (index: number) => {
   emit('preview', index)
@@ -446,11 +465,16 @@ watch(() => props.stopped, (val) => {
   if (val) stopTimer()
 })
 
+// 进入后台态就不再跑本地假进度：任务没在等，进度条留着只会误导
+watch(() => props.backgroundPending, (val) => {
+  if (val) stopTimer()
+})
+
 watch(() => props.progress, (val) => {
   currentProgress.value = Number.isFinite(Number(val)) ? Number(val) : 0
   if (hasControlledProgress()) {
     stopTimer()
-  } else if (!props.done && !props.error && !props.stopped && !timer) {
+  } else if (!props.done && !props.error && !props.stopped && !props.backgroundPending && !timer) {
     startTimer()
   }
 })
@@ -459,7 +483,7 @@ watch(() => props.progressText, (val) => {
   currentProgressText.value = val || ''
   if (hasControlledProgress()) {
     stopTimer()
-  } else if (!props.done && !props.error && !props.stopped && !timer) {
+  } else if (!props.done && !props.error && !props.stopped && !props.backgroundPending && !timer) {
     startTimer()
   }
 })
@@ -473,7 +497,7 @@ watch(
 )
 
 onMounted(() => {
-  if (!props.done && !props.error) startTimer()
+  if (!props.done && !props.error && !props.backgroundPending) startTimer()
   syncCurrentStageTypingText()
 })
 
@@ -570,8 +594,65 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-/* 这里曾有 .stop-generate-button-canana（图片生成中的「停止生成」按钮），2026-09-26 按产品要求删除：
-   付费任务提交后上游已开始生成（钱已付、结果有保证），停止会退款给用户却拿不到成果，净亏。 */
+/* 「不等了，后台跑完」：只解除本地等待，不停止服务端任务。
+   这里曾有真正停止的 .stop-generate-button-canana，2026-09-26 按产品要求删除
+   （付费任务提交后上游已开始生成，停止会退款却拿不到成果，净亏）。 */
+.image-background-wait-button {
+  align-items: center;
+  background: var(--bg-block-primary-default, rgba(204, 221, 255, .08));
+  border: none;
+  border-radius: 6px;
+  bottom: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  font-family: PingFang SC, sans-serif;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 2px 10px;
+  position: absolute;
+  right: 8px;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.image-background-wait-button:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
+
+/* 后台生成中：轻量状态，不转圈、不骨架屏 */
+.image-background-pending {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  min-height: 120px;
+  padding: 24px;
+}
+
+.image-background-pending__text {
+  color: var(--text-secondary, #83929d);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.image-background-pending__btn {
+  background: var(--bg-block-primary-default, rgba(204, 221, 255, .08));
+  border: 1px solid var(--stroke-secondary, rgba(255, 255, 255, .12));
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 2px 12px;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.image-background-pending__btn:hover {
+  background: var(--bg-block-secondary-hover);
+  color: var(--text-primary);
+}
 
 .image-stage-process-group {
   margin-top: 10px;
