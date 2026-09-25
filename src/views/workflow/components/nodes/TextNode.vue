@@ -44,7 +44,13 @@ import {
   nodes,
   type WorkflowTextNodeData,
 } from '../../composables/useWorkflowCanvas'
-import { getAllChatModels, getDefaultChatModelKey, loadPublicModelCatalog } from '@/config/models'
+import {
+  getAllChatModels,
+  getDefaultChatModelKey,
+  loadPublicModelCatalog,
+  notifyModelSelectionFallback,
+  resolveModelLabel,
+} from '@/config/models'
 import { streamChatCompletions } from '../../api/chat'
 
 const props = defineProps<{
@@ -94,8 +100,12 @@ watch(
     const values = options.map((item) => item.value)
     if (!values.length) return
     if (!values.includes(polishModel.value)) {
+      // 节点上存着的润色模型可能已经下架：回落到目录默认模型，并把「换了什么」讲清楚 ——
+      // 这里会写回节点 data（画布上看得见），所以更不能是个无声的替换。
+      const requested = String(polishModel.value || '').trim()
       polishModel.value = getDefaultChatModelKey() || values[0]
       updateNode(props.id, { polishModel: polishModel.value })
+      notifyModelSelectionFallback(requested, resolveModelLabel(polishModel.value, 'CHAT'))
     }
   },
   { immediate: true },

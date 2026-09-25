@@ -6,7 +6,13 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import PreferencePanel from '../common/PreferencePanel.vue'
 import SelectPopup from '../common/SelectPopup.vue'
-import { getAllChatModels, getDefaultChatModelKey, loadPublicModelCatalog } from '@/config/models'
+import {
+  getAllChatModels,
+  loadPublicModelCatalog,
+  notifyModelSelectionFallback,
+  reconcileModelSelection,
+  resolveModelLabel,
+} from '@/config/models'
 import { listEnabledAgentSkills, loadPublicSkillCatalog } from '@/config/agentSkills'
 import { getAgentModel, setAgentModel } from '@/api/agent'
 import {
@@ -214,13 +220,29 @@ const currentReasoningLabel = computed(() => {
 const webSearchLabel = computed(() => webSearchSpec.value?.label || '联网搜索')
 const reasoningLabel = computed(() => reasoningSpec.value?.label || '深度思考')
 
+/**
+ * 模型列表变化（或外部把 currentModel 写成已下架模型）时，收敛到目录里真实可用的模型。
+ *
+ * 关键点：回落的候选**不能**再取 getAgentModel() —— 它读的就是 localStorage 里那份已经失效的存值，
+ * 拿它当回落等于「回落成原值」，模型依旧是解析不出厂商的死 key，提交时才报「未匹配到后台模型配置」。
+ * 这里改成回落到目录默认模型，并把全站偏好一起收敛（带提示，不静默换）。
+ */
 watch(
-  chatModels,
-  (options) => {
+  [chatModels, currentModel],
+  ([options, current]) => {
     const values = options.map(item => item.value)
     if (!values.length) return
-    if (!values.includes(currentModel.value)) {
-      currentModel.value = props.defaultModelKey || getAgentModel() || getDefaultChatModelKey() || values[0]
+    if (values.includes(current)) return
+
+    const preferred = String(props.defaultModelKey || getAgentModel() || '').trim()
+    const reconciled = reconcileModelSelection(preferred, 'CHAT')
+    const next = reconciled.key || values[0]
+    currentModel.value = next
+    notifyModelSelectionFallback(preferred, resolveModelLabel(next, 'CHAT'))
+
+    // 偏好来自全站那份 localStorage 时顺手收敛，避免每开一次页面都提示一次
+    if (preferred && preferred === String(getAgentModel() || '').trim()) {
+      setAgentModel(next)
     }
   },
   { immediate: true },

@@ -51,7 +51,7 @@ export async function* streamChatCompletions(
   signal?.addEventListener('abort', abortWithExternalSignal, { once: true })
 
   const messages = Array.isArray(data.messages) ? data.messages : []
-  const { providerId, modelKey } = resolveGenerationTaskModel({
+  const { providerId, modelKey } = await resolveGenerationTaskModel({
     modelKey: typeof data.model === 'string' ? data.model : '',
     category: 'CHAT',
     missingModelMessage: '缺少对话模型标识',

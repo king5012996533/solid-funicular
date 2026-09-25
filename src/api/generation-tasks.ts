@@ -4,10 +4,7 @@ import type { PersistedGenerationRecord } from "./generation-records";
 import { consumeSseStream, type SseMessage } from "@/utils/sse";
 import type { GenerationTaskStreamEventBase } from "@/shared/generation-task-stream";
 import type { ResearchTaskConfig } from "@/shared/research/research-types";
-import {
-  resolveRequestModelKey,
-  resolveRequestProviderId,
-} from "@/config/models";
+import { resolveModelSelection } from "@/config/models";
 
 // 重新导出失败码，便于业务代码 import { GenerationTaskFailureCode } from '@/api/generation-tasks'
 export type { GenerationTaskFailureCode } from "@/shared/generation-task-stream";
@@ -57,36 +54,39 @@ export type GenerationTaskStreamEvent =
 
 const GENERATION_TASKS_API_PATH = "/api/generation-tasks";
 
-// 统一解析生成任务提交前要使用的厂商与模型。
-export const resolveGenerationTaskModel = (
+/**
+ * 统一解析生成任务提交前要使用的厂商与模型。
+ *
+ * 解析交给 config/models 的 resolveModelSelection：原选模型已下架时，
+ * 那里会先强拉一次目录、再回落到该分类的默认模型，并给出一条可见提示
+ * （「原选模型「X」已下架，已切换为「Y」」）—— 既不让用户卡死在
+ * 「未匹配到后台模型配置」上，也不会静默把他的选择换掉。
+ *
+ * 只有该分类在后台一个可用模型都没有时，这里才按原样报错。
+ */
+export const resolveGenerationTaskModel = async (
   input: ResolvedGenerationTaskModelInput,
-): ResolvedGenerationTaskModelResult => {
-  const sourceModelKey = String(
-    input.modelKey || input.fallbackModelKey || "",
-  ).trim();
-  const resolvedModelKey = resolveRequestModelKey(
-    sourceModelKey,
-    input.category,
-  );
-  const providerId = resolveRequestProviderId(
-    sourceModelKey || resolvedModelKey,
-    input.category,
-  );
+): Promise<ResolvedGenerationTaskModelResult> => {
+  const resolved = await resolveModelSelection({
+    modelKey: input.modelKey,
+    fallbackModelKey: input.fallbackModelKey,
+    category: input.category,
+  });
 
-  if (!providerId) {
+  if (!resolved) {
     throw new Error(
       input.missingProviderMessage ||
         "未匹配到后台模型配置，请先在后台配置可用模型",
     );
   }
 
-  if (!resolvedModelKey) {
+  if (!resolved.modelKey) {
     throw new Error(input.missingModelMessage || "缺少模型标识");
   }
 
   return {
-    providerId,
-    modelKey: resolvedModelKey,
+    providerId: resolved.providerId,
+    modelKey: resolved.modelKey,
   };
 };
 

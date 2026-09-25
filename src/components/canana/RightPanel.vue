@@ -13,6 +13,9 @@ import {
   loadPublicModelCatalog,
   getDefaultChatModelKey,
   getAllChatModels,
+  notifyModelSelectionFallback,
+  reconcileModelSelection,
+  resolveModelLabel,
 } from '@/config/models'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { useAssistantSessions } from '@/composables/useAssistantSessions'
@@ -374,8 +377,15 @@ const refreshChatModels = async () => {
   }
   chatModelOptions.value = list
   const preferred = String(getAgentModel() || '').trim()
-  const usable = list.some((item) => item.value === preferred)
-  selectedModelKey.value = usable ? preferred : (list[0]?.value || '')
+  // 原选模型已下架时回落到目录默认模型，并明确提示用户（不静默换、也不让这一轮直接失败）；
+  // 同时把全站那份偏好收敛过去，否则每开一次面板都会再提示一次。
+  const reconciled = reconcileModelSelection(preferred, 'CHAT')
+  const next = reconciled.key || list[0]?.value || ''
+  selectedModelKey.value = next
+  if (reconciled.fellBack) {
+    notifyModelSelectionFallback(preferred, resolveModelLabel(next, 'CHAT'))
+    setAgentModel(next)
+  }
 }
 
 const pickChatModel = (key) => {
@@ -460,7 +470,7 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   try {
     // 用用户在面板上选的那个模型（没选过就是全站默认），不再写死「默认对话模型」
     const preferredKey = String(selectedModelKey.value || getAgentModel() || getDefaultChatModelKey() || '').trim()
-    const { providerId, modelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
       modelKey: preferredKey,
       fallbackModelKey: getDefaultChatModelKey() || preferredKey,
       category: 'CHAT',

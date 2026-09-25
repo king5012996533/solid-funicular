@@ -15,6 +15,9 @@ import {
   getDefaultImageModelKey,
   loadPublicModelCatalog,
   getModelByName,
+  notifyModelSelectionFallback,
+  reconcileModelSelection,
+  resolveModelLabel,
   type ImageModel,
 } from '@/config/models'
 import { resolveImageParamSchema, type ParamChoice } from '@/config/model-params'
@@ -187,15 +190,26 @@ const selectQuality = (quality: string) => {
   currentQuality.value = quality
 }
 
-// 模型列表变化时，保证选中项一定存在于目录里
+/**
+ * 模型列表（或外部写入的选中值）变化时，保证选中项一定存在于目录里。
+ *
+ * 两条线都要守住：
+ *   · 目录还没到（列表为空）时**不下判断** —— 拿空目录校验存值会静默换掉用户的选择；
+ *   · 目录到了、原选模型确实不在里面（下架 / 被禁用）时，回落默认模型**并提示**用户，
+ *     不是静默替换，也不是报「未匹配到后台模型配置」让他动不了。
+ * 一并监听 currentModelVersion：外部（工作流节点的 initialParams、历史记录草稿回填）
+ * 也可能写进来一个已下架的模型，同样要在这里收敛掉。
+ */
 watch(
-  modelVersions,
-  (options) => {
+  [modelVersions, currentModelVersion],
+  ([options, current]) => {
+    if (!options.length) return
     const values = options.map(item => item.value)
-    if (!values.length) return
-    if (!values.includes(currentModelVersion.value)) {
-      currentModelVersion.value = getDefaultImageModelKey() || values[0]
-    }
+    if (values.includes(current)) return
+    const reconciled = reconcileModelSelection(current, 'IMAGE')
+    const next = reconciled.key || values[0]
+    currentModelVersion.value = next
+    notifyModelSelectionFallback(current, resolveModelLabel(next, 'IMAGE'))
   },
   { immediate: true },
 )

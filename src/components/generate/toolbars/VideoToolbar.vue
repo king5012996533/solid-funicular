@@ -13,6 +13,9 @@ import {
   getDefaultVideoModelKey,
   loadPublicModelCatalog,
   getModelByName,
+  notifyModelSelectionFallback,
+  reconcileModelSelection,
+  resolveModelLabel,
   type VideoModel,
 } from '@/config/models'
 import { describeAspectRatio, resolveVideoParamSchema, type ParamChoice } from '@/config/model-params'
@@ -52,11 +55,18 @@ const readStoredVideoToolbarState = () => {
 }
 
 const storedVideoToolbarState = readStoredVideoToolbarState()
-const validVideoModelValues = modelVersions.value.map(item => item.value)
 
 // 当前选中状态
+/**
+ * 首选模型：与图片工具栏同一条规则 —— 先原样采用存值，**不要在首屏拿目录校验它**。
+ *
+ * 原来这里是 `validVideoModelValues.includes(stored) ? stored : 默认`，而首屏的
+ * `modelVersions` 还是空数组（目录是异步拉的），于是任何存过的模型都会被判成「不在目录里」
+ * 而静默换成默认模型 —— 用户选的视频模型刷新一次就没了，界面上没有任何提示。
+ * 真正的校验交给下面的 watch：它只在目录到货后动手，且一定会给出提示。
+ */
 const currentModelVersion = ref(
-  validVideoModelValues.includes(storedVideoToolbarState?.model) ? storedVideoToolbarState.model : getDefaultVideoModelKey(),
+  String(storedVideoToolbarState?.model || '').trim() || getDefaultVideoModelKey(),
 )
 const currentFeature = ref(String(storedVideoToolbarState?.feature || ''))
 const currentSize = ref(String(storedVideoToolbarState?.size || ''))
@@ -197,14 +207,23 @@ const selectResolution = (resolution: string) => {
   currentResolution.value = resolution
 }
 
+/**
+ * 模型列表（或外部写入的选中值）变化时，保证选中项一定存在于目录里。
+ *
+ * 目录未到（列表为空）时不下判断；原选模型确实不在目录里（下架 / 被禁用）时
+ * 回落默认模型**并提示**用户。一并监听 currentModelVersion：
+ * 工作流节点的 initialParams 也会把节点上存着的模型写进来。
+ */
 watch(
-  modelVersions,
-  (options) => {
+  [modelVersions, currentModelVersion],
+  ([options, current]) => {
+    if (!options.length) return
     const values = options.map(item => item.value)
-    if (!values.length) return
-    if (!values.includes(currentModelVersion.value)) {
-      currentModelVersion.value = getDefaultVideoModelKey() || values[0]
-    }
+    if (values.includes(current)) return
+    const reconciled = reconcileModelSelection(current, 'VIDEO')
+    const next = reconciled.key || values[0]
+    currentModelVersion.value = next
+    notifyModelSelectionFallback(current, resolveModelLabel(next, 'VIDEO'))
   },
   { immediate: true },
 )

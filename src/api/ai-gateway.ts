@@ -5,7 +5,7 @@
 
 import { type AiEndpointType } from './provider-config'
 import { resolveEndpointModelCategory } from './provider-config'
-import { loadPublicModelCatalog, resolveRequestModelKey, resolveRequestProviderId } from '@/config/models'
+import { resolveModelSelection } from '@/config/models'
 
 export const AI_GATEWAY_REQUEST_PATH = '/api/ai/request'
 export const LEGACY_AI_GATEWAY_REQUEST_PATH = '/__workflow_gateway/request'
@@ -50,8 +50,6 @@ export const resolveGatewayUpstream = async (
     modelValue?: string
   },
 ): Promise<ResolvedGatewayUpstream> => {
-  await loadPublicModelCatalog()
-
   const rawBody = options.data
   const modelValue = String(
     options.modelValue
@@ -64,18 +62,32 @@ export const resolveGatewayUpstream = async (
     ),
   ).trim()
   const modelCategory = resolveEndpointModelCategory(type)
-  const providerId = String(options.providerId || '').trim()
-    || resolveRequestProviderId(modelValue, modelCategory)
-  const modelKey = String(options.modelKey || '').trim()
-    || resolveRequestModelKey(modelValue, modelCategory)
+  const explicitProviderId = String(options.providerId || '').trim()
 
-  if (!providerId) {
+  // 调用方显式指定了厂商：不再按目录反查，模型key 原样透传（旧行为，避免误伤直连场景）。
+  if (explicitProviderId) {
+    return {
+      providerId: explicitProviderId,
+      modelKey: String(options.modelKey || '').trim() || modelValue,
+      modelValue,
+    }
+  }
+
+  // 其余情况交给目录解析：原选模型已下架时会先强拉一次目录，再回落到该分类的默认模型，
+  // 并弹出「原选模型「X」已下架，已切换为「Y」」的可见提示（不静默换模型、也不硬失败）。
+  const resolved = await resolveModelSelection({
+    modelKey: options.modelKey,
+    fallbackModelKey: modelValue,
+    category: modelCategory,
+  })
+
+  if (!resolved) {
     throw new Error('未匹配到后台模型配置，请先在后台配置可用模型')
   }
 
   return {
-    providerId,
-    modelKey,
+    providerId: resolved.providerId,
+    modelKey: resolved.modelKey,
     modelValue,
   }
 }

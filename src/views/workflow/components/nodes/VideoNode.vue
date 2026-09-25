@@ -369,7 +369,7 @@ const runGeneration = async (input: {
   try {
     isLoading.value = true
     errorMsg.value = ''
-    const { providerId, modelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
       modelKey: input.modelKey,
       category: 'VIDEO',
       missingModelMessage: '未匹配到有效的视频模型，请先在后台配置',

@@ -251,7 +251,7 @@ const runImageEditJob = async (preset: ImageEditPreset) => {
 
   try {
     const fallbackKey = String(props.data?.model || '').trim()
-    const { providerId, modelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
       modelKey: fallbackKey,
       fallbackModelKey: fallbackKey,
       category: 'IMAGE',
@@ -642,7 +642,7 @@ const runGeneration = async (input: {
   const submittedAt = Date.now()
   runStartedAt.value = submittedAt
   try {
-    const { providerId, modelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
       modelKey: input.modelKey,
       fallbackModelKey: input.modelKey,
       category: 'IMAGE',
@@ -898,7 +898,7 @@ const handlePromptSend = async (
   updateNode(props.id, { loading: true, error: '' })
   try {
     const fallbackKey = String(options?.modelKey || '').trim() || String(props.data?.model || '').trim()
-    const { providerId, modelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
       modelKey: fallbackKey,
       fallbackModelKey: fallbackKey,
       category: 'IMAGE',

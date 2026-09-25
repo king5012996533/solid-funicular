@@ -2668,7 +2668,7 @@ const handleSend = async (message: string, type: CreationType, options?: { model
 // 技能工作台同样改为服务端任务，由后端持续推送结构化阶段事件。
 const startWorkspaceAgentTask = async (record: GeneratingRecord) => {
   try {
-    const { providerId, modelKey: currentModelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey: currentModelKey } = await resolveGenerationTaskModel({
       modelKey: record.modelKey,
       fallbackModelKey: getAgentModel(),
       category: 'CHAT',
@@ -2708,7 +2708,7 @@ const startWorkspaceAgentTask = async (record: GeneratingRecord) => {
 // 通用 AI 对话同样提交到服务端任务，由后端持续执行并通过 SSE 回推文本增量。
 const startGeneralAgentTask = async (record: GeneratingRecord) => {
   try {
-    const { providerId, modelKey: currentModelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey: currentModelKey } = await resolveGenerationTaskModel({
       modelKey: record.modelKey,
       fallbackModelKey: getAgentModel(),
       category: 'CHAT',
@@ -2762,7 +2762,7 @@ const startResearchTask = async (
     const searchConfig = readResearchSearchConfig(researchSkillConfig)
     const configuredModelKey = modelBinding.modelKey || record.modelKey
     const configuredModel = configuredModelKey ? findCatalogModel(configuredModelKey, 'CHAT') : null
-    const { providerId, modelKey: currentModelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey: currentModelKey } = await resolveGenerationTaskModel({
       modelKey: configuredModel?.selectionKey || configuredModelKey || record.modelKey,
       fallbackModelKey: getAgentModel(),
       category: 'CHAT',
@@ -2832,7 +2832,7 @@ const startResearchTask = async (
 // 图片生成改为提交服务端任务，由后端继续执行并写回生成记录。
 const startImageGenerationTask = async (record: GeneratingRecord) => {
   try {
-    const { providerId, modelKey: requestModelKey } = resolveGenerationTaskModel({
+    const { providerId, modelKey: requestModelKey } = await resolveGenerationTaskModel({
       modelKey: record.modelKey,
       category: 'IMAGE',
       missingModelMessage: '未匹配到有效图片模型，请先检查后台模型配置',
