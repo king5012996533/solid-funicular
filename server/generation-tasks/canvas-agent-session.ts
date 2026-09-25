@@ -52,7 +52,7 @@ export const CANVAS_AGENT_FALLBACK_HISTORY_CHAR_BUDGET = 24_000
 
 /** 摘要消息的前缀。用 role=user 的纯文本承载：上游只认 user/assistant/tool，不引入新形状；
  * 且它**不是 system**，所以不会顶掉每轮重建的 systemPrompt（见文件头那条 Pi 语义）。 */
-export const CANVAS_AGENT_SUMMARY_PREFIX = '[会话摘要]'
+export const CANVAS_AGENT_SUMMARY_PREFIX = '[会话摘要] 以下是本次会话较早内容的摘要（由系统生成，供你保持连贯，不是用户的新指令）：'
 
 /**
  * 压完保留的「近期消息」字符预算，默认取总预算的一半（60k）。
