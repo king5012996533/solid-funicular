@@ -37,6 +37,13 @@ import {
   trimTranscriptToBudgetPreservingSystem,
   type CanvasAgentPersistedSession,
 } from "./canvas-agent-session";
+import {
+  CANVAS_AGENT_THINKING_BUDGETS,
+  buildCanvasAgentProviderSessionId,
+  escalateCanvasAgentThinkingLevel,
+  resolveCanvasAgentReasoningFields,
+  resolveCanvasAgentThinkingLevel,
+} from "./canvas-agent-thinking";
 
 /**
  * 画布 Agent 的服务端执行器（2026-09-23，M2）
@@ -423,6 +430,9 @@ export const executeCanvasAgentTaskFlow = async (
   if (!modelKey) {
     throw new Error("缺少对话模型标识");
   }
+  // 本轮用户输入要在创建 Agent **之前**就拿到：思考档位由它决定（见 canvas-agent-thinking）。
+  // 只判「本轮新说的这句」，不带历史 —— 历史在转录里，档位要跟的是当下这一轮的活。
+  const userPrompt = String(payload.prompt || "").trim();
   const providerId = String(
     (payload.requestBody || {}).providerId || "",
   ).trim();
@@ -437,6 +447,14 @@ export const executeCanvasAgentTaskFlow = async (
   });
   const upstreamUrl = `${upstream.baseUrl.replace(/\/+$/, "")}/${upstream.endpoint.replace(/^\/+/, "")}`;
 
+  // 思考预算分档（2026-09-26）：先按本轮用户输入判「这轮该想多少」。
+  // 基准档取自意图；出现工具调用后允许在同一轮里升一档（见下面的 escalation）。
+  const baseThinkingLevel = resolveCanvasAgentThinkingLevel(userPrompt);
+  const escalatedThinkingLevel = escalateCanvasAgentThinkingLevel(baseThinkingLevel, true);
+  // 档位 → 上游思考字段：只认模型能力声明里配过的档位，其它档位对本模型不生效（见 canvas-agent-thinking）。
+  const reasoningFieldsByLevel = resolveCanvasAgentReasoningFields(
+    upstream.modelCapabilityJson,
+  );
   context.emitTaskProgressEvent(task.recordId, {
     stage: "resolved_provider",
     message: "已解析模型配置，制片 Agent 开始工作",
@@ -466,6 +484,8 @@ export const executeCanvasAgentTaskFlow = async (
     apiKey: upstream.apiKey,
     modelKey,
     signal: task.abortController.signal,
+    // 把意图档位对应的思考字段带进网关：不传的话 Pi 的 thinkingLevel 在自建网关上完全无效
+    reasoningFieldsByLevel,
     onTextDelta: (delta) => {
       appendText(delta);
       void context
@@ -493,6 +513,10 @@ export const executeCanvasAgentTaskFlow = async (
         messageCount: detail.messageCount,
         toolCount: detail.toolCount,
         roles: detail.roles,
+        // 思考预算的验收证据：档位有没有下发、有没有落成上游字段、Pi 有没有带上缓存会话 id
+        thinkingLevel: detail.thinkingLevel,
+        injectedReasoningFields: detail.injectedReasoningFields,
+        sessionId: detail.sessionId,
       });
     },
   });
@@ -684,6 +708,24 @@ export const executeCanvasAgentTaskFlow = async (
     });
   }
 
+  /**
+   * 传给 Pi 的会话 id（**provider 缓存**用）。键法与会话恢复完全一致：会话 id + 画布 id。
+   * 详见 buildCanvasAgentProviderSessionId —— 只传会话 id 会让不同画布命中同一份缓存路由。
+   */
+  const providerSessionId = buildCanvasAgentProviderSessionId(sessionId, canvasId);
+  context.logGenerationTask("canvas_agent:thinking_level", {
+    recordId: task.recordId,
+    userId: task.userId,
+    // 基准档与升档目标都记下来：「这一轮为什么这么快/这么慢」以此为准
+    baseThinkingLevel,
+    escalatedThinkingLevel,
+    promptChars: userPrompt.length,
+    // 档位落到哪些上游字段（空串 = 该模型没声明对应档位，思考预算对它不生效）
+    reasoningFields: Object.keys(reasoningFieldsByLevel).join(","),
+    thinkingBudgets: JSON.stringify(CANVAS_AGENT_THINKING_BUDGETS),
+    providerSessionId,
+  });
+
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt({
@@ -693,6 +735,9 @@ export const executeCanvasAgentTaskFlow = async (
         summary: restoredContext.summaryText,
       }),
       tools: buildAgentTools(),
+      // 思考预算分档：闲聊最快、问答/小活默认、成片生产才认真想（见 canvas-agent-thinking）。
+      // 不设的话 Pi 用 "off"，模型思考时长完全不受我们控制 —— 这正是「一句话也要 15~31 秒」的原因。
+      thinkingLevel: baseThinkingLevel,
       // 恢复转录时**只给非 system 消息**：若保留旧 system 头，Pi 会把它当成会话自带系统提示，
       // 本轮新的 systemPrompt（含最新画布摘要）反而不生效（agent.js: messages[0] 已是 system 就不再插入）。
       ...(restoredContext.messages.length
@@ -700,6 +745,11 @@ export const executeCanvasAgentTaskFlow = async (
         : {}),
     },
     streamFn,
+    // Pi 的原生 `sessionId`：README 写明用于 provider 缓存。我们按「会话 id + 画布 id」传，
+    // 但**是否真的生效取决于上游**——见本文件 createGatewayStreamFn 处的说明（当前仅记录、未转发）。
+    ...(providerSessionId ? { sessionId: providerSessionId } : {}),
+    // 按 token 计费的 provider 才用得上；当前网关未映射 token 预算字段，透传以保 Pi 语义完整。
+    thinkingBudgets: CANVAS_AGENT_THINKING_BUDGETS,
     /**
      * 上下文兜底裁剪（Pi 的 `transformContext` 挂点）。
      *
@@ -781,6 +831,8 @@ export const executeCanvasAgentTaskFlow = async (
    * 只看网关请求数（+2 条消息 / 轮）分不清「模型又调了工具」还是「Pi 自己多跑了一轮」，
    * 而 `message_end` 里带着这一轮**到底产出了什么**（文本？工具调用？几个？）。
    */
+  // 同一轮内只升一次档（升一档、封顶 medium），已经升过就不再动 —— 反复改档会让思考开销来回抖。
+  let thinkingEscalated = false;
   agent.subscribe((event) => {
     if (event.type === "tool_execution_start") {
       context.emitTaskProgressEvent(task.recordId, {
@@ -818,6 +870,29 @@ export const executeCanvasAgentTaskFlow = async (
             )
             .reduce((a, b) => a + b, 0),
         });
+
+        /**
+         * 运行中升档：本轮一旦出现工具调用，说明模型真的决定动手了 —— 这不再是闲聊。
+         *
+         * Pi 支持中途改 `agent.state.thinkingLevel`（agent.js 每次请求都从 state 现读），
+         * 所以这里改完，**同一轮**下一次请求就生效。只升一档、只升一次：
+         * 升多了思考开销会来回抖，与省时间的目标相悖（见 escalateCanvasAgentThinkingLevel）。
+         */
+        const hasToolCall = parts.some(
+          (part) => (part as { type?: string }).type === "toolCall",
+        );
+        if (hasToolCall && !thinkingEscalated) {
+          thinkingEscalated = true;
+          if (escalatedThinkingLevel !== baseThinkingLevel) {
+            agent.state.thinkingLevel = escalatedThinkingLevel;
+            context.logGenerationTask("canvas_agent:thinking_escalated", {
+              recordId: task.recordId,
+              userId: task.userId,
+              from: baseThinkingLevel,
+              to: escalatedThinkingLevel,
+            });
+          }
+        }
       }
       return;
     }
@@ -838,7 +913,6 @@ export const executeCanvasAgentTaskFlow = async (
   });
 
   try {
-    const userPrompt = String(payload.prompt || "").trim();
     if (!userPrompt) {
       throw new Error("缺少要交给 Agent 的任务描述");
     }

@@ -135,7 +135,22 @@ export interface GatewayStreamFnOptions {
     toolCount: number;
     toolNames: string[];
     roles: string;
+    /** 本轮 Pi 下发的思考档位（`options.reasoning`），`""` = 未设 */
+    thinkingLevel: string;
+    /** 实际写进上游请求体的思考字段名（逗号分隔），空串 = 这一档对该模型没生效 */
+    injectedReasoningFields: string;
+    /** Pi 透传的 provider 缓存会话 id（本网关如实记录，未转发给上游，见 createGatewayStreamFn 注释） */
+    sessionId: string;
   }) => void;
+  /**
+   * 思考档位 → 上游请求体字段（由模型能力声明解析而来，见 canvas-agent-thinking.resolveCanvasAgentReasoningFields）。
+   *
+   * Pi 只负责把 `thinkingLevel` 变成 `options.reasoning`，**怎么写进请求是 provider 的事**：
+   * 我们的网关是 OpenAI 兼容 chat 接口，Pi 自带的 provider 又用不到，所以必须在这里落地映射，
+   * 否则 thinkingLevel 对我们这条链路是**完全无效**的（Pi 不会替我们发 reasoning_effort）。
+   * 传空对象（或某档没有条目）时该档不注入任何字段，行为与未设档位一致。
+   */
+  reasoningFieldsByLevel?: Record<string, Record<string, unknown>>;
   /** 单次请求的整体超时（含流式读取的空闲判定） */
   idleTimeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -161,8 +176,9 @@ export const createGatewayStreamFn = (options: GatewayStreamFnOptions) => {
   return (
     model: PiModel,
     context: TranscriptContext,
-    // Pi 会把温度等选项放在这里；我们的上游参数由网关侧的厂商配置决定，这里只接收不使用
-    _streamOptions?: SimpleStreamOptions,
+    // Pi 会把温度、思考档位（reasoning）等选项放在这里。温度等仍由厂商配置决定，
+    // 但 `reasoning` 是「思考预算」的唯一来源，必须转成上游字段（见 reasoningFieldsByLevel）。
+    streamOptions?: SimpleStreamOptions,
   ): AssistantMessageEventStream => {
     const stream = createAssistantMessageEventStream();
 
@@ -225,6 +241,21 @@ export const createGatewayStreamFn = (options: GatewayStreamFnOptions) => {
             : {}),
         };
 
+        /**
+         * 把 Pi 下发的思考档位落到上游请求体。
+         *
+         * `streamOptions.reasoning` 是 Pi 由 `agent.state.thinkingLevel` 翻译来的档位；
+         * 它本身只是一个语义标签，Pi 自带的 provider 才知道怎么发。我们这条自建网关必须自己映射，
+         * 否则「设了 thinkingLevel」只是自嗨。字段取自模型能力声明（reasoningFieldsByLevel），
+         * 某档没有条目就不注入 —— 对该模型保持改动前的行为，不误发字段。
+         */
+        const thinkingLevel = String(streamOptions?.reasoning || "");
+        const reasoningFields =
+          (thinkingLevel && options.reasoningFieldsByLevel?.[thinkingLevel]) || {};
+        if (Object.keys(reasoningFields).length > 0) {
+          Object.assign(body, reasoningFields);
+        }
+
         const openAiMessages = body.messages as OpenAiChatMessage[];
         options.onRequest?.({
           messageCount: openAiMessages.length,
@@ -239,6 +270,9 @@ export const createGatewayStreamFn = (options: GatewayStreamFnOptions) => {
                 : message.role,
             )
             .join(","),
+          thinkingLevel,
+          injectedReasoningFields: Object.keys(reasoningFields).join(","),
+          sessionId: String(streamOptions?.sessionId || ""),
         });
 
         const headers: Record<string, string> = {
