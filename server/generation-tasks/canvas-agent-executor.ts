@@ -22,10 +22,13 @@ import {
   waitForClientToolResult,
 } from "./canvas-agent-bridge";
 import {
+  CANVAS_AGENT_SUMMARY_CARRIER,
   CANVAS_AGENT_SUMMARY_INPUT_CHAR_BUDGET,
   CANVAS_AGENT_TRANSCRIPT_CHAR_BUDGET,
+  buildCanvasAgentRestoredContext,
   buildCanvasAgentSessionMeta,
   buildCanvasAgentSummarySource,
+  buildCanvasAgentSummarySystemSection,
   compactCanvasAgentTranscript,
   resolveCanvasAgentCanvasId,
   resolveCanvasAgentSessionBootstrap,
@@ -194,9 +197,21 @@ const logPreflightQuotaTelemetry = (
  * 于是可以把**每一步用哪个工具、批量多少、在哪一步停下来要确认**写成可执行的流程。
  * 这也是「Agent 能不能真替用户干活」的关键：流程写在提示词里，工具负责执行。
  */
-const buildSystemPrompt = (input: { brief: string }) =>
-  `你是「制片 Agent」，在用户的节点式画布上替他干完整的活：**从一份剧本出发，做出可用的分镜成果**。
+const buildSystemPrompt = (input: { brief: string; summary?: string }) => {
+  /**
+   * 摘要挂在 system 提示里（权威位，每轮 rebuild），不再留在转录中当一条 user 消息。
+   *
+   * 真机事故（2026-09-26，记录 cmuhd62cn000q4k923m7vvhle）：库里存的摘要明明写着「统一 16:9 画幅、
+   * 写实电影感」，问「第 1 轮让你记住的两条设定」，模型却回「我看不到第 1 轮的对话记录，因此无法确认」。
+   * 根因是它当时是 role=user 的旧消息 —— 模型把它读成「用户以前说过的话」，一问「过去」就去转录里
+   * 找原始对话，找不到就说看不到。放进 system 提示（模型当背景知识读）再配下面 # 纪律 的点名，
+   * 摘要才会被当作历史来源采用。段落构造在 buildCanvasAgentSummarySystemSection，承载位置见
+   * CANVAS_AGENT_SUMMARY_CARRIER 与落库日志。
+   */
+  const summarySection = buildCanvasAgentSummarySystemSection(input.summary || "");
 
+  return `你是「制片 Agent」，在用户的节点式画布上替他干完整的活：**从一份剧本出发，做出可用的分镜成果**。
+${summarySection}
 # 第 0 步 · 先弄清用户要什么（这一步决定后面做哪几步）
 
 先用一句话把理解说出来：「你要的是 ___，产出是 ___」。然后判断这是哪类活：
@@ -299,8 +314,13 @@ data.url）挂到它的分镜节点上。挂上之后执行分镜节点会走图
   把一次委托拆成好几次 —— 所以不是「不许问」，而是**只问猜不出来的那类**，并且**只能通过 \`ask_user\` 问**。
 - **在正文里提问 = 结束这一轮**（用户要再发一条消息才能答）。所以想问就用工具，不要写在回复里。
 - 汇报里不要复述工具名和参数，说人话（「已建好 6 个分镜节点，并挂上了母角参考图」）。
+- **会话历史以系统提示里的「会话摘要（较早内容）」为准**：较早的对话已被系统压缩进那一段（可能不在你眼前的转录里）。
+  用户问起之前定过的设定 / 做过的活 / 待办时，**必须依据这段摘要回答**，**绝不要回答「我看不到更早的对话记录」**。
+  实测事故（2026-09-26）：摘要里写着「统一 16:9 画幅、写实电影感」，模型却回「我看不到第 1 轮的对话记录，无法确认」——
+  信息明明在，只是没被采用。看到摘要就直接用它回答。
 
 ${input.brief ? `# 当前画布摘要\n${input.brief}` : ""}`;
+};
 
 /**
  * 用户这一轮附的参考图。
@@ -636,12 +656,27 @@ export const executeCanvasAgentTaskFlow = async (
     sessionId,
     previousSession,
   });
+
+  /**
+   * 恢复出来的转录要**拆成两半**用：
+   *   · 会话摘要 → 注入本轮 system 提示（权威位，见 buildSystemPrompt；不再作为 user 消息喂给模型）；
+   *   · 其余对话 → 进入 `initialState.messages` 当会话转录。
+   * 摘要仍以「消息」的形态存在库里（metaJson 里看得出、旧格式读得回），只是在**喂给模型前**被摘出来
+   * 换了个更权威的承载位置。落库时还会把它再拼回压缩输入的最前面，保住「旧摘要 + 中间段 → 新摘要」的累积。
+   */
+  const restoredContext = sessionBootstrap.source === "session"
+    ? buildCanvasAgentRestoredContext(sessionBootstrap.restoredMessages)
+    : { summaryText: "", summaryMessage: null, messages: [] as unknown[] };
   if (sessionBootstrap.source === "session") {
     context.logGenerationTask("canvas_agent:session_restored", {
       recordId: task.recordId,
       userId: task.userId,
       canvasId: sessionBootstrap.canvasId,
       messageCount: sessionBootstrap.restoredMessages.length,
+      // 摘要被摘去 system 提示、只留对话进转录：两个数都打出来，否则「摘要丢了」还是「换了位置」分不清
+      dialogMessageCount: restoredContext.messages.length,
+      summaryChars: restoredContext.summaryText.length,
+      summaryCarrier: CANVAS_AGENT_SUMMARY_CARRIER,
     });
   }
 
@@ -649,12 +684,13 @@ export const executeCanvasAgentTaskFlow = async (
     initialState: {
       systemPrompt: buildSystemPrompt({
         brief: String((payload.requestBody || {}).canvasBrief || "").trim(),
+        summary: restoredContext.summaryText,
       }),
       tools: buildAgentTools(),
       // 恢复转录时**只给非 system 消息**：若保留旧 system 头，Pi 会把它当成会话自带系统提示，
       // 本轮新的 systemPrompt（含最新画布摘要）反而不生效（agent.js: messages[0] 已是 system 就不再插入）。
-      ...(sessionBootstrap.restoredMessages.length
-        ? { messages: sessionBootstrap.restoredMessages as AgentMessage[] }
+      ...(restoredContext.messages.length
+        ? { messages: restoredContext.messages as AgentMessage[] }
         : {}),
     },
     streamFn,
@@ -843,8 +879,16 @@ export const executeCanvasAgentTaskFlow = async (
    */
   if (sessionBootstrap.canvasId && sessionId) {
     try {
+      /**
+       * 旧摘要在喂模型前已被摘走（改挂 system 提示，见 restoredContext），落库压缩时必须把它拼回最前面：
+       * planCanvasAgentCompaction 的待压段从第 0 条起切，只有旧摘要在场，span 才会含它，
+       * 才成立「旧摘要 + 中间段 → 新摘要」的累积；否则第二次压缩就只剩中间段、把之前的结论丢掉。
+       */
+      const messagesForCompaction: unknown[] = restoredContext.summaryMessage
+        ? [restoredContext.summaryMessage, ...(agent.state?.messages || [])]
+        : (agent.state?.messages || []);
       const compaction = await compactCanvasAgentTranscript({
-        messages: agent.state?.messages,
+        messages: messagesForCompaction,
         summarize: (span) =>
           requestGatewayChatText({
             upstreamUrl,
@@ -866,7 +910,8 @@ export const executeCanvasAgentTaskFlow = async (
           }),
       });
 
-      // 这条日志是「主动压缩到底有没有发生」的验收证据：压缩前后消息/字符数、摘要长度、是否走了回退
+      // 这条日志是「主动压缩到底有没有发生」的验收证据：压缩前后消息/字符数、摘要长度、是否走了回退，
+      // 以及摘要的承载位置（system 提示）与本次是否在累积。真机验收靠它判断摘要有没有被采用。
       context.logGenerationTask("canvas_agent:session_compacted", {
         recordId: task.recordId,
         userId: task.userId,
@@ -879,6 +924,11 @@ export const executeCanvasAgentTaskFlow = async (
         afterChars: compaction.afterChars,
         summaryChars: compaction.summaryChars,
         summarizedMessageCount: compaction.summarizedMessageCount,
+        carriesPreviousSummary: compaction.carriesPreviousSummary,
+        /** 摘要改挂的位置：真机验收要能从这里看出「这批消息里的摘要进了 system 提示」 */
+        summaryCarrier: CANVAS_AGENT_SUMMARY_CARRIER,
+        /** 本轮 system 提示里实际注入的摘要字符数（0 = 这一轮没摘要有可注入） */
+        summaryAppliedToSystemPrompt: restoredContext.summaryText.length,
         failureReason: compaction.failureReason.slice(0, 300),
       });
 

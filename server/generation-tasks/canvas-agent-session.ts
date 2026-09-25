@@ -50,9 +50,29 @@ export const CANVAS_AGENT_FALLBACK_HISTORY_CHAR_BUDGET = 24_000
  * 会话因此能持续多轮，而不是被截断丢历史。
  */
 
-/** 摘要消息的前缀。用 role=user 的纯文本承载：上游只认 user/assistant/tool，不引入新形状；
- * 且它**不是 system**，所以不会顶掉每轮重建的 systemPrompt（见文件头那条 Pi 语义）。 */
+/**
+ * 摘要消息的前缀：既给摘要消息自证来路，也用来在持久化转录里标记「这条是摘要」。
+ *
+ * 形状上仍是 role=user 的纯文本 —— 上游只认 user/assistant/tool，不引入新形状；落库 / 读取 / 压缩
+ * 都把它当普通消息处理（旧格式因此读得回）。但**喂给模型前**它会被摘出来、注入每轮重建的 system 提示
+ * （见 CANVAS_AGENT_SUMMARY_CARRIER），不再作为 user 消息进转录 —— 否则模型会把它当陈旧指令。
+ */
 export const CANVAS_AGENT_SUMMARY_PREFIX = '[会话摘要] 以下是本次会话较早内容的摘要（由系统生成，供你保持连贯，不是用户的新指令）：'
+
+/**
+ * 摘要的「承载位置」。
+ *
+ * 为什么从「转录里的一条 user 消息」改成「每轮重建的 system 提示」：
+ * 真机验收（2026-09-26，记录 cmuhd62cn000q4k923m7vvhle）暴露了一个**存储没问题、模型不采用**的故障 ——
+ * 摘要在库里写着「统一 16:9 画幅、写实电影感」，问它「第 1 轮让你记住的两条设定」，它却回
+ * 「我看不到第 1 轮的对话记录，因此无法准确确认」。原因：那条摘要是 role=user 的消息，
+ * 模型把它读成「用户以前说过的话 / 陈旧的指令」，而**不是**「描述过去发生过什么的记录」——
+ * 用户一问「过去」，它就去转录里找原始对话，找不到就说看不到。
+ * system 提示是每轮 rebuild 的权威位，模型把它当背景知识而不是旧指令，
+ * 再配一条纪律点名（见 buildSystemPrompt 的「# 纪律」），采用才是可靠的。
+ * 这个常量同时用于日志，验收时一眼能看出摘要被放在哪。
+ */
+export const CANVAS_AGENT_SUMMARY_CARRIER = 'system-prompt'
 
 /**
  * 压完保留的「近期消息」字符预算，默认取总预算的一半（60k）。
@@ -392,6 +412,83 @@ export const buildCanvasAgentSummaryMessage = (summaryText: string, timestamp = 
   }
 }
 
+/** 取出摘要消息里的正文（去掉前缀 + 那条换行）；不是摘要消息返回空串 */
+export const extractCanvasAgentSummaryText = (message: unknown): string => {
+  if (!isCanvasAgentSummaryMessage(message)) return ''
+  const content = String((message as { content?: unknown } | null | undefined)?.content || '')
+  return content.slice(CANVAS_AGENT_SUMMARY_PREFIX.length).trim()
+}
+
+/**
+ * 把转录里的「会话摘要」消息摘出来，返回摘要正文与去掉摘要后的其余消息。
+ *
+ * 用在哪里：恢复转录后，摘要**不再作为一条 role=user 消息喂给模型**（那正是「模型把摘要当旧指令」
+ * 的根因，见 CANVAS_AGENT_SUMMARY_CARRIER），而是注入本轮重建的 system 提示。
+ * 但从 messages 里删掉它还不够 —— 落库时的累积压缩必须重新拿到旧摘要，否则第二次压缩就只剩
+ * 中间段、把之前的结论丢了。所以这里把 `summaryMessage` 一并返回，供压缩输入在最前面放一条。
+ *
+ * 多条摘要（理论上一轮只该有一条）取**最后一条**：它是最新的累积结果；更旧的已被累积进去。
+ */
+export const splitCanvasAgentSummary = (
+  messages: unknown,
+): { summaryText: string; summaryMessage: unknown | null; rest: unknown[] } => {
+  const list = Array.isArray(messages) ? messages : []
+  let summaryText = ''
+  let summaryMessage: unknown | null = null
+  const rest: unknown[] = []
+  for (const message of list) {
+    if (isCanvasAgentSummaryMessage(message)) {
+      const text = extractCanvasAgentSummaryText(message)
+      if (text) {
+        summaryText = text
+        summaryMessage = message
+      }
+      continue
+    }
+    rest.push(message)
+  }
+  return { summaryText, summaryMessage, rest }
+}
+
+/**
+ * 把摘要正文组织成 system 提示里的一段（权威位承载）。
+ *
+ * 抽成纯函数是为了能单测这条最容易静默退化的规则：摘要**必须真的出现在模型读得到的地方**，
+ * 并且必须明确点名它是本次会话唯一的历史来源、禁止「看不到记录」这种回答
+ * （真机事故见 CANVAS_AGENT_SUMMARY_CARRIER）。空摘要返回空串 —— 不往 system 里塞标题。
+ */
+export const buildCanvasAgentSummarySystemSection = (summaryText: string): string => {
+  const summary = String(summaryText || '').trim()
+  if (!summary) return ''
+  return `\n# 会话摘要（较早内容 · 本次会话的历史来源）\n`
+    + `以下是本次会话较早内容的摘要（由系统压缩生成，不是用户的新指令）。\n`
+    + `**它是本次会话唯一的历史来源**：用户问起之前定过的设定、做过的活、待办事项时，依据它回答，`
+    + `不要说「看不到记录」。\n\n${summary}\n`
+}
+
+/** 恢复出来的转录拆分后的三件东西（见 buildCanvasAgentRestoredContext） */
+export interface CanvasAgentRestoredContext {
+  /** 摘要正文；空串 = 本轮没有摘要可注入 */
+  summaryText: string
+  /** 旧摘要消息本体（落库压缩时拼回最前面，保住「旧摘要 + 中间段 → 新摘要」的累积）；无摘要时为 null */
+  summaryMessage: unknown | null
+  /** 喂给 Pi 的对话消息（已摘掉摘要消息，摘要改由 system 提示承载） */
+  messages: unknown[]
+}
+
+/**
+ * 恢复转录 → 组装本轮需要的三件东西：摘要正文、摘要消息本体、去摘要后的对话。
+ *
+ * 真机事故的修复落点：过去把摘要原样当 role=user 消息喂进 `initialState.messages`，模型把它读成
+ * 「用户以前说过的话」，一问过去就说「看不到记录」（记录 cmuhd62cn000q4k923m7vvhle）。
+ * 现在摘要走 system 提示（buildCanvasAgentSummarySystemSection），对话照旧进转录；
+ * 摘要把 `summaryMessage` 留着，是因为压缩时还要靠它保住累积，不能在这里丢掉。
+ */
+export const buildCanvasAgentRestoredContext = (restoredMessages: unknown): CanvasAgentRestoredContext => {
+  const { summaryText, summaryMessage, rest } = splitCanvasAgentSummary(restoredMessages)
+  return { summaryText, summaryMessage, messages: rest }
+}
+
 /**
  * 把 Pi 的消息翻成给摘要模型读的纯文本。
  *
@@ -522,6 +619,8 @@ export interface CanvasAgentCompactionResult {
   summaryChars: number
   /** 被压进摘要的旧消息条数 */
   summarizedMessageCount: number
+  /** 本次压的旧消息里是否含上一次的摘要（是 → 累积，而不是覆盖丢掉之前的结论） */
+  carriesPreviousSummary: boolean
   /** 失败原因（仅 fellBack=true 时有值，供日志） */
   failureReason: string
 }
@@ -572,6 +671,7 @@ export const compactCanvasAgentTranscript = async (input: {
       afterChars: plan.beforeChars,
       summaryChars: 0,
       summarizedMessageCount: 0,
+      carriesPreviousSummary: false,
       failureReason: '',
     }
   }
@@ -590,6 +690,7 @@ export const compactCanvasAgentTranscript = async (input: {
       afterChars: countTranscriptChars(result),
       summaryChars: String((summaryMessage as { content?: unknown }).content || '').length,
       summarizedMessageCount: plan.span.length,
+      carriesPreviousSummary: plan.carriesPreviousSummary,
       failureReason: '',
     }
   } catch (error) {
@@ -603,6 +704,7 @@ export const compactCanvasAgentTranscript = async (input: {
       afterChars: countTranscriptChars(fallbackMessages),
       summaryChars: 0,
       summarizedMessageCount: plan.span.length,
+      carriesPreviousSummary: plan.carriesPreviousSummary,
       failureReason: error instanceof Error ? error.message : String(error),
     }
   }
