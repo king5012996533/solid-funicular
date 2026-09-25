@@ -197,7 +197,58 @@ const logPreflightQuotaTelemetry = (
  * 于是可以把**每一步用哪个工具、批量多少、在哪一步停下来要确认**写成可执行的流程。
  * 这也是「Agent 能不能真替用户干活」的关键：流程写在提示词里，工具负责执行。
  */
-const buildSystemPrompt = (input: { brief: string; summary?: string }) => {
+/**
+ * 画布现状的承载标签。**位置是刻意的**：它只出现在**用户消息**的附注里，不在 system 提示里。
+ */
+export const CANVAS_AGENT_STATE_NOTICE_LABEL = "【画布现状·仅供参考】";
+
+/**
+ * 画布现状的承载位置：**本轮用户消息的附注**（不再是 system 提示里的独立段）。
+ *
+ * 真机事故（2026-09-26，同一会话同一画布 cmuhdcz010000jk92aicdlxlo 的三轮实测）：
+ *   1. 用户说「记住两条设定：统一 21:9、水墨国风」，模型回「记住了」；
+ *   2. 关页重开后再问「我刚才让你记住的两条设定是什么」，模型回的是画布上的
+ *      「金毛寻回犬在草地上快乐奔跑……用文本输入驱动文生图节点生成画面」；
+ *   3. 再问「刚才让你记住的**画幅比例**是多少？只回答那个数字」，模型回「16:9」（应为 21:9）。
+ * 旁证把责任钉死在「信谁」而不是「信息在不在」：
+ *   · 服务端日志 canvas_agent:session_restored {messageCount:2, dialogMessageCount:2} —— 第 2 轮确实拿到了第 1 轮那两句对话，管线没坏；
+ *   · 同一个模型写的压缩摘要抓对了「统一使用 21:9 画幅；水墨国风」——信息在、摘要也对。
+ * 16:9 与「金毛寻回犬」都来自**画布**（示例模板文本节点的内容 + 图片节点上的 ratio）：
+ * 模型把 system 提示里的「画布现状」当成了用户设定，把真正的对话历史当成了背景。
+ *
+ * 为什么选「用户消息附注」（方案 1）而不是「留在 system、单独分区靠后」（方案 2）：
+ *   · system 提示里同时睡着几千字的工作手册，画布现状与它同处权威位，权重自然最高 —— 这正是事故形态；
+ *   · 附注进用户消息后，对话历史保持连续的 user/assistant 序列，模型回答「会话事实」时不会把一段状态当指令；
+ *   · 方案 2 只降低权重、仍是「状态」与「用户消息」两条通道，模型仍可能拿状态覆盖历史。
+ * 画布现状**依然完整可见**：节点数、节点内容、比例、模型、连线、选中项都在附注里，Agent 不会瞎。
+ */
+export const buildCanvasAgentCanvasStateNotice = (brief: string): string => {
+  const text = String(brief || "").trim();
+  if (!text) return "";
+  return `\n\n${CANVAS_AGENT_STATE_NOTICE_LABEL}\n`
+    + "（这是当前画布的**状态快照**，**不是用户的要求或设定**；其中的文字/比例/风格可能来自模板示例或旧内容。"
+    + "用户问起之前定过的设定时以对话历史为准；若与对话历史冲突，按对话历史回答并说明。）\n"
+    + text;
+};
+
+/**
+ * 「信谁」的规则：放在 system 提示**最前**（注意力最高位），写下冲突时的裁决。
+ *
+ * 事故与证据见 buildCanvasAgentCanvasStateNotice 上方注释。这里额外把「最新一轮」写进规则，
+ * 是因为画布现状现在随每轮用户消息附注更新，旧轮次的附注会随转录保留 —— 读最新那条才对。
+ */
+export const buildCanvasAgentPrioritySection = (): string => `# 信息优先级（冲突时以此为准，先读这一段）
+- 用户问起「刚才说过的 / 让你记住的 / 我们之前定的」这类**会话事实**时，**只以对话历史为准**（含系统提示里的「# 会话摘要」）。
+- 用户消息末尾的 ${CANVAS_AGENT_STATE_NOTICE_LABEL} 只是**当前画面与节点参数的状态快照**，**不是**用户的要求或设定：
+  其中的文字、比例、风格可能来自模板示例、旧内容或他人的记录，**不代表用户说过什么**。
+- 两者冲突时**以对话历史为准**，并在回答里说明你按哪条走
+  （例：「你第 1 轮定的是 21:9；画布上那个图片节点现在的比例是 16:9，需要我改过来吗？」）。
+- 只有**没有会话历史可依据时**（全新会话，或用户从未提过这件事），才采用画布上的当前取值。
+- 画布现状随每轮更新：要参考时读**最新一条**用户消息末尾的 ${CANVAS_AGENT_STATE_NOTICE_LABEL} 附注。
+
+`;
+
+export const buildSystemPrompt = (input: { brief: string; summary?: string }) => {
   /**
    * 摘要挂在 system 提示里（权威位，每轮 rebuild），不再留在转录中当一条 user 消息。
    *
@@ -209,8 +260,10 @@ const buildSystemPrompt = (input: { brief: string; summary?: string }) => {
    * CANVAS_AGENT_SUMMARY_CARRIER 与落库日志。
    */
   const summarySection = buildCanvasAgentSummarySystemSection(input.summary || "");
+  // 画布现状**不在这里**（见 buildCanvasAgentCanvasStateNotice）：system 只留一句指针，内容由用户消息附注承载。
+  const hasCanvasBrief = String(input.brief || "").trim().length > 0;
 
-  return `你是「制片 Agent」，在用户的节点式画布上替他干完整的活：**从一份剧本出发，做出可用的分镜成果**。
+  return `${buildCanvasAgentPrioritySection()}你是「制片 Agent」，在用户的节点式画布上替他干完整的活：**从一份剧本出发，做出可用的分镜成果**。
 ${summarySection}
 # 第 0 步 · 先弄清用户要什么（这一步决定后面做哪几步）
 
@@ -319,7 +372,7 @@ data.url）挂到它的分镜节点上。挂上之后执行分镜节点会走图
   实测事故（2026-09-26）：摘要里写着「统一 16:9 画幅、写实电影感」，模型却回「我看不到第 1 轮的对话记录，无法确认」——
   信息明明在，只是没被采用。看到摘要就直接用它回答。
 
-${input.brief ? `# 当前画布摘要\n${input.brief}` : ""}`;
+${hasCanvasBrief ? `\n# 画布现状\n画布现状**不在本系统提示里**，而在**用户消息末尾**的 ${CANVAS_AGENT_STATE_NOTICE_LABEL} 附注里（随每轮更新，读最新一条）。需要时读它，但它只是**状态**、不是用户的设定。` : ""}`;
 };
 
 /**
@@ -343,14 +396,21 @@ const buildReferenceNotice = (
 }
 
 /**
- * 本轮执行要求（贴在用户消息末尾那段）。
- * 恢复会话时直接用这个拼「用户消息 + 执行要求」；没有转录可恢复时，`buildPromptWithHistory` 再在其前拼历史。
+ * 本轮执行要求 + 画布现状附注（都贴在用户消息里）。
+ * 恢复会话时直接用这个拼「用户消息 + 执行要求 + 画布现状」；没有转录可恢复时，`buildPromptWithHistory` 再在其前拼历史。
+ *
+ * 画布现状为什么放在这里（而不是 system 提示里）：见 buildCanvasAgentCanvasStateNotice 上方的事故记录 ——
+ * 放在 system 权威位时模型拿它覆盖了用户设定。放到用户消息里、并显式标注「仅供参考、不是设定」，
+ * 既保持对话历史是连续的 user/assistant 序列，又确保 Agent 仍看得到画布（节点、比例、连线都在）。
  */
 export const buildPromptWithExecutionDemand = (
   prompt: string,
   requestBody: Record<string, unknown> | null | undefined,
 ) => {
   const referenceNotice = buildReferenceNotice(requestBody)
+  const canvasStateNotice = buildCanvasAgentCanvasStateNotice(
+    String((requestBody || {}).canvasBrief || ""),
+  )
 
   /**
    * 执行要求贴在**用户消息**里，而不是只写在系统提示里。
@@ -374,7 +434,7 @@ export const buildPromptWithExecutionDemand = (
     + "**不要用读取工具反复轮询等结果** —— 提交完继续做下一步；要看结果就读一次单节点（get_canvas_node），"
     + "还是 generating 就先做别的。定位画布用 get_canvas_overview，看细节用 get_canvas_node，别用 get_canvas_state 整张读。"
 
-  return `${prompt}${referenceNotice}${executionDemand}`;
+  return `${prompt}${referenceNotice}${canvasStateNotice}${executionDemand}`;
 };
 
 /**
@@ -683,6 +743,8 @@ export const executeCanvasAgentTaskFlow = async (
   const agent = new Agent({
     initialState: {
       systemPrompt: buildSystemPrompt({
+        // 这里只用于决定「要不要给画布现状指针」；画布现状的**内容**改由用户消息的附注承载
+        //（放 system 权威位会让模型拿它覆盖对话历史，见 buildCanvasAgentCanvasStateNotice）。
         brief: String((payload.requestBody || {}).canvasBrief || "").trim(),
         summary: restoredContext.summaryText,
       }),
