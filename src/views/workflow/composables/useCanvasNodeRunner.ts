@@ -51,36 +51,52 @@ export const unregisterNodeRunner = (nodeId: string) => {
 
 export const hasNodeRunner = (nodeId: string) => runners.has(nodeId);
 
+/** 「提交一次生成」的结果三态（工具层据此把回执说清楚，见 canvas-agent-tools 的 toSubmitReceipt） */
+export interface NodeRunOutcome {
+  ok: boolean;
+  /**
+   * submitted = 已提交、正在生成；duplicate = 本轮已提交过（不是失败，也没重复扣费）；
+   * failed = 没提交成功（未挂载 / 提交阶段抛错）。
+   */
+  status: "submitted" | "duplicate" | "failed";
+  reason?: string;
+}
+
 /**
- * 跑一次该节点。返回它自己的执行结果（成功/失败原因），不吞异常 ——
+ * 跑一次该节点。返回它自己的**提交结果**（成功/失败原因），不吞异常 ——
  * 调用方（例如画布助手）要把真实原因转述给用户，而不是假装成功。
+ *
+ * `await runner()` 现在只等到「提交完成」（节点组件在 taskId 落盘后即返回，不再等出图），
+ * 所以这个入口**不会**卡几分钟。出图结果由节点自己的事件流落回画布。
  */
 export const runNodeById = async (
   nodeId: string,
-): Promise<{ ok: boolean; reason?: string }> => {
+): Promise<NodeRunOutcome> => {
   // 去重闸门：同一节点「正在跑」或「本轮已经成功跑过」都只允许触发一次。
   // 放在这里而不是工具层：批量 run_nodes 与单个 run_node 都汇到这一个入口，
   // 谁先到谁占位，另一条路径拿到明确的失败原因（而不是静默再扣一次费）。
   if (runningNodeIds.has(nodeId)) {
-    return { ok: false, reason: "该节点正在生成中，已忽略这次重复执行" };
+    return { ok: false, status: "duplicate", reason: "该节点正在生成中，已忽略这次重复执行" };
   }
   if (triggeredNodeIds.has(nodeId)) {
     return {
       ok: false,
-      reason: "本轮已经触发过该节点（重复执行会重复扣费），已忽略；要重新生成请新开一轮",
+      status: "duplicate",
+      reason: "本轮已经触发过该节点（重复提交会重复扣费），已忽略；要重新生成请新开一轮",
     };
   }
   const runner = runners.get(nodeId);
-  if (!runner) return { ok: false, reason: "该节点未挂载或暂不支持直接执行" };
+  if (!runner) return { ok: false, status: "failed", reason: "该节点未挂载或暂不支持直接执行" };
   runningNodeIds.add(nodeId);
   try {
     await runner();
     triggeredNodeIds.add(nodeId);
-    return { ok: true };
+    return { ok: true, status: "submitted" };
   } catch (error) {
     // 失败不占位：本轮内仍允许对同一节点重试。
     return {
       ok: false,
+      status: "failed",
       reason: error instanceof Error ? error.message : String(error),
     };
   } finally {

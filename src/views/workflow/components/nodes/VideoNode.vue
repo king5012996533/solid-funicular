@@ -354,8 +354,61 @@ const handlePromptSend = (
   })
 }
 
+/** 提交阶段：建任务 → 立刻把 taskId/参数写回节点。任何失败都抛出（调用方要如实回执，不能吞） */
+const submitGeneration = async (input: {
+  prompt: string
+  modelKey: string
+  ratio?: string
+  duration?: string
+  resolution?: string
+  referenceFrames: string[]
+}) => {
+  const { providerId, modelKey } = await resolveGenerationTaskModel({
+    modelKey: input.modelKey,
+    category: 'VIDEO',
+    missingModelMessage: '未匹配到有效的视频模型，请先在后台配置',
+  })
+  const requestBody: Record<string, unknown> = {
+    providerId,
+    model: modelKey,
+    prompt: input.prompt,
+  }
+  if (input.ratio) requestBody.ratio = input.ratio
+  if (input.resolution) requestBody.resolution = input.resolution
+  if (input.duration) requestBody.duration = Number(input.duration) || input.duration
+  if (input.referenceFrames.length) requestBody.image_urls = [...input.referenceFrames]
+
+  const saved = await createGenerationTask({
+    source: 'workflow',
+    type: 'video',
+    prompt: input.prompt,
+    modelKey,
+    ratio: input.ratio,
+    resolution: input.resolution,
+    duration: input.duration,
+    referenceImages: input.referenceFrames,
+    requestBody,
+  })
+  const taskId = String(saved?.id || '').trim()
+  if (!taskId) throw new Error('视频任务创建失败')
+
+  // 提交时就落库：提示词/参数给「重试」用，taskId 给「刷新后对账」用（与图片节点同一个教训）
+  updateNode(props.id, {
+    prompt: input.prompt,
+    model: modelKey,
+    ratio: input.ratio || '',
+    resolution: input.resolution || '',
+    duration: input.duration ? Number(input.duration) : 0,
+    taskRecordId: taskId,
+    submittedAt: Date.now(),
+    loading: true,
+    error: '',
+  })
+  return taskId
+}
+
 /**
- * 提交与重试共用：建任务 → 立刻把 taskId/提示词写回节点 → 订阅事件流。
+ * 提交与重试共用：提交 → 等结果（用户手动路径，行为与改动前一致）。
  * 与 ImageNode 刻意保持一致（同一套失败/停止/超时处理），差异只在参数与产物字段。
  */
 const runGeneration = async (input: {
@@ -369,48 +422,7 @@ const runGeneration = async (input: {
   try {
     isLoading.value = true
     errorMsg.value = ''
-    const { providerId, modelKey } = await resolveGenerationTaskModel({
-      modelKey: input.modelKey,
-      category: 'VIDEO',
-      missingModelMessage: '未匹配到有效的视频模型，请先在后台配置',
-    })
-    const requestBody: Record<string, unknown> = {
-      providerId,
-      model: modelKey,
-      prompt: input.prompt,
-    }
-    if (input.ratio) requestBody.ratio = input.ratio
-    if (input.resolution) requestBody.resolution = input.resolution
-    if (input.duration) requestBody.duration = Number(input.duration) || input.duration
-    if (input.referenceFrames.length) requestBody.image_urls = [...input.referenceFrames]
-
-    const saved = await createGenerationTask({
-      source: 'workflow',
-      type: 'video',
-      prompt: input.prompt,
-      modelKey,
-      ratio: input.ratio,
-      resolution: input.resolution,
-      duration: input.duration,
-      referenceImages: input.referenceFrames,
-      requestBody,
-    })
-    const taskId = String(saved?.id || '').trim()
-    if (!taskId) throw new Error('视频任务创建失败')
-
-    // 提交时就落库：提示词/参数给「重试」用，taskId 给「刷新后对账」用（与图片节点同一个教训）
-    updateNode(props.id, {
-      prompt: input.prompt,
-      model: modelKey,
-      ratio: input.ratio || '',
-      resolution: input.resolution || '',
-      duration: input.duration ? Number(input.duration) : 0,
-      taskRecordId: taskId,
-      submittedAt: Date.now(),
-      loading: true,
-      error: '',
-    })
-
+    const taskId = await submitGeneration(input)
     const controller = new AbortController()
     taskStreamController = controller
     await subscribeGenerationTaskEvents(taskId, {
@@ -457,20 +469,47 @@ const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
   }
 }
 
-/** 供画布助手调用：用节点当前参数跑一次（注册进 useCanvasNodeRunner，Agent 的 run_node 才能触发） */
+/**
+ * 供画布助手调用：用节点当前参数**提交一次视频生成**。
+ *
+ * 与 ImageNode 同样「提交即返回」（2026-09-26，第一刀：手感）：一次 run_node 不该卡到出片，
+ * 出片由本节点自己的事件流落回 url。提交阶段失败必须抛出去，工具层据此如实回执。
+ */
 const runOnceForAgent = async () => {
   // 节点自己存的提示词要当 inline 传进去：composeFinalPrompt 只负责把「上游文本节点的内容」
   // 与 inline 拼起来，不读 data.prompt —— 直接传 '' 会导致明明有提示词却报「还没有提示词」
   const stored = String(props.data?.prompt || '').trim()
   const prompt = composeFinalPrompt(stored) || stored
   if (!prompt) throw new Error('该视频节点还没有提示词，先给它写一个（update_node 的 prompt）')
-  await runGeneration({
-    prompt,
-    modelKey: String(props.data?.model || '').trim(),
-    ratio: String(props.data?.ratio || '') || undefined,
-    duration: props.data?.duration ? String(props.data.duration) : undefined,
-    resolution: String(props.data?.resolution || '') || undefined,
-    referenceFrames: upstreamFrameUrls.value,
+  isLoading.value = true
+  errorMsg.value = ''
+  let taskId = ''
+  try {
+    taskId = await submitGeneration({
+      prompt,
+      modelKey: String(props.data?.model || '').trim(),
+      ratio: String(props.data?.ratio || '') || undefined,
+      duration: props.data?.duration ? String(props.data.duration) : undefined,
+      resolution: String(props.data?.resolution || '') || undefined,
+      referenceFrames: upstreamFrameUrls.value,
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : '视频生成提交失败'
+    isLoading.value = false
+    errorMsg.value = message
+    updateNode(props.id, { loading: false, error: message })
+    throw err instanceof Error ? err : new Error(message)
+  }
+  const controller = new AbortController()
+  taskStreamController = controller
+  void subscribeGenerationTaskEvents(taskId, {
+    signal: controller.signal,
+    onEvent: applyTaskEvent,
+  }).catch((err: unknown) => {
+    if ((err as { name?: string })?.name === 'AbortError') return
+    isLoading.value = false
+    errorMsg.value = err instanceof Error ? err.message : '视频结果订阅中断'
+    updateNode(props.id, { loading: false, error: errorMsg.value })
   })
 }
 

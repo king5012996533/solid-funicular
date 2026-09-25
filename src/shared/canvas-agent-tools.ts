@@ -115,10 +115,46 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "get_canvas_state",
-    label: "读取画布",
+    label: "读取整张画布",
     description:
-      "读取当前画布：节点清单（id / 类型 / 提示词 / 模型 / 状态 / 是否已有出图 hasImage）、连线、当前选中的节点。动手改画布之前先调用它。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再调 run_node/run_nodes。",
+      "读取整张画布的完整现状：全部节点（含提示词/模型/状态/是否已有出图）、全部连线、当前选中的节点。**上下文开销大**，只在确实需要整张画布时才用 —— 定位节点用 get_canvas_overview，看某个节点的细节用 get_canvas_node(id)。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再提交生成。",
     parameters: { type: "object", properties: {}, required: [] },
+    requiresClient: true,
+  },
+  {
+    /**
+     * 便宜的整画布读（2026-09-26，第一刀：手感）。
+     *
+     * 原来的默认读工具是 get_canvas_state —— 一次返回全部节点 + 全部连线 + 文本片段。
+     * 模型为了「拿几个 id」要反复拉回整张画布，上下文被同一份内容反复塞，还把每轮工具预算烧光。
+     * 这里只给**定位与决策需要的字段**：id / kind / 标题 / 生成状态 / 有没有产物 + 各类计数。
+     * 刻意不含 prompt、不含坐标、不含连线明细 —— 那些要细节时用 get_canvas_node(id) 单独取。
+     */
+    name: "get_canvas_overview",
+    label: "读取画布概览",
+    description:
+      "读取画布概览：节点总数、连线数、按类型/生成状态的计数，以及每个节点的 id / 类型 / 标题 / 生成状态 / 是否已有产物。**不含提示词、坐标与连线明细** —— 所以它便宜、可频繁调用。需要某个节点的提示词/错误/出图地址/参考图时，拿 id 调 get_canvas_node。",
+    parameters: { type: "object", properties: {}, required: [] },
+    requiresClient: true,
+  },
+  {
+    /**
+     * 单节点全量读（2026-09-26，第一刀：手感）。
+     *
+     * 与概览配对：概览负责定位，单节点负责细节。此前任何细节（提示词、错误、出图地址、参考图）
+     * 都只能靠整画布读，于是「看一眼某个节点」的代价是拉回整张画布。
+     */
+    name: "get_canvas_node",
+    label: "读取单个节点",
+    description:
+      "按 id 读取一个节点的全部细节：类型、标题、坐标、是否选中、提示词/内容/模型/尺寸/画质/参考图/出图地址/任务 id/生成状态/错误，以及精简的入线与出线摘要（来源/目标节点的 id 与标题）。需要某节点的提示词、错误、出图地址或参考图时用它，不要为此读整张画布。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "节点 id（来自 get_canvas_overview）" },
+      },
+      required: ["id"],
+    },
     requiresClient: true,
   },
   {
@@ -157,7 +193,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "节点 id（来自 get_canvas_state）" },
+        id: { type: "string", description: "节点 id（来自 get_canvas_overview）" },
         content: { type: "string", description: "文本节点的新内容" },
         prompt: { type: "string", description: "新的提示词" },
         label: { type: "string", description: "节点标题" },
@@ -243,9 +279,9 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
      * 仍然是**每个节点各起一个生成任务**（计费、并发、失败重试都还走原有那套），不是新机制。
      */
     name: "run_nodes",
-    label: "批量执行节点",
+    label: "批量提交生成",
     description:
-      "依次执行多个节点（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。会消耗积分，调用前必须先取得用户确认。同一个节点在同一轮里只会真正执行一次：重复提交会被忽略并告知原因，不要靠反复调用它来「等结果」。",
+      "一次**提交**多个节点的生成任务（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。**提交即回执，不等出图** —— 回执里每个节点带提交状态（generating 表示已提交、正在生成）。会消耗积分，调用前必须先取得用户确认，并在确认里写清这一批的规模与预计消耗。同一个节点在同一轮里只会真正提交一次：重复提交会被忽略并如实说明原因。**不要用读取工具反复轮询等结果** —— 提交完就继续做下一步；确实要看某个节点出没出图时，用 get_canvas_node(id) 读一次它的 generationStatus，别原地打转。",
     parameters: {
       type: "object",
       properties: {
@@ -290,7 +326,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "remove_node",
     label: "删除节点",
     description:
-      "删除一个节点（连带它的连线）。删之前先用 get_canvas_state 确认 id。",
+      "删除一个节点（连带它的连线）。删之前先用 get_canvas_overview 确认 id。",
     parameters: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -348,9 +384,9 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   },
   {
     name: "run_node",
-    label: "执行节点",
+    label: "提交节点生成",
     description:
-      "执行某个节点（图片节点会真的去生成；视频节点当前服务端已接通但仍在验证中）。耗时较长，执行后如实告知结果。同一个节点在同一轮里只会真正执行一次：重复提交会被忽略并告知原因（不会重复扣费），不要靠反复调用它来「等结果」，等待请用 get_canvas_state 看状态。",
+      "**提交**某个节点的生成任务（图片节点会真的去生成；视频节点当前服务端已接通但仍在验证中）。**提交即回执，不等出图**：回执里带这个节点的提交状态，出图结果随后由节点自己落到画布上。提交失败会如实回执（不会把「没提交成功」说成成功）。同一个节点在同一轮里只会真正提交一次：重复提交会被忽略并如实说明原因（不会重复扣费）。**不要用读取工具反复轮询等结果**，要看结果就读单节点 get_canvas_node(id) 的 generationStatus 与出图地址。",
     parameters: {
       type: "object",
       properties: { id: { type: "string" } },

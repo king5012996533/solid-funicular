@@ -196,6 +196,8 @@ await check('没有历史时也把「本轮执行要求」附上（实测缺了�
   assert(result.includes('【本轮执行要求】'), '要贴上执行要求')
   assert(result.includes('不要中途停下来汇报'), '执行要求要说清「别中途收尾」')
   assert(result.includes('ask_user'), '执行要求要写清「猜不出来的信息用 ask_user 问」')
+  assert(result.includes('提交即回执'), '执行要求要说清生成工具是「提交即回执」（这是去轮询的关键一条）')
+  assert(/不要用读取工具反复轮询/.test(result), '执行要求要明确禁止用读取工具反复轮询等结果')
 })
 
 await check('有历史时贴成背景，并标明「用户现在的要求」', () => {
@@ -221,6 +223,28 @@ await check('技能键与工具定义是唯一真源，且确认工具在清单�
   assert(paidTool, 'run_node 必须在清单里（服务端按它判断要不要拦）')
 })
 
+await check('工具描述不再教模型轮询整画布，且默认读取路径指向概览/单节点', () => {
+  /**
+   * 病灶原文：「run_node 的描述写着『等待请用 get_canvas_state 看状态』」——
+   * 我们自己把模型教会了「用整画布读轮询」，配合 MAX_TOOL_CALLS 就把每一轮预算烧在等待上。
+   * 这条用例把「教轮询」的措辞钉死为不允许复现。
+   */
+  for (const name of ['run_node', 'run_nodes']) {
+    const def = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === name)
+    assert(def, `${name} 必须存在`)
+    assert(!/等待请用\s*get_canvas_state/.test(def.description), `${name} 不得再教「等待用 get_canvas_state」`)
+    assert(/不等出图|提交即回执|不要用读取工具反复轮询/.test(def.description), `${name} 要说清「提交即回执、不要轮询」`)
+  }
+  const state = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === 'get_canvas_state')
+  assert(state, 'get_canvas_state 必须保留（旧提示词与测试仍在引用）')
+  assert(/get_canvas_overview/.test(state.description) && /get_canvas_node/.test(state.description), 'get_canvas_state 描述要把默认路径指向 overview/单节点')
+  const overview = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === 'get_canvas_overview')
+  const node = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === 'get_canvas_node')
+  assert(overview && node, '新增的概览/单节点读必须在共享定义里（前后端唯一真源）')
+  assert(/不含提示词/.test(overview.description), '概览描述要说清它不含提示词等细节')
+  assert(node.parameters?.required?.includes('id'), 'get_canvas_node 必须要求 id 参数')
+})
+
 await check('确认回执的措辞：同意与拒绝都要让模型知道下一步怎么做', () => {
   const request = { title: '生成 6 张分镜图', summary: '将执行 6 个图片节点' }
   const approved = describeConfirmationDecision(request, { approved: true, note: '第 3 张换角度' })
@@ -241,9 +265,31 @@ await check('没有确认之前，付费动作一律被拦下，且说明里点�
   assert(/积分/.test(decision.reason || ''), '要说清为什么被拦（会花钱）')
 })
 
+await check('批量生成（run_nodes）与单个一样被拦 —— 这是 2026-09-26 补的钱洞', () => {
+  /**
+   * 提示词一直让模型「批量出分镜图用 run_nodes」，而拦阻清单里曾经只有 run_node ——
+   * 于是批量出图整条路绕过了服务端硬拦（一次确认都不用就能刷掉一整套分镜的钱）。
+   * 这条用例专盯这个洞：它必须和 run_node 同生共死。
+   */
+  assert(PAID_CANVAS_AGENT_TOOLS.has('run_nodes'), 'run_nodes 必须在花钱清单里（否则批量生成绕过硬拦）')
+  const guard = createSpendGuard()
+  const decision = guard.check('run_nodes')
+  assert(decision.blocked === true, 'run_nodes 在未确认时必须被拦')
+  assert(/request_confirmation/.test(decision.reason || ''), 'run_nodes 被拦也要指向 request_confirmation')
+  assert(/积分/.test(decision.reason || ''), 'run_nodes 被拦也要说清会花钱')
+})
+
+await check('一次确认同时解锁单节点与批量（批量不必再确认一次，也不能绕过）', () => {
+  const guard = createSpendGuard()
+  assert(guard.check('run_node').blocked === true && guard.check('run_nodes').blocked === true, '确认前两个都该被拦')
+  guard.markApproved('call_confirm_batch')
+  assert(guard.check('run_node').blocked === false, '同意后单节点应放行')
+  assert(guard.check('run_nodes').blocked === false, '同意后批量也应放行（同一道确认）')
+})
+
 await check('不花钱的工具不会被误拦（拦过头会让 Agent 完全干不了活）', () => {
   const guard = createSpendGuard()
-  for (const tool of ['get_canvas_state', 'add_node', 'update_node', 'connect_nodes', 'select_nodes']) {
+  for (const tool of ['get_canvas_state', 'get_canvas_overview', 'get_canvas_node', 'add_node', 'update_node', 'connect_nodes', 'select_nodes']) {
     assert(guard.check(tool).blocked === false, `${tool} 不该被拦`)
   }
 })

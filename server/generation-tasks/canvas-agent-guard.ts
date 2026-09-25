@@ -19,8 +19,19 @@
  * 加新工具时**必须**同步考虑：它会不会让用户花钱？会就加进来。
  * 反过来说，没在这个清单里的工具不会拦 —— 所以清单是「允许花钱的入口」，
  * 而不是「禁止清单」。（新增付费工具却忘了加这里，就是一次静默的刷卡。）
+ *
+ * `run_nodes` 必须与 `run_node` 一起在清单里（2026-09-26 补）。
+ *
+ * 为什么：提示词一直让模型「批量出分镜图用 run_nodes」，而清单里只有 run_node ——
+ * 于是**批量生成整条路绕过了服务端硬拦**：模型不用确认就能一次刷掉一整套分镜的钱。
+ * 这是花钱的洞，不是文案问题。
+ *
+ * 语义差异（一次确认覆盖一批，不是每节点各确认一次）：闸门只回答「这次调用能不能跑」，
+ * 一次 `run_nodes` 是**一次调用、一次确认**。批量要花多少由模型在 request_confirmation 的
+ * `costPoints` / `summary` 里自己算清楚（那是给用户看的账），闸门不替它做乘法 ——
+ * 单槽解锁（`approvedCallId`）的语义因此对两者完全一致，不需要额外的「批量子项」状态。
  */
-export const PAID_CANVAS_AGENT_TOOLS = new Set<string>(["run_node"]);
+export const PAID_CANVAS_AGENT_TOOLS = new Set<string>(["run_node", "run_nodes"]);
 
 export interface SpendGuardDecision {
   blocked: boolean;

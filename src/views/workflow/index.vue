@@ -1438,6 +1438,14 @@ const canvasAgentContext: CanvasAgentContext = {
     size: String((node.data as { size?: string })?.size || ''),
     quality: String((node.data as { quality?: string })?.quality || ''),
     status: (node.data as { loading?: boolean })?.loading ? '生成中' : String((node.data as { error?: string })?.error || ''),
+    // 生成状态的三态原始事实：概览/单节点读据此归一成 idle|generating|error
+    // （中文 status 串判断不出「跑完没报错」与「从没跑过」的区别，见 CanvasAgentNodeSnapshot 注释）
+    loading: Boolean((node.data as { loading?: boolean })?.loading),
+    error: String((node.data as { error?: string })?.error || ''),
+    taskRecordId: String((node.data as { taskRecordId?: string })?.taskRecordId || ''),
+    // 坐标与选中态只进单节点读（概览刻意不含）
+    position: { x: node.position?.x ?? 0, y: node.position?.y ?? 0 },
+    selected: Boolean(node.selected),
     // 已经生成出来的图地址：连续性靠它（母版出图后要把这张图挂给分镜节点当参考图）
     imageUrl: String((node.data as { url?: string })?.url || ''),
     textLength: String((node.data as { content?: string })?.content || '').length,
@@ -1528,17 +1536,17 @@ const canvasAgentContext: CanvasAgentContext = {
   },
   runNode: (id) => runNodeById(id),
   /**
-   * 批量执行（串行）。
+   * 批量提交（串行）。
    *
    * 为什么不让工具层用 Promise.all 并发起：提交生成任务有**每人限流**，
    * 一口气并发 6~12 个很容易被限流挡回来，而且失败时说不清是哪一个没起来。
-   * 串行虽然慢几秒（每次只是「触发」，不等出图），但每个节点的成败都能如实回报。
+   * 串行虽然慢几秒（每次只是「提交」，不等出图），但每个节点的成败都能如实回报。
    */
   runNodes: async (ids) => {
-    const outcomes: Array<{ id: string; ok: boolean; reason?: string }> = []
+    const outcomes: Array<{ id: string } & Awaited<ReturnType<typeof runNodeById>>> = []
     for (const id of ids) {
       const result = await runNodeById(id)
-      outcomes.push({ id, ok: result.ok, reason: result.reason })
+      outcomes.push({ id, ...result })
     }
     return outcomes
   },

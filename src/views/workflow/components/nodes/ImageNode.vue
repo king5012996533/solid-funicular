@@ -784,15 +784,87 @@ watch(
   { immediate: true, flush: 'post' },
 )
 
-/** 提交与重试共用的核心：建任务 → **立刻落 taskId/提示词** → 订阅 → 挂超时兜底 */
-const runGeneration = async (input: {
+/** 生成参数（提交与重试共用） */
+interface GenerationInput {
   prompt: string
   refImages: string[]
   modelKey: string
   ratio?: string
   resolution?: string
   count?: number
-}) => {
+}
+
+/**
+ * **提交阶段**：建任务 → 立刻把 taskId/参数落进节点 data → 返回 taskId。
+ *
+ * 单独抽出来的原因（2026-09-26，画布 Agent 第一刀）：提交与「等结果」是两件事。
+ *   · 用户手动点生成 → 走 runGeneration，提交后继续等出图（体验不变）；
+ *   · Agent 调 run_node/run_nodes → 只走这一段，**提交即回执**，不把一轮工具调用卡在出图上。
+ * 这里**任何失败都直接抛**（不吞）—— 调用方要如实回执，「没提交成功」绝不能被说成「已提交」。
+ */
+const submitGeneration = async (input: GenerationInput, submittedAt: number) => {
+  const { providerId, modelKey } = await resolveGenerationTaskModel({
+    modelKey: input.modelKey,
+    fallbackModelKey: input.modelKey,
+    category: 'IMAGE',
+    missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+  })
+  const requestBody: Record<string, unknown> = {
+    model: modelKey,
+    prompt: input.prompt,
+    n: Math.max(1, Math.min(8, Number(input.count) || 1)),
+    providerId,
+  }
+  // 尺寸与画质都来自模型能力，这里只负责透传
+  if (input.ratio) requestBody.size = input.ratio
+  if (input.resolution) requestBody.quality = input.resolution
+  const hasRef = input.refImages.length > 0
+  const finalBody = hasRef ? appendImageReferencesToRequestBody(requestBody, input.refImages) : requestBody
+
+  const saved = await createGenerationTask({
+    source: 'workflow',
+    type: 'image',
+    requestMode: hasRef ? 'image-edit' : 'image-generation',
+    prompt: input.prompt,
+    modelKey,
+    ratio: input.ratio,
+    resolution: input.resolution,
+    referenceImages: hasRef ? [...input.refImages] : [],
+    requestBody: finalBody,
+  })
+  const taskId = String(saved?.id || '').trim()
+  if (!taskId) throw new Error('图片任务创建失败')
+
+  // 提交时就落库：id 用于「刷新后对账」，提示词与参数用于「重试」。
+  // 早先只在完成时才写 id —— 生成中刷新一次，节点就永远转圈（实测两次都这样）。
+  updateNode(props.id, {
+    prompt: input.prompt,
+    referenceImages: hasRef ? [...input.refImages] : [],
+    model: modelKey,
+    size: input.ratio,
+    quality: input.resolution,
+    taskRecordId: taskId,
+    submittedAt,
+    loading: true,
+    error: '',
+  })
+  return taskId
+}
+
+/** **等待阶段**：订阅一条已提交的任务流，直到终态。落结果仍由 applyTaskEvent 写回节点 */
+const attachGenerationStream = async (taskId: string, submittedAt: number) => {
+  const controller = new AbortController()
+  taskStreamController.value = controller
+  startDeadline(submittedAt)
+  startElapsedTimer(submittedAt)
+  await subscribeGenerationTaskEvents(taskId, {
+    signal: controller.signal,
+    onEvent: applyTaskEvent,
+  })
+}
+
+/** 提交与重试共用的核心：提交 → 等结果（用户手动路径，行为与改动前一致） */
+const runGeneration = async (input: GenerationInput) => {
   isGenerating.value = true
   taskStreamController.value?.abort()
   // 重新提交就退出后台态：停掉上一轮的轮询，避免旧任务的结果覆盖新一轮
@@ -801,60 +873,8 @@ const runGeneration = async (input: {
   const submittedAt = Date.now()
   runStartedAt.value = submittedAt
   try {
-    const { providerId, modelKey } = await resolveGenerationTaskModel({
-      modelKey: input.modelKey,
-      fallbackModelKey: input.modelKey,
-      category: 'IMAGE',
-      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
-    })
-    const requestBody: Record<string, unknown> = {
-      model: modelKey,
-      prompt: input.prompt,
-      n: Math.max(1, Math.min(8, Number(input.count) || 1)),
-      providerId,
-    }
-    // 尺寸与画质都来自模型能力，这里只负责透传
-    if (input.ratio) requestBody.size = input.ratio
-    if (input.resolution) requestBody.quality = input.resolution
-    const hasRef = input.refImages.length > 0
-    const finalBody = hasRef ? appendImageReferencesToRequestBody(requestBody, input.refImages) : requestBody
-
-    const saved = await createGenerationTask({
-      source: 'workflow',
-      type: 'image',
-      requestMode: hasRef ? 'image-edit' : 'image-generation',
-      prompt: input.prompt,
-      modelKey,
-      ratio: input.ratio,
-      resolution: input.resolution,
-      referenceImages: hasRef ? [...input.refImages] : [],
-      requestBody: finalBody,
-    })
-    const taskId = String(saved?.id || '').trim()
-    if (!taskId) throw new Error('图片任务创建失败')
-
-    // 提交时就落库：id 用于「刷新后对账」，提示词与参数用于「重试」。
-    // 早先只在完成时才写 id —— 生成中刷新一次，节点就永远转圈（实测两次都这样）。
-    updateNode(props.id, {
-      prompt: input.prompt,
-      referenceImages: hasRef ? [...input.refImages] : [],
-      model: modelKey,
-      size: input.ratio,
-      quality: input.resolution,
-      taskRecordId: taskId,
-      submittedAt,
-      loading: true,
-      error: '',
-    })
-
-    const controller = new AbortController()
-    taskStreamController.value = controller
-    startDeadline(submittedAt)
-    startElapsedTimer(submittedAt)
-    await subscribeGenerationTaskEvents(taskId, {
-      signal: controller.signal,
-      onEvent: applyTaskEvent,
-    })
+    const taskId = await submitGeneration(input, submittedAt)
+    await attachGenerationStream(taskId, submittedAt)
   } catch (err: unknown) {
     console.error('[ImageNode] generation failed', err)
     failRun(err instanceof Error ? err.message : '图片生成失败')
@@ -934,32 +954,52 @@ const reconcileInterruptedRun = async () => {
 }
 
 /**
- * 供画布助手调用：用节点当前已配置的参数跑一次。
+ * 供画布助手调用：用节点当前已配置的参数**提交一次生成**。
  *
  * 为什么单独抽出来：runGeneration 在组件内部，画布这一层原本没有入口 ——
  * 助手只能说「你可以点一下生成」，做不了「我替你跑」。注册到 useCanvasNodeRunner 后，
- * Agent 的 run_node 工具就能真的触发它（缺提示词时抛错，由工具层转成可读原因回给模型）。
+ * Agent 的 run_node 工具就能真的提交它（缺提示词时抛错，由工具层转成可读原因回给模型）。
+ *
+ * **提交即返回**（2026-09-26，第一刀：手感）：以前这里 await 到出图，于是一次 run_node 要卡几分钟，
+ * 面板只剩「执行中…」，模型又不甘心就只能反复读画布等 —— 那一整轮就烧在等待上。
+ * 现在提交成功立刻返回，出图仍由本节点自己的事件流落回画布（applyTaskEvent 一个字没改）。
+ * 代价是：提交之后才失败（上游拒绝）不再由这次回执体现，而是落在节点的 generationStatus=error 上，
+ * 模型读单节点就能看到 —— 这与「提交/完成分离」是同一件事的两面。
  */
 const runOnceForAgent = async () => {
   const prompt = String(props.data?.prompt || '').trim()
   if (!prompt) throw new Error('该图片节点还没有提示词，先给它写一个（update_node 的 prompt）')
-  await runGeneration({
-    prompt,
-    refImages: (Array.isArray(props.data?.referenceImages) ? props.data.referenceImages : []).filter(isRasterReferenceUrl),
-    modelKey: String(props.data?.model || '').trim(),
-    ratio: String(props.data?.size || '') || undefined,
-    resolution: String(props.data?.quality || '') || undefined,
-    count: 1,
+  isGenerating.value = true
+  taskStreamController.value?.abort()
+  clearBackgroundState()
+  updateNode(props.id, { loading: true, backgroundPending: false, error: '' })
+  const submittedAt = Date.now()
+  runStartedAt.value = submittedAt
+  let taskId = ''
+  try {
+    taskId = await submitGeneration({
+      prompt,
+      refImages: (Array.isArray(props.data?.referenceImages) ? props.data.referenceImages : []).filter(isRasterReferenceUrl),
+      modelKey: String(props.data?.model || '').trim(),
+      ratio: String(props.data?.size || '') || undefined,
+      resolution: String(props.data?.quality || '') || undefined,
+      count: 1,
+    }, submittedAt)
+  } catch (err: unknown) {
+    /**
+     * 提交阶段就失败（模型解析不到、建任务被拒）：落失败态，并把**真实原因抛给工具层**。
+     * 这里绝不能吞 —— 吞了工具层就会把「没提交成功」说成「已提交，正在生成」，
+     * 那正是之前专门修过的「提交了但马上失败被报成成功」。
+     */
+    const message = err instanceof Error ? err.message : '图片生成提交失败'
+    failRun(message)
+    throw err instanceof Error ? err : new Error(message)
+  }
+  // 提交成功即返回；等结果交给后台这条订阅（节点卸载时它自己会随 taskStreamController 断掉）
+  void attachGenerationStream(taskId, submittedAt).catch((err: unknown) => {
+    if ((err as { name?: string })?.name === 'AbortError') return
+    failRun(err instanceof Error ? err.message : '生成结果订阅中断')
   })
-  /**
-   * 失败要如实抛出。
-   *
-   * runGeneration 把异常收敛成了节点上的错误态（failRun），自己不再抛 —— 于是 run_node 会拿到
-   * ok:true，把「提交了但很快就失败」当成「已触发」报给用户（实测一整批 8 张就是这个表现）。
-   * 提交时已把节点 error 清空，跑完还留着 error 就一定是这一轮的失败原因。
-   */
-  const failure = String(props.data?.error || '').trim()
-  if (failure) throw new Error(failure)
 }
 
 onMounted(() => {

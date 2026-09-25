@@ -9,7 +9,9 @@
  * 用一个假的画布上下文（内存数组）驱动，验证：
  *   1. 每个工具的「正常路径」确实改了状态、返回的 id/摘要对得上；
  *   2. 非法输入（不存在的节点、空 id、自己连自己、未知类型）一律 ok:false + 可读原因，**不改状态**；
- *   3. get_canvas_state 给模型的快照包含定位节点所需的字段，且不把超长文本整段塞进上下文。
+ *   3. get_canvas_state 给模型的快照包含定位节点所需的字段，且不把超长文本整段塞进上下文；
+ *   4. get_canvas_overview 只给定位字段（不含 prompt/坐标/连线明细）、get_canvas_node 给单节点全量 + 连线摘要；
+ *   5. run_node / run_nodes 是「提交即回执」：回执带逐节点提交状态、同轮重复提交如实说明、提交失败如实回执。
  *
  * 跑法：npx tsx scripts/tests/test-canvas-agent-tools.mjs
  */
@@ -34,13 +36,15 @@ const check = (name, fn) => {
 }
 const assert = (cond, message) => { if (!cond) throw new Error(message) }
 
-/** 记忆一个最小画布：节点数组 + 连线数组 + 选中集合 */
+/** 记忆一个最小画布：节点数组 + 连线数组 + 选中集合 + 本轮已触发集合 */
 const createFakeContext = () => {
     const state = {
         nodes: [],
         edges: [],
         selected: [],
         ran: [],
+        // 「本轮已经提交过」的去重集合：与 useCanvasNodeRunner 的 triggeredNodeIds 同一语义
+        triggered: new Set(),
         counter: 0,
     }
     const ctx = {
@@ -50,6 +54,10 @@ const createFakeContext = () => {
             // 只给合并后的 text 会把有提示词的节点误报成「没有提示词」。
             prompt: node.prompt, content: node.content,
             model: node.model, size: node.size, quality: node.quality, status: node.status,
+            // 生成状态的三态原始事实（概览/单节点读据此归一成 idle|generating|error）
+            loading: node.loading, error: node.error, taskRecordId: node.taskRecordId,
+            position: { x: Number(node.x) || 0, y: Number(node.y) || 0 },
+            selected: state.selected.includes(node.id),
             imageUrl: node.imageUrl, referenceImages: node.referenceImages,
         })),
         snapshotEdges: () => state.edges.map((edge) => ({ source: edge.source, target: edge.target })),
@@ -93,10 +101,16 @@ const createFakeContext = () => {
         },
         runNode: async (id) => {
             const hit = state.nodes.find((node) => node.id === id)
-            if (!hit) return { ok: false, reason: '节点不存在' }
-            if (hit.type === 'video') return { ok: false, reason: '视频生成尚未接通：服务端还没有 video 执行策略' }
+            if (!hit) return { ok: false, status: 'failed', reason: '节点不存在' }
+            if (hit.type === 'video') return { ok: false, status: 'failed', reason: '视频生成尚未接通：服务端还没有 video 执行策略' }
+            // 与 useCanvasNodeRunner.runNodeById 同一套去重：同轮同一节点只真正提交一次
+            if (state.triggered.has(id)) {
+                return { ok: false, status: 'duplicate', reason: '本轮已经触发过该节点（重复提交会重复扣费），已忽略；要重新生成请新开一轮' }
+            }
+            state.triggered.add(id)
             state.ran.push(id)
-            return { ok: true }
+            // 提交即回执：ok 只代表「已提交」，不代表已出图
+            return { ok: true, status: 'submitted' }
         },
         applyTemplate: (templateId, position) => {
             if (templateId !== 'tpl-demo') return null
@@ -121,7 +135,7 @@ const run = (ctx, name, args) => executeCanvasAgentTool(name, args, ctx)
 console.log('== 工具清单 ==')
 check('暴露给模型的工具名与说明齐全', () => {
     const names = CANVAS_AGENT_TOOL_SCHEMAS.map((tool) => tool.function.name)
-    for (const expected of ['get_canvas_state', 'add_node', 'update_node', 'connect_nodes', 'remove_node', 'select_nodes', 'run_node', 'list_workflow_templates', 'apply_workflow_template']) {
+    for (const expected of ['get_canvas_state', 'get_canvas_overview', 'get_canvas_node', 'add_node', 'update_node', 'connect_nodes', 'remove_node', 'select_nodes', 'run_node', 'list_workflow_templates', 'apply_workflow_template']) {
         assert(names.includes(expected), `缺少工具 ${expected}`)
     }
     /**
@@ -270,6 +284,122 @@ await (async () => {
     console.log('  ok   快照带 hasImage')
 })()
 
+console.log('== get_canvas_overview：只给定位字段（不含 prompt / 坐标 / 连线明细）==')
+await (async () => {
+    const { ctx } = createFakeContext()
+    await run(ctx, 'add_node', { type: 'image', prompt: '母版M1的秘密提示词：28 岁亚洲女性', model: 'prov::IMAGE::m1', size: '16:9' })
+    const table = JSON.parse((await run(ctx, 'add_node', { type: 'text', content: '分镜表' })).result).id
+    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01' })).result).id
+    ctx.updateNode(shot, { imageUrl: '/uploads/generated/image/s1.png' })
+    await run(ctx, 'connect_nodes', { source: table, target: shot })
+
+    const res = await run(ctx, 'get_canvas_overview', {})
+    assert(res.ok, `概览应成功：${res.summary}`)
+    const parsed = JSON.parse(res.result)
+    assert(parsed.nodeCount === 3 && parsed.edgeCount === 1, `计数不对：${res.result}`)
+    assert(parsed.countsByKind.image === 2 && parsed.countsByKind.text === 1, `按类型计数不对：${JSON.stringify(parsed.countsByKind)}`)
+    assert(parsed.countsByGenerationStatus.idle === 3, `按状态计数不对：${JSON.stringify(parsed.countsByGenerationStatus)}`)
+
+    const shotSummary = parsed.nodes.find((node) => node.id === shot)
+    assert(shotSummary, '概览应列出每个节点')
+    assert(shotSummary.kind === 'image' && shotSummary.hasOutput === true, `节点摘要要有 kind/hasOutput：${JSON.stringify(shotSummary)}`)
+    assert(shotSummary.generationStatus === 'idle', `已出图的节点应为 idle：${shotSummary.generationStatus}`)
+
+    // 概览的价值就在「便宜」：任何细节都不许混进来
+    assert(!/秘密提示词/.test(res.result), '概览不得含 prompt 明文（那正是旧整画布读的负担）')
+    for (const node of parsed.nodes) {
+        assert(!('prompt' in node) && !('text' in node), `概览节点不得含文本字段：${JSON.stringify(node)}`)
+        assert(!('position' in node), `概览不得含坐标：${JSON.stringify(node)}`)
+        assert(!('incomingConnections' in node) && !('outgoingConnections' in node), '概览不得含连线明细')
+    }
+    assert(!('edges' in parsed), '概览不得返回连线数组（只给 edgeCount）')
+    passed += 1
+    console.log('  ok   概览只给 id/kind/标题/生成状态/产物 + 计数')
+})()
+
+console.log('== get_canvas_node：单节点全量 + 精简连线摘要 ==')
+await (async () => {
+    const { ctx } = createFakeContext()
+    const master = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1', model: 'prov::IMAGE::m1', size: '16:9', quality: '高' })).result).id
+    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01 的画面描述' })).result).id
+    await run(ctx, 'connect_nodes', { source: master, target: shot })
+
+    const res = await run(ctx, 'get_canvas_node', { id: shot })
+    assert(res.ok, `单节点读应成功：${res.summary}`)
+    const parsed = JSON.parse(res.result)
+    assert(parsed.id === shot && parsed.kind === 'image', `基本字段不对：${res.result}`)
+    assert(typeof parsed.position?.x === 'number' && typeof parsed.position?.y === 'number', '单节点读必须给坐标（概览刻意没有）')
+    assert(parsed.data.prompt === '分镜 01 的画面描述', `单节点读要给完整提示词：${JSON.stringify(parsed.data)}`)
+    assert(parsed.data.generationStatus === 'idle', '应有归一后的生成状态')
+    assert(
+        parsed.incomingConnections.length === 1 && parsed.incomingConnections[0].id === master,
+        `入线摘要不对：${JSON.stringify(parsed.incomingConnections)}`,
+    )
+    assert(Array.isArray(parsed.outgoingConnections) && parsed.outgoingConnections.length === 0, '出线摘要应是数组')
+
+    // 参数细节（模型/画幅/画质）也要给得出，不能只剩提示词
+    const masterDetail = JSON.parse((await run(ctx, 'get_canvas_node', { id: master })).result)
+    assert(
+        masterDetail.data.model === 'prov::IMAGE::m1' && masterDetail.data.size === '16:9' && masterDetail.data.quality === '高',
+        `单节点读要给模型/画幅/画质：${JSON.stringify(masterDetail.data)}`,
+    )
+
+    const missing = await run(ctx, 'get_canvas_node', { id: 'nope' })
+    assert(!missing.ok && missing.result.includes('nope'), `找不到节点要如实失败：${missing.result}`)
+    passed += 1
+    console.log('  ok   单节点读：全量字段 + 入/出线摘要；未知 id 如实失败')
+})()
+
+console.log('== 生成状态归一：loading→generating，error→error ==')
+await (async () => {
+    const { ctx } = createFakeContext()
+    const id = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '在跑' })).result).id
+    ctx.updateNode(id, { loading: true, error: '' })
+    const busy = JSON.parse((await run(ctx, 'get_canvas_node', { id })).result)
+    assert(busy.data.generationStatus === 'generating', `loading 应归一为 generating：${busy.data.generationStatus}`)
+    ctx.updateNode(id, { loading: false, error: '上游 400：模型不可用' })
+    const broken = JSON.parse((await run(ctx, 'get_canvas_node', { id })).result)
+    assert(broken.data.generationStatus === 'error' && broken.data.error.includes('400'), `error 要带原文：${JSON.stringify(broken.data)}`)
+    passed += 1
+    console.log('  ok   loading/error 归一正确')
+})()
+
+console.log('== run_node / run_nodes：提交即回执（不等出图）、去重与失败都如实 ==')
+await (async () => {
+    const { ctx, state } = createFakeContext()
+    const id = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1' })).result).id
+    const res = await run(ctx, 'run_node', { id })
+    assert(res.ok, `提交应成功：${res.summary}`)
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 1 && parsed.total === 1, `回执要有提交计数：${res.result}`)
+    assert(parsed.nodes.length === 1 && parsed.nodes[0].id === id, `回执要含每个节点：${res.result}`)
+    assert(parsed.nodes[0].submitted === true && parsed.nodes[0].status === 'generating', `节点状态应为已提交/生成中：${res.result}`)
+    assert(!parsed.nodes[0].done, '回执不得声称「已完成」（提交 ≠ 出图）')
+    assert(/已提交/.test(res.summary) && /生成中/.test(res.summary), `步骤摘要必须写「已提交 · 生成中」：${res.summary}`)
+    assert(!/已完成|已出图/.test(res.summary), `不得把提交说成完成：${res.summary}`)
+
+    // 同轮重复提交：如实说明，且不重复真正触发（不重复扣费）
+    const again = await run(ctx, 'run_node', { id })
+    assert(!again.ok, '同轮重复提交应被挡下')
+    const againParsed = JSON.parse(again.result)
+    assert(againParsed.nodes[0].status === 'skipped', `重复提交应回 skipped：${again.result}`)
+    assert(againParsed.nodes[0].submitted === false, '重复提交不得声称已提交')
+    assert(state.ran.length === 1, `重复提交不得再次触发，实际触发 ${state.ran.length} 次`)
+    passed += 1
+    console.log('  ok   run_node：提交回执带状态；重复提交如实跳过且不重复触发')
+})()
+
+await (async () => {
+    const { ctx } = createFakeContext()
+    const res = await run(ctx, 'run_node', { id: 'ghost' })
+    assert(!res.ok, '不存在的节点提交应失败')
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 0 && parsed.nodes[0].status === 'failed', `失败回执要如实：${res.result}`)
+    assert(parsed.nodes[0].reason && /不存在/.test(parsed.nodes[0].reason), `失败要带真实原因：${res.result}`)
+    passed += 1
+    console.log('  ok   run_node 提交失败 → failed + 真实原因（不谎报成功）')
+})()
+
 console.log('== attach_reference_images：把节点 id 翻译成出图地址 ==')
 await (async () => {
     const { ctx, state } = createFakeContext()
@@ -415,6 +545,39 @@ await (async () => {
         assert(state.ran.length === ids.length, '批量执行应真的触发了')
         passed += 1
         console.log('  ok   降级只影响配额这一条：run_nodes 照常执行')
+    } finally { restore() }
+})()
+
+console.log('== run_nodes：逐节点提交回执 + 整批重复如实跳过（要带预校验报告才能跑）==')
+await (async () => {
+    const restore = installFetch([
+        { match: '/api/points/estimate', method: 'POST', body: { success: true, totalEstimated: 30 } },
+        { match: '/api/points/balance', method: 'GET', body: { success: true, available: 100 } },
+    ])
+    try {
+        const { ctx, state, ids } = await makeImageCtx(['镜一', '镜二', '镜三'])
+        const pre = await run(ctx, 'preflight_check', { ids })
+        assert(pre.ok === true, `预校验应通过：${pre.summary}`)
+
+        const res = await run(ctx, 'run_nodes', { ids })
+        assert(res.ok, `批量提交应成功：${res.summary}`)
+        const parsed = JSON.parse(res.result)
+        assert(parsed.submitted === 3 && parsed.total === 3, `批量回执计数不对：${res.result}`)
+        assert(parsed.nodes.every((node) => node.status === 'generating'), `每个节点都应是已提交/生成中：${res.result}`)
+        assert(/已提交/.test(res.summary) && !/已完成|已出图/.test(res.summary), `批量摘要要说「已提交 · 生成中」：${res.summary}`)
+        assert(state.ran.length === 3, '批量应真的提交 3 个节点')
+
+        // 整批重复提交：全部如实回 skipped，且不再触发（不重复扣费）
+        const again = await run(ctx, 'run_nodes', { ids })
+        assert(!again.ok, '整批重复提交应失败（没有新提交）')
+        const againParsed = JSON.parse(again.result)
+        assert(
+            againParsed.submitted === 0 && againParsed.nodes.every((node) => node.status === 'skipped'),
+            `整批重复应如实 skipped：${again.result}`,
+        )
+        assert(state.ran.length === 3, `重复批量不得再触发，实际 ${state.ran.length}`)
+        passed += 1
+        console.log('  ok   run_nodes：逐节点提交状态 + 整批重复如实跳过')
     } finally { restore() }
 })()
 
