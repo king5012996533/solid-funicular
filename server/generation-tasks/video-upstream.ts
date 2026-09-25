@@ -452,16 +452,21 @@ export const pollVideoTaskRequest = async (
         providerId: string
         modelKey: string
         taskId: string
+        /** 我们的任务记录 id：只用于日志，让轮询/失败日志能按 recordId 直接检索（原来只带上游 taskId，出问题查不动） */
+        recordId?: string
         signal: AbortSignal
         onProgress?: (state: { rawStatus: string; progress?: number; attempt: number }) => Promise<void> | void
     },
     deps: VideoRequestDeps,
 ): Promise<{ upstreamUrl: string; videoUrl: string; attempts: number }> => {
     const config = await resolveConfig(input)
+    /** 统一的轮询日志出口：把 recordId 与上游 taskId 绑进每条 detail，便于事后按我们的记录 id 检索 */
+    const log = (stage: string, detail: Record<string, unknown>) =>
+        deps.log?.(stage, { recordId: input.recordId, taskId: input.taskId, ...detail })
     const statusPath = (config.statusPath || `${config.createEndpoint}/{id}`).replace('{id}', encodeURIComponent(input.taskId))
     const url = joinUpstreamUrl(config.baseUrl, statusPath)
     const startedAt = Date.now()
-    deps.log?.('video_upstream:poll_start', {
+    log?.('video_upstream:poll_start', {
         providerId: input.providerId,
         modelKey: input.modelKey,
         taskId: input.taskId,
@@ -480,7 +485,7 @@ export const pollVideoTaskRequest = async (
         // 等待掐到预算内，避免最后一次等待越过 2 小时上限
         const remainingMs = Math.max(0, VIDEO_POLL_TOTAL_BUDGET_MS - (Date.now() - startedAt))
         const delayMs = Math.min(computeVideoPollDelayMs(attempt), remainingMs)
-        deps.log?.('video_upstream:poll_wait', { attempt, delayMs, elapsedMs: Date.now() - startedAt })
+        log?.('video_upstream:poll_wait', { attempt, delayMs, elapsedMs: Date.now() - startedAt })
         await sleepWithAbort(delayMs, input.signal)
         if (input.signal.aborted) throw new Error('任务已取消')
 
@@ -497,7 +502,7 @@ export const pollVideoTaskRequest = async (
         try { payload = JSON.parse(text) } catch { payload = text }
         if (!response.ok) {
             // 查询接口偶发 5xx 不应直接判失败：继续轮询，但把原文留在日志里
-            deps.log?.('video_upstream:poll_http_error', {
+            log?.('video_upstream:poll_http_error', {
                 status: response.status,
                 attempt,
                 body: String(text).slice(0, 200),
@@ -510,12 +515,16 @@ export const pollVideoTaskRequest = async (
                 || '',
             )
             const state = normalizeTaskStatus(rawStatus)
-            await input.onProgress?.({ rawStatus, progress: extractProgress(payload), attempt })
+            const progress = extractProgress(payload)
+            // 每次轮询都留一条：原来 pending/processing 这种"一切正常"的状态完全不记日志，
+            // 出问题时无法判断上游到底卡在哪一步
+            log('video_upstream:poll_observed', { attempt, rawStatus, progress: progress ?? null, state })
+            await input.onProgress?.({ rawStatus, progress, attempt })
             if (state === 'succeeded') {
                 const videoUrl = extractVideoUrl(payload)
                 if (videoUrl) {
                     // 终态里带 points（本渠道按条预扣，失败/超时全额退回）与 finishedAt
-                    deps.log?.('video_upstream:poll_succeeded', {
+                    log?.('video_upstream:poll_succeeded', {
                         attempt,
                         elapsedMs: Date.now() - startedAt,
                         rawStatus,
@@ -525,8 +534,17 @@ export const pollVideoTaskRequest = async (
                     return { upstreamUrl: url, videoUrl, attempts: attempt }
                 }
                 // 状态成功但没给地址：再等一轮（有的网关先改状态后补地址）
-                deps.log?.('video_upstream:poll_succeeded_without_url', { attempt, body: String(text).slice(0, 200) })
+                log?.('video_upstream:poll_succeeded_without_url', { attempt, body: String(text).slice(0, 200) })
             } else if (state === 'failed') {
+                // 上游对失败原因常常写得含糊（例如真人脸这类策略拒绝只说"未成功，请重试"），
+                // 所以原文必须留档：否则事后只能猜。
+                log('video_upstream:poll_failed', {
+                    attempt,
+                    rawStatus,
+                    errorMessage: extractErrorMessage(payload) || '',
+                    points: record.points ?? null,
+                    body: String(text).slice(0, 600),
+                })
                 throw new Error(`上游视频任务失败：${extractErrorMessage(payload) || rawStatus || '未知原因'}`)
             }
         }

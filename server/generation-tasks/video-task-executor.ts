@@ -65,6 +65,8 @@ export interface VideoTaskExecutorContext {
     providerId: string;
     modelKey: string;
     taskId: string;
+    /** 我们的任务记录 id（只进日志） */
+    recordId?: string;
     /** 每轮把上游状态回给执行器，用于向前端展示「正在生成（xx%）」 */
     onProgress?: (state: {
       rawStatus: string;
@@ -168,6 +170,7 @@ export const executeVideoTask = async (
       providerId,
       modelKey,
       taskId: created.taskId,
+      recordId: task.recordId,
       onProgress: ({ rawStatus, progress, attempt }) => {
         context.emitTaskProgressEvent(task.recordId, {
           stage: "video_generating",
