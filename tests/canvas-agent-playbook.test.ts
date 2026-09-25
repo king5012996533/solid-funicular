@@ -20,6 +20,7 @@
  */
 
 import {
+  CANVAS_AGENT_OUTPUT_CONTRACT,
   buildSystemPrompt,
 } from '../server/generation-tasks/canvas-agent-executor'
 import {
@@ -67,6 +68,13 @@ const SYSTEM_CHARS_BEFORE_EMPTY = 4474
 const SYSTEM_CHARS_BEFORE_WITH_BRIEF = 4700
 /** 上一批瘦身后的实测字符数（空上下文 2168）；本批「不反弹」的上界以它为基准（允许 +15%） */
 const SYSTEM_CHARS_SLIMMED_EMPTY = 2168
+/**
+ * 输出契约（2026-09-26，产品要求）是**刻意加进 system 的固定结构说明**。
+ * 下面的字符数断言一律先把契约长度扣掉，比的都是「契约之外」的部分 ——
+ * 既保住「手册没回到 system、其余内容没反弹」的原意，又不至于每次产品要加契约
+ * 都得先删掉等量规则。契约正文见 CANVAS_AGENT_OUTPUT_CONTRACT。
+ */
+const OUTPUT_CONTRACT_CHARS = CANVAS_AGENT_OUTPUT_CONTRACT.length
 
 console.log('\n【1】手册被完整搬进 load_playbook（不是简写版）')
 {
@@ -117,15 +125,15 @@ console.log('\n【3】system 提示瘦身：不再含长流程正文，但指针
   // 现在同条件为 2168 ~ 2394。断言「比搬迁前至少短 2000 字符」：手册一旦回到 system 必然失败。
   const systemEmpty = buildSystemPrompt({ brief: '', summary: '' })
   check(
-    `空上下文：system 比搬迁前（${SYSTEM_CHARS_BEFORE_EMPTY}）至少短 2000 字符（现在 ${systemEmpty.length}）`,
-    systemEmpty.length < SYSTEM_CHARS_BEFORE_EMPTY - 2000,
+    `空上下文：扣掉契约后比搬迁前（${SYSTEM_CHARS_BEFORE_EMPTY}）至少短 2000 字符（现在 ${systemEmpty.length}，扣契约 ${systemEmpty.length - OUTPUT_CONTRACT_CHARS}）`,
+    systemEmpty.length - OUTPUT_CONTRACT_CHARS < SYSTEM_CHARS_BEFORE_EMPTY - 2000,
   )
   check(
-    `带画布/摘要：system 比搬迁前（${SYSTEM_CHARS_BEFORE_WITH_BRIEF}）至少短 2000 字符（现在 ${system.length}）`,
-    system.length < SYSTEM_CHARS_BEFORE_WITH_BRIEF - 2000,
+    `带画布/摘要：扣掉契约后比搬迁前（${SYSTEM_CHARS_BEFORE_WITH_BRIEF}）至少短 2000 字符（现在 ${system.length}，扣契约 ${system.length - OUTPUT_CONTRACT_CHARS}）`,
+    system.length - OUTPUT_CONTRACT_CHARS < SYSTEM_CHARS_BEFORE_WITH_BRIEF - 2000,
   )
   // 手册一旦回到 system，这个绝对阈值会先炸
-  check(`system 已瘦身到 3000 字符以内（现在 ${system.length}）`, system.length < 3000)
+  check(`system 扣掉契约后仍在 3000 字符以内（现在 ${system.length}，扣契约 ${system.length - OUTPUT_CONTRACT_CHARS}）`, system.length - OUTPUT_CONTRACT_CHARS < 3000)
 }
 
 console.log('\n【4】反证：把手册正文塞回 system，本批「system 不含长流程正文」的断言必然失败')
@@ -185,8 +193,8 @@ console.log('\n【7】system 字符数没有明显反弹（上界断言）')
   const systemEmpty = buildSystemPrompt({ brief: '', summary: '' })
   const upperBound = Math.round(SYSTEM_CHARS_SLIMMED_EMPTY * 1.15)
   check(
-    `空上下文 system ≤ 瘦身后基准 +15%（${systemEmpty.length} ≤ ${upperBound}，基准 ${SYSTEM_CHARS_SLIMMED_EMPTY}）`,
-    systemEmpty.length <= upperBound,
+    `空上下文 system 扣掉契约后 ≤ 瘦身后基准 +15%（${systemEmpty.length - OUTPUT_CONTRACT_CHARS} ≤ ${upperBound}，基准 ${SYSTEM_CHARS_SLIMMED_EMPTY}）`,
+    systemEmpty.length - OUTPUT_CONTRACT_CHARS <= upperBound,
   )
 }
 

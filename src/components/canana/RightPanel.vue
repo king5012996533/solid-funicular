@@ -1,5 +1,6 @@
 <script setup>
 import { isRasterReferenceUrl } from '@/config/reference-validation'
+import { renderMarkdownBlocks } from '@/composables/research/report-markdown-utils'
 import { ref, nextTick, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import SidebarEmptyState from '@/components/canana/SidebarEmptyState.vue'
 import AgentToolTrace from '@/components/canana/AgentToolTrace.vue'
@@ -1131,7 +1132,14 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
                   :turn-started-at="msg.turnStartedAt || 0"
                   :pending-label="msg.pendingLabel || ''"
                 />
-                <div v-if="msg.content" class="ai-text-content">{{ msg.content }}<span v-if="msg.loading" class="ai-text-caret" aria-hidden="true"></span></div>
+                <!-- 正文按 Markdown 渲染（复用 report-markdown-utils 的自写渲染器：先 escape 再拼，XSS 安全）；
+                     流式期间挂 .is-streaming，delta 到了即时重渲染，光标用伪元素接在末块行内末尾 -->
+                <div
+                  v-if="msg.content"
+                  class="ai-text-content agent-md"
+                  :class="{ 'is-streaming': msg.loading }"
+                  v-html="renderMarkdownBlocks(msg.content)"
+                ></div>
                 <div v-else-if="msg.loading" class="ai-text-typing">
                   <span class="ai-text-dot" />
                   <span class="ai-text-dot" />
@@ -1671,15 +1679,84 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   color: var(--agent-ok, #3ddc97);
 }
 
-/* 正文：普通消息文本，不再是卡片；工具调用由 AgentToolTrace 单独渲染在它上方 */
+/* 正文：Markdown 渲染（复用 report-markdown-utils 的自写渲染器，无新依赖）。
+   排版克制：标题小号加粗、列表紧、行内代码胶囊，避免浏览器默认大标题造成的跳动。
+   v-html 注入的节点不带 scoped 属性，子元素样式一律走 :deep()。 */
 .ai-text-content {
   color: var(--agent-text, #e8eaed);
   font-size: 13.5px;
-  line-height: 1.65;
-  white-space: pre-wrap;
+  line-height: 1.7;
   word-break: break-word;
 }
-.ai-text-caret {
+.agent-md :deep(p) {
+  margin: 0 0 8px;
+}
+.agent-md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.agent-md :deep(h1),
+.agent-md :deep(h2),
+.agent-md :deep(h3),
+.agent-md :deep(h4) {
+  margin: 12px 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--agent-text, #e8eaed);
+}
+.agent-md :deep(h1:first-child),
+.agent-md :deep(h2:first-child),
+.agent-md :deep(h3:first-child),
+.agent-md :deep(h4:first-child) {
+  margin-top: 0;
+}
+.agent-md :deep(ul),
+.agent-md :deep(ol) {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+.agent-md :deep(li) {
+  margin: 4px 0;
+}
+.agent-md :deep(li::marker) {
+  color: var(--agent-text-3, #6b7280);
+}
+.agent-md :deep(strong) {
+  color: #fff;
+  font-weight: 600;
+}
+.agent-md :deep(a) {
+  color: var(--agent-accent, #7c5cff);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.agent-md :deep(code) {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+.agent-md :deep(pre) {
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--agent-line, #24262d);
+  border-radius: 8px;
+  background: var(--agent-surface, #16181d);
+  overflow-x: auto;
+}
+.agent-md :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+.agent-md :deep(hr) {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--agent-line, #24262d);
+}
+/* 流式光标：接在最后一个块的行内末尾，不新增 DOM */
+.agent-md.is-streaming :deep(> :last-child)::after {
+  content: '';
   display: inline-block;
   width: 7px;
   height: 14px;
