@@ -33,6 +33,7 @@ import {
   requestPointsEstimate,
   type PointsEstimateItem,
 } from "@/api/points";
+import { rememberPreflightEstimate } from "@/components/canana/agent-confirm-cost";
 
 /**
  * 最近一次预校验报告。
@@ -420,7 +421,14 @@ const collectPreflightQuota = async (
     ...(typeof totalEstimated === "number"
       ? { estimatedCostPerUnit: totalEstimated / visualNodes.length }
       : {}),
-    ...(bothReady ? { estimatedCostTotal: totalEstimated } : {}),
+    /**
+     * `estimatedCostTotal` 只要预估拿到了就给（不再要求余额也在）。
+     *
+     * 它有两个用途：报告事实（下面按 availablePoints + estimatedCostTotal 双双存在才记，语义不变）
+     * 和确认卡缓存 —— 余额接口偶发失败时，确认卡仍应显示「本批将预扣 N 分」，只是不显示余额。
+     * 配额校验本身（下面 quotaCheck 的 bothReady 分支）依旧要求两者都在，语义一个字没改。
+     */
+    ...(typeof totalEstimated === "number" ? { estimatedCostTotal: totalEstimated } : {}),
     quotaCheck: bothReady
       ? {
           status: "checked",
@@ -848,6 +856,18 @@ export const executeCanvasAgentTool = async (
        */
       const estimatable = targets.filter((node) => node.type === "image" || node.type === "video");
       const quota = await collectPreflightQuota(estimatable);
+      /**
+       * 把这一批的服务端数字缓存下来，供**确认卡**直接取用（键 = 目标节点集合）。
+       *
+       * 这是「让确认卡稳定显示服务端估算」的正路：确认卡不再自己重算/重打一次接口
+       * （那条弱路径常因拿不到整批而降级）。缓存只在真有服务端总额时写入；
+       * 余额缺失照写（卡片届时只显示估算，不显示余额）。缓存与报告一样按 TTL 判新旧。
+       */
+      rememberPreflightEstimate({
+        nodeIds: estimatable.map((node) => node.id),
+        estimatedCostTotal: quota.estimatedCostTotal,
+        availablePoints: quota.availablePoints,
+      });
       const context: CanvasValidationContext = { referenceReachability: reachability };
       if (typeof quota.availablePoints === "number") context.availablePoints = quota.availablePoints;
       if (typeof quota.estimatedCostPerUnit === "number") context.estimatedCostPerUnit = quota.estimatedCostPerUnit;

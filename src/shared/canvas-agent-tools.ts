@@ -153,7 +153,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
         nodeIds: {
           type: "array",
           items: { type: "string" },
-          description: "可选：本次动作涉及的目标节点 id（已知道就填）—— 界面据此向服务端估算预扣积分；不填就只显示预扣说明。",
+          description: "可选：本次动作涉及的目标节点 id（已知道就填）—— 界面据此匹配预校验得到的服务端估算，显示预扣积分；不填就只显示预扣说明。",
         },
         costPoints: {
           type: "number",
@@ -600,8 +600,8 @@ export interface AgentConfirmationRequest {
   /**
    * 本次动作涉及的目标节点 id（可选）。
    *
-   * 只用于「让界面拿服务端估算预扣积分」（/api/points/estimate）—— 与模型算不算钱无关：
-   * 数字由服务端给，模型只负责告诉界面「动哪些节点」。拿不到就不估算、只显示预扣说明。
+   * 只用于「让界面匹配预校验（preflight_check）得到的服务端估算，显示预扣积分」—— 与模型算不算钱无关：
+   * 数字由服务端给，模型只负责告诉界面「动哪些节点」。拿不到或没预校验过就不显示数字、只显示预扣说明。
    */
   nodeIds?: string[];
   /** 兼容旧调用方与旧对话保留；**模型不该再填它，界面也不用它**（数字只认服务端估算） */

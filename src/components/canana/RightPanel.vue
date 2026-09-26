@@ -39,11 +39,10 @@ import {
 import { CANVAS_AGENT_SKILL_KEY } from '@/shared/canvas-agent-tools'
 import SelectPopup from '@/components/generate/common/SelectPopup.vue'
 import { getAgentModel, setAgentModel } from '@/api/agent'
-import { requestPointsBalance, requestPointsEstimate } from '@/api/points'
 import {
   AGENT_CONFIRM_PREDEDUCT_NOTICE,
   collectConfirmationNodeIds,
-  resolveAgentConfirmCostDisplay,
+  resolveAgentConfirmCostDisplayFromCache,
 } from '@/components/canana/agent-confirm-cost'
 import { buildAgentWorkflowCard } from '@/components/canana/agent-workflow-card'
 import { buildCanvasAgentCrew } from '@/components/canana/agent-crew'
@@ -589,73 +588,30 @@ const turnReferenceImages = ref([])       // 本轮用户附的参考图（Agent
 const confirmRequest = ref(null)          // { title, summary, items, nodeIds, riskLevel, resolve }
 const confirmNote = ref('')
 const confirmRemembered = ref(false)      // 用户勾了「本任务内不再问同类动作」
-// 确认卡的积分显示：只认服务端（估算 + 余额）；拿不到就降级成预扣说明，绝不用模型自报的数
+// 确认卡的积分显示：只认服务端（预校验缓存下来的估算 + 余额）；拿不到就降级成预扣说明，绝不用模型自报的数
 const confirmCostDisplay = ref(null)
 
-/** 估算/余额接口各自的短超时：确认卡是「等人点同意」的路径，慢接口不能把卡片拖住，超时即降级 */
-const CONFIRM_COST_TIMEOUT_MS = 1500
-const withConfirmTimeout = async (run, timeoutMs) => {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await run(controller.signal)
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 /**
- * 取「服务端估算 + 当前余额」拼出确认卡的积分显示。
+ * 取「预校验已经算过的服务端数字」填确认卡。
  *
- * 数字只认服务端：能从入参拿到真实节点就调 /api/points/estimate；拿不到或接口失败一律降级
- * （不显示数字、只显示预扣说明）。模型自报的积分字段不参与这里 —— 那是被忽略的字段。
+ * 数字只认服务端：`preflight_check` 已把这一批的总额与余额缓存下来（键 = 目标节点集合），
+ * 这里按本次确认的目标节点集合**精确匹配**取用 —— 集合不完全一致（多一个/少一个）、
+ * 没预校验过、或缓存过期，一律降级成预扣说明，绝不用模型自报或前端手算的数字充数。
+ *
+ * 刻意**不再**在此重打一次估算接口：那条路径与预校验重复，且常因拿不到整批（204）而降级，
+ * 正是「卡片动辄只显示通用文案」的来源。缓存命中即用，不命中即降级 —— 宁可不说数字，也不说错的。
  */
-const loadConfirmCostDisplay = async (request, card) => {
+const loadConfirmCostDisplay = (request) => {
   const snapshot = typeof props.agentContext?.snapshotNodes === 'function'
     ? props.agentContext.snapshotNodes()
     : []
   const nodes = Array.isArray(snapshot) ? snapshot : []
-  const byId = new Map(nodes.map((node) => [node?.id, node]))
   const nodeIds = collectConfirmationNodeIds({
     nodeIds: request?.nodeIds,
     items: request?.items,
     knownNodeIds: nodes.map((node) => node?.id),
   })
-  const estimateItems = nodeIds
-    .map((id) => byId.get(id))
-    .filter(Boolean)
-    .map((node) => ({
-      model: String(node.model || '').trim(),
-      count: 1,
-      ...(node.size ? { size: node.size } : {}),
-    }))
-  // 只有「所有目标节点都能解析出模型」才算得出整批的准确数字：少算一个都会低估，
-  // 低估的数字比不显示更糟，所以不完整时一律走降级。
-  const canEstimate = estimateItems.length > 0 && estimateItems.every((item) => item.model)
-
-  const [estimate, balance] = await Promise.all([
-    canEstimate
-      ? withConfirmTimeout((signal) => requestPointsEstimate(estimateItems, signal), CONFIRM_COST_TIMEOUT_MS)
-          .then((value) => ({ ok: true, value }))
-          .catch(() => ({ ok: false, value: null }))
-      : Promise.resolve({ ok: false, value: null }),
-    withConfirmTimeout((signal) => requestPointsBalance(signal), CONFIRM_COST_TIMEOUT_MS)
-      .then((value) => ({ ok: true, value }))
-      .catch(() => ({ ok: false, value: null })),
-  ])
-
-  const estimated = estimate.ok && estimate.value?.success === true
-    && typeof estimate.value.totalEstimated === 'number'
-    ? estimate.value.totalEstimated
-    : undefined
-  const available = balance.ok && balance.value?.success === true
-    && typeof balance.value.available === 'number'
-    ? balance.value.available
-    : undefined
-
-  // 竞态保护：卡片可能已经被答复/被新卡替换，结果只写回「还是当前这张卡」的那次
-  if (confirmRequest.value !== card) return
-  confirmCostDisplay.value = resolveAgentConfirmCostDisplay({ estimated, available })
+  confirmCostDisplay.value = resolveAgentConfirmCostDisplayFromCache({ nodeIds })
 }
 
 /** 服务端 Agent 通过桥要确认时调用；返回的 Promise 一直挂到用户点按钮 */
@@ -675,8 +631,8 @@ const requestConfirmation = (request) =>
     const card = { ...request, resolve }
     confirmRequest.value = card
     confirmCostDisplay.value = null
+    loadConfirmCostDisplay(request)
     scrollToBottom()
-    void loadConfirmCostDisplay(request, card)
   })
 
 const settleConfirm = (approved) => {
@@ -1533,7 +1489,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         </ul>
         <div class="agent-confirm-card__cost">
           <div v-if="confirmCostDisplay?.estimatedPoints != null" class="agent-confirm-card__estimate">
-            预计预扣 <strong>{{ confirmCostDisplay.estimatedPoints }}</strong> 积分（服务端估算）
+            本批将预扣 <strong>{{ confirmCostDisplay.estimatedPoints }}</strong> 分（服务端估算）
           </div>
           <div class="agent-confirm-card__pre-deduct">
             {{ confirmCostDisplay?.notice || AGENT_CONFIRM_PREDEDUCT_NOTICE }}

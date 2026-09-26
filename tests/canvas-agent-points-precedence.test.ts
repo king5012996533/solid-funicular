@@ -102,7 +102,7 @@ console.log('\n【4】确认卡：数字只认服务端，降级文案固定')
 
   const withServer = resolveAgentConfirmCostDisplay({ estimated: 12, available: 100 })
   check('有服务端估算 → 显示服务端数字', withServer.estimatedPoints === 12)
-  check('显示当时余额（服务端给得到才显示）', withServer.balanceText === '当前可用积分 100')
+  check('显示当时余额（服务端给得到才显示）', withServer.balanceText === '当前余额 100')
   check('有估算时也显示预扣说明', withServer.notice === AGENT_CONFIRM_PREDEDUCT_NOTICE)
 
   const degraded = resolveAgentConfirmCostDisplay({})
@@ -133,15 +133,17 @@ console.log('\n【5】目标节点解析：优先结构化 nodeIds，只认画�
   )
 }
 
-console.log('\n【6】组件不再用模型给的 costPoints 渲染，改用服务端估算 + 降级文案')
+console.log('\n【6】组件不再用模型给的 costPoints 渲染，改用预校验缓存的服务端数字 + 降级文案')
 {
   const rightPanel = readFileSync(path.join(ROOT_DIR, 'src/components/canana/RightPanel.vue'), 'utf8')
   check('组件里不再引用 costPoints 字段', !rightPanel.includes('costPoints'))
   check('确认卡不再直接渲染 confirmRequest.costPoints', !rightPanel.includes('confirmRequest.costPoints'))
   check('确认卡引用降级文案常量', rightPanel.includes('AGENT_CONFIRM_PREDEDUCT_NOTICE'))
   check(
-    '确认卡调服务端估算与余额接口',
-    rightPanel.includes('requestPointsEstimate') && rightPanel.includes('requestPointsBalance'),
+    '确认卡改用预校验缓存的服务端数字（不再自己在面板里重打估算接口）',
+    rightPanel.includes('resolveAgentConfirmCostDisplayFromCache')
+      && !rightPanel.includes('requestPointsEstimate')
+      && !rightPanel.includes('requestPointsBalance'),
   )
 }
 
