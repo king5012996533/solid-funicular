@@ -210,6 +210,8 @@ const ALLOWED_STREAM_EVENT_TYPES = new Set([
   "outline_ready",
   "section_delta",
   "token_usage",
+  // 制片 Agent 的导演控制台状态（只给界面渲染，不属于消息正文）
+  "console_state",
   "completed",
   "failed",
   "stopped",

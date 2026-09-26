@@ -21,6 +21,12 @@
  *     唯一带 typebox symbol 键的是 system 消息里的 `toolsAdded`，而这里恰好不存 system 消息，所以根本不碰它。
  */
 
+import {
+  CANVAS_AGENT_CONSOLE_PHASES,
+  type CanvasAgentConsolePhaseKey,
+  type CanvasAgentConsoleSessionMemory,
+} from '../../src/shared/canvas-agent-console'
+
 /** metaJson 里存转录用的键（GenerationRecord.metaJson 是 Json 字段，不新增列/迁移） */
 export const CANVAS_AGENT_SESSION_META_KEY = 'canvasAgentSession'
 
@@ -100,6 +106,8 @@ export interface CanvasAgentPersistedSession {
   savedAt: string
   /** 只含非 system 消息（user / assistant / toolResult），已是可安全写入 Json 字段的纯数据 */
   messages: unknown[]
+  /** 导演控制台的阶段高水位（可选；旧数据没有 → 从 script 起算） */
+  console?: CanvasAgentConsoleSessionMemory
 }
 
 /** fallback 路径要并进用户消息的历史行 */
@@ -116,6 +124,14 @@ export const resolveCanvasAgentCanvasId = (requestBody: unknown): string => {
 
 const roleOf = (message: unknown): string =>
   String((message as { role?: unknown } | null | undefined)?.role || '')
+
+const CONSOLE_PHASE_KEYS = new Set<string>(CANVAS_AGENT_CONSOLE_PHASES.map((item) => item.key))
+
+/** 校验并取回控制台记忆；形状不合法返回 undefined（当作「从 script 起算」，绝不用可疑数据） */
+const readConsoleMemory = (raw: unknown): CanvasAgentConsoleSessionMemory | undefined => {
+  const phase = String((raw as { phase?: unknown } | null | undefined)?.phase || '').trim()
+  return CONSOLE_PHASE_KEYS.has(phase) ? { phase: phase as CanvasAgentConsolePhaseKey } : undefined
+}
 
 /** 只取文本块拼成纯文本（thinking 不进摘要输入，避免把思考当成事实写进摘要） */
 const textContentOf = (content: unknown): string => {
@@ -253,16 +269,20 @@ export const buildCanvasAgentSessionMeta = (input: {
   canvasId: string
   messages: unknown
   savedAt?: string
+  /** 导演控制台的阶段高水位；形状不合法则不带该键（下一轮从 script 起算） */
+  console?: CanvasAgentConsoleSessionMemory
 }): CanvasAgentPersistedSession | null => {
   const canvasId = String(input.canvasId || '').trim()
   const messages = trimTranscriptToBudget(toPersistedTranscriptMessages(input.messages))
   if (!canvasId || messages.length === 0) return null
+  const console = readConsoleMemory(input.console)
 
   return {
     version: CANVAS_AGENT_SESSION_VERSION,
     canvasId,
     savedAt: input.savedAt || new Date().toISOString(),
     messages,
+    ...(console ? { console } : {}),
   }
 }
 
@@ -292,11 +312,14 @@ export const readCanvasAgentSession = (
   const messages = toPersistedTranscriptMessages(session.messages)
   if (messages.length === 0) return null
 
+  const console = readConsoleMemory((session as { console?: unknown }).console)
+
   return {
     version: CANVAS_AGENT_SESSION_VERSION,
     canvasId: expected,
     savedAt: String(session.savedAt || ''),
     messages: trimTranscriptToBudget(messages),
+    ...(console ? { console } : {}),
   }
 }
 

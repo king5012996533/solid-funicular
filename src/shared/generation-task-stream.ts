@@ -6,6 +6,7 @@
 // - 定义标准化的失败码 GenerationTaskFailureCode，用于 failed 事件，
 //   前端可据此区分错误类型并给出准确的用户反馈
 import type { AgentWorkspaceEvent } from "./agent-workspace";
+import type { CanvasAgentConsoleState } from "./canvas-agent-console";
 import type {
   ResearchBeginPayload,
   ResearchOutlineReadyPayload,
@@ -40,6 +41,8 @@ export type GenerationTaskStreamEventType =
   | "section_delta"
   | "token_usage"
   | "agent_event"
+  // 制片 Agent 的「导演控制台」结构化状态（只给界面看，不进转录/不进模型上下文）
+  | "console_state"
   | "completed"
   | "failed"
   | "stopped";
@@ -124,6 +127,11 @@ export interface GenerationTaskStreamEventBase<TRecord = unknown> {
   agentToolCall?: AgentToolCallPayload;
   /** 画布 Agent 桥：浏览器回传的执行回执（服务端会转成事件再广播一次，便于多端同步展示） */
   agentToolResult?: AgentToolResultPayload;
+  /**
+   * 导演控制台状态（console_state）：由服务端从真实事件推导。
+   * **只给界面渲染**，客户端不得把它并入消息正文或任何回喂模型的上下文。
+   */
+  consoleState?: CanvasAgentConsoleState;
   // 单调递增的事件 id，用于客户端断线重连时通过 lastEventId 定位重放起点
   id?: number;
   // 仅 failed 事件使用：标准化错误码 + 详细原因

@@ -153,6 +153,40 @@ const hasMessages = ref(false)
 // 消息数据
 const messages = ref([])
 
+/**
+ * 导演控制台状态（AI Director Console · 批次 1）。
+ *
+ * 只由服务端的 `console_state` 事件写入 —— 状态由服务端从真实事件推导，前端不做任何推算、
+ * 不显示任何没有分母的百分比。它**不属于任何一条消息**：不参与 Markdown 渲染、不进转录。
+ * 空态（无消息）时整块不显示，保持现有引导 + 示例 chip。
+ */
+const consoleState = ref(null)
+
+/** 生命周期中文词（服务端给英文枚举，这里只做展示翻译） */
+const CONSOLE_LIFECYCLE_LABELS = {
+  thinking: '思考中',
+  analyzing: '分析中',
+  planning: '规划中',
+  generating: '执行中',
+  verifying: '校验中',
+  delivering: '交付中',
+}
+const consoleLifecycleLabel = computed(
+  () => CONSOLE_LIFECYCLE_LABELS[consoleState.value?.lifecycle] || '',
+)
+const consolePhaseLabel = computed(() => {
+  const stage = consoleState.value?.stage
+  if (!stage) return ''
+  return `阶段 ${stage.index}/${stage.total} · ${stage.label}`
+})
+/** 项目名优先用服务端给的画布名，拿不到就回落到面板标题（不显示空占位） */
+const consoleProjectLabel = computed(
+  () => String(consoleState.value?.project || props.title || '').trim(),
+)
+/** 执行日志的标记符号（与产品约定的 ✓ ▶ ○ ! 一致） */
+const CONSOLE_MARK_SYMBOLS = { done: '✓', running: '▶', pending: '○', failed: '!' }
+const consoleMarkSymbol = (mark) => CONSOLE_MARK_SYMBOLS[mark] || '·'
+
 const inputMessage = ref('')
 const messagesContainer = ref(null)
 const composerInputRef = ref(null)
@@ -224,6 +258,8 @@ const cleanupStreams = () => {
   }
   // 卸载/切会话时把还没答复的提问卡按「未回答」结掉：否则那个 Promise 会一直挂着
   if (askUserRequest.value) settleAskUser([], true)
+  // 控制台状态属于「当前会话这一轮」，切会话/卸载时要一并清掉，否则会串到别的会话
+  consoleState.value = null
 }
 
 /**
@@ -355,6 +391,8 @@ const mapRecordToMessages = (record) => {
 
 // 拉取指定会话的历史记录并填充到 messages（time asc）
 const loadSessionHistory = async (sessionId) => {
+  // 历史记录里没有控制台状态（它只随当前运行的事件流来）：读历史时先清空，避免显示上一次运行的残留
+  consoleState.value = null
   if (!sessionId) {
     messages.value = []
     hasMessages.value = false
@@ -774,6 +812,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
         providerId,
         // 画布现状：Agent 看不见画布，全靠这段摘要
         canvasBrief: props.canvasBrief || '',
+        // 画布名（= 面板标题）：控制台顶部的「项目名」用它，服务端直接透传、不做推断
+        canvasName: props.title || '',
         // 本轮附的参考图：服务端会告诉 Agent「用户附了 N 张图」，
         // 它再决定要不要用 attach_reference_images 挂到某个节点上
         referenceImages: turnReferenceImages.value,
@@ -826,6 +866,12 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
             if (!target.turnStartedAt) target.turnStartedAt = Date.now()
             scrollToBottom()
           }
+        }
+        // 导演控制台状态：单独一条 UI 事件，**不并入消息正文**（不碰 aiMsg.content、
+        // 不进 Markdown、也不回喂模型）——只更新顶部控制台
+        if (event.type === 'console_state') {
+          if (event.consoleState) consoleState.value = event.consoleState
+          return
         }
         // 服务端要它执行一个画布操作：交给桥（内部会执行 + 回执）
         if (agentBridge.handleStreamEvent(taskId, event, controller.signal)) {
@@ -1088,6 +1134,39 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 
       <!-- 隐藏的文件上传输入框 -->
       <input type="file" multiple accept="image/*" class="hidden-file-input" ref="fileInputRef" @change="handleFileChange">
+
+      <!--
+        导演控制台（AI Director Console · 批次 1）。
+        内容全部来自服务端的 console_state 事件（由真实事件推导）；有会话/有任务且收到过状态才出现，
+        空态保持下面的引导 + 示例 chip 不变。它只读，不参与消息流与 Markdown 渲染。
+      -->
+      <div v-if="hasMessages && consoleState" class="agent-console">
+        <div class="agent-console__head">
+          <span class="agent-console__title">🎬 Director Agent</span>
+          <span v-if="consoleProjectLabel" class="agent-console__project">{{ consoleProjectLabel }}</span>
+        </div>
+        <div class="agent-console__status">
+          <span class="agent-console__phase">{{ consolePhaseLabel }}</span>
+          <span v-if="consoleLifecycleLabel" class="agent-console__life">
+            {{ consoleLifecycleLabel }}<template v-if="consoleState.current?.title"> · {{ consoleState.current.title }}</template>
+          </span>
+        </div>
+        <!-- 进度只在真有分母时出现（服务端保证：没有分母就不带 progress 字段） -->
+        <div v-if="consoleState.progress" class="agent-console__progress">
+          {{ consoleState.progress.done }}/{{ consoleState.progress.total }} {{ consoleState.progress.unit }}
+        </div>
+        <ul v-if="consoleState.log?.length" class="agent-console__log">
+          <li
+            v-for="(item, index) in consoleState.log"
+            :key="index"
+            :class="['agent-console__log-item', `is-${item.mark}`]"
+          >
+            <span class="agent-console__mark">{{ consoleMarkSymbol(item.mark) }}</span>
+            <span class="agent-console__log-text">{{ item.text }}</span>
+          </li>
+        </ul>
+        <!-- 决策卡（导演决策）预留位：下一批在这里挂决策卡，本批不实现 -->
+      </div>
 
       <!-- 空状态：一句引导 + 示例 chip（点一下只填进输入框，不自动发送） -->
       <div v-if="!hasMessages" class="agent-empty">
@@ -1683,6 +1762,96 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 }
 .chat-messages-list .message-row {
   margin-bottom: 14px;
+}
+
+/**
+ * 导演控制台：消息流之上的常驻状态条（游戏任务系统那种「当前阶段 / 进度 / 执行日志」）。
+ * 风格对齐方案 C · 极简流：紧凑、不放大卡片、只用一根分隔线与消息区分开。
+ */
+.agent-console {
+  flex-shrink: 0;
+  padding: 8px 14px 9px;
+  border-bottom: 1px solid var(--agent-line-soft, #1e2027);
+  background: var(--agent-surface-2, #14161b);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.agent-console__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.agent-console__title {
+  flex: 0 0 auto;
+  color: var(--agent-text, #e8eaed);
+  font-size: 12px;
+  font-weight: 600;
+}
+.agent-console__project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-text-3, #6b7280);
+}
+.agent-console__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-top: 2px;
+}
+.agent-console__phase {
+  color: var(--agent-accent-soft, #b9a6ff);
+  font-weight: 600;
+}
+.agent-console__life {
+  color: var(--agent-text-2, #9aa0a8);
+}
+.agent-console__progress {
+  margin-top: 2px;
+  color: var(--agent-text-2, #9aa0a8);
+}
+.agent-console__log {
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.agent-console__log-item {
+  display: flex;
+  gap: 6px;
+  color: var(--agent-text-2, #9aa0a8);
+}
+.agent-console__mark {
+  flex: 0 0 auto;
+  width: 10px;
+  text-align: center;
+}
+.agent-console__log-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-console__log-item.is-done .agent-console__mark {
+  color: var(--agent-ok, #3ddc97);
+}
+.agent-console__log-item.is-running {
+  color: var(--agent-text, #e8eaed);
+}
+.agent-console__log-item.is-running .agent-console__mark {
+  color: var(--agent-accent, #7c5cff);
+}
+.agent-console__log-item.is-pending .agent-console__mark {
+  color: var(--agent-text-3, #6b7280);
+}
+.agent-console__log-item.is-failed,
+.agent-console__log-item.is-failed .agent-console__mark {
+  color: #ff6b6b;
 }
 
 /* 「你 · 04:12」小标（用户消息与 Agent 共用同一套字号层级） */

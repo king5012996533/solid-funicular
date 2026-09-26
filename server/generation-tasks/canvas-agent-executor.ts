@@ -44,6 +44,12 @@ import {
   resolveCanvasAgentReasoningFields,
   resolveCanvasAgentThinkingLevel,
 } from "./canvas-agent-thinking";
+import {
+  buildCanvasAgentConsoleStreamEvent,
+  deriveCanvasAgentConsole,
+  type CanvasAgentConsoleEvent,
+} from "./canvas-agent-console-state";
+import type { CanvasAgentConsoleSessionMemory } from "../../src/shared/canvas-agent-console";
 
 /**
  * 画布 Agent 的服务端执行器（2026-09-23，M2）
@@ -81,6 +87,17 @@ const MAX_TOOL_CALLS = 40;
 
 /** 单次任务的整体时限（毫秒）。到点强制收口，不让任务无限挂着占 SSE 连接 */
 const TASK_WALL_CLOCK_MS = 25 * 60_000;
+
+/**
+ * 控制台「当前任务」里的目标节点 id。
+ *
+ * 只从工具参数里取**显式给的节点 id**（id / node_id / nodeId）——不猜、不从批量里挑第一个。
+ * 取不到就不给 target，宁可少显示一个字段，也不显示一个可能错的节点。
+ */
+const resolveConsoleTarget = (args: Record<string, unknown>): string => {
+  const raw = args.id ?? args.node_id ?? args.nodeId;
+  return typeof raw === "string" ? raw.trim() : "";
+};
 
 interface PersistState {
   lastPersistAt: number;
@@ -482,6 +499,39 @@ export const executeCanvasAgentTaskFlow = async (
   const guard = createSpendGuard();
   let toolCallCount = 0;
 
+  /**
+   * 导演控制台（AI Director Console · 批次 1）。
+   *
+   * 这里只做一件事：把 Pi 的真实事件与工具回执攒成事件序列，交给纯函数推导快照，
+   * 再**只通过 SSE** 推给面板（`console_state`）。要点：
+   *   · 快照**不写进转录**、也不进模型上下文 —— 模型侧只看得到对话与工具结果，控制台是纯 UI；
+   *   · 状态由事件推导，模型自报的数字一律不参与（`progress` 只认批量回执里的真实分母）；
+   *   · 阶段高水位随会话（metaJson）持久化，跨轮「只增不减」。
+   */
+  const consoleEvents: CanvasAgentConsoleEvent[] = [];
+  let consoleSeed: CanvasAgentConsoleSessionMemory | undefined;
+  let consoleMemory: CanvasAgentConsoleSessionMemory | undefined;
+  const consoleProjectName = String(
+    (payload.requestBody as Record<string, unknown> | null | undefined)?.canvasName || "",
+  ).trim();
+
+  const emitConsoleState = () => {
+    const { state, memory } = deriveCanvasAgentConsole(consoleEvents, {
+      project: consoleProjectName,
+      seed: consoleSeed,
+    });
+    consoleMemory = memory;
+    context.emitTaskStreamEvent(
+      task.recordId,
+      buildCanvasAgentConsoleStreamEvent(task.recordId, state),
+    );
+  };
+
+  const pushConsoleEvent = (event: CanvasAgentConsoleEvent) => {
+    consoleEvents.push(event);
+    emitConsoleState();
+  };
+
   const appendText = (chunk: string) => {
     if (!chunk) return;
     fullText += chunk;
@@ -574,6 +624,15 @@ export const executeCanvasAgentTaskFlow = async (
             args: JSON.stringify(args).slice(0, 300),
           });
 
+          // 控制台：工具开始（真实事件，非模型自报）——目标节点 id 只来自参数，不做推断
+          const consoleTarget = resolveConsoleTarget(args);
+          pushConsoleEvent({
+            type: "tool_start",
+            toolName: definition.name,
+            callId: toolCallId,
+            ...(consoleTarget ? { target: consoleTarget } : {}),
+          });
+
           if (!definition.requiresClient) {
             /**
              * 纯服务端工具：在服务端直接产出结果，不走浏览器桥。
@@ -582,13 +641,22 @@ export const executeCanvasAgentTaskFlow = async (
              * 与画布状态无关 —— 走桥只会多一次浏览器往返，还可能因前端没实现这个 case 而失败。
              */
             let text = `工具「${definition.name}」尚未实现`;
+            let serverToolOk = false;
             if (definition.name === "load_playbook") {
               const playbook = resolveCanvasAgentPlaybook(
                 args.name ? String(args.name) : undefined,
               );
               text = playbook
                 ?? `没有这个手册主题：${String(args.name || "")}（目前只有 storyboard-production）`;
+              serverToolOk = Boolean(playbook);
             }
+            pushConsoleEvent({
+              type: "tool_end",
+              toolName: definition.name,
+              callId: toolCallId,
+              ok: serverToolOk,
+              summary: serverToolOk ? "已加载工作手册" : text,
+            });
             return {
               content: [{ type: "text" as const, text }],
               details: {},
@@ -646,6 +714,17 @@ export const executeCanvasAgentTaskFlow = async (
             agentToolResult: result,
           });
 
+          // 控制台：工具结束。摘要与回执都取自真实结果 —— 批量工具（add_nodes / run_nodes）
+          // 的 done/total 也从这里拿到，绝不编造分母。
+          pushConsoleEvent({
+            type: "tool_end",
+            toolName: definition.name,
+            callId: toolCallId,
+            ok: result.ok,
+            summary: String(result.summary || ""),
+            resultText: result.result,
+          });
+
           return {
             content: [{ type: "text" as const, text: result.result }],
             details: result.details || {},
@@ -697,6 +776,12 @@ export const executeCanvasAgentTaskFlow = async (
     sessionId,
     previousSession,
   });
+
+  // 控制台的阶段高水位从上一轮恢复：只有画布 id 与会话 id 都对上（previousSession 已按此校验）才拿。
+  // 拿不到就从 script 起算 —— 宁可重来，也不把别的画布/会话的阶段串过来。
+  if (canvasId && sessionId && previousSession) {
+    consoleSeed = previousSession.console;
+  }
 
   /**
    * 恢复出来的转录要**拆成两半**用：
@@ -847,6 +932,19 @@ export const executeCanvasAgentTaskFlow = async (
   // 同一轮内只升一次档（升一档、封顶 medium），已经升过就不再动 —— 反复改档会让思考开销来回抖。
   let thinkingEscalated = false;
   agent.subscribe((event) => {
+    // 导演控制台：生命周期从 Pi 的真实事件推导（不由模型自报）
+    if (event.type === "agent_start") {
+      pushConsoleEvent({ type: "agent_start" });
+      return;
+    }
+    if (event.type === "turn_start") {
+      pushConsoleEvent({ type: "turn_start" });
+      return;
+    }
+    if (event.type === "agent_end") {
+      pushConsoleEvent({ type: "agent_end" });
+      return;
+    }
     if (event.type === "tool_execution_start") {
       context.emitTaskProgressEvent(task.recordId, {
         stage: "agent_tool_start",
@@ -905,6 +1003,16 @@ export const executeCanvasAgentTaskFlow = async (
               to: escalatedThinkingLevel,
             });
           }
+        }
+
+        // 控制台：只有文本、没有工具调用的 assistant 消息 = 收尾汇报（生命周期 delivering；
+        // 生成过东西时阶段推进到交付）。带工具调用的那条不算汇报。
+        const hasReportText = parts.some(
+          (part) => (part as { type?: string }).type === "text"
+            && String((part as { text?: string }).text || "").trim().length > 0,
+        );
+        if (hasReportText && !hasToolCall) {
+          pushConsoleEvent({ type: "assistant_message" });
         }
       }
       return;
@@ -1028,6 +1136,8 @@ export const executeCanvasAgentTaskFlow = async (
       const session = buildCanvasAgentSessionMeta({
         canvasId: sessionBootstrap.canvasId,
         messages: compaction.messages,
+        // 控制台阶段高水位随会话落库：下一轮从这里续（只增不减）
+        console: consoleMemory,
       });
       if (session) {
         await context.saveCanvasAgentSession({
