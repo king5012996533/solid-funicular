@@ -203,6 +203,27 @@ console.log('\n【9】反证：放宽成「有交集就命中」会把别的批�
   )
 }
 
+
+/**
+ * 2026-09-26 真机验收抓到的 bug：服务端估算**拿不到价时返回 0**（`/api/points/estimate` 返回 204），
+ * 而卡片把 0 当成有效数字，自信地显示「本批将预扣 **0 分**」（一张图实际 6 分）。
+ * 报错的数字比不说数字糟糕得多 —— 这两条断言把 0/负数钉死为「拿不到」。
+ */
+{
+  const cachedWithZero = rememberPreflightEstimate({ nodeIds: ['z1'], estimatedCostTotal: 0, availablePoints: 100 })
+  check('总额为 0 时不缓存（0 = 没估出来，不是不花钱）', cachedWithZero === false)
+  const displayWithZeroCache = resolveAgentConfirmCostDisplayFromCache({ nodeIds: ['z1'] })
+  check('0 不缓存 → 卡片拿不到数字（estimatedPoints 为 null）', displayWithZeroCache.estimatedPoints === null)
+  check(
+    '0 不缓存 → 仍显示预扣语义说明（用户知道会预扣/会被拦/会退还）',
+    displayWithZeroCache.notice === AGENT_CONFIRM_PREDEDUCT_NOTICE,
+  )
+  check('展示层同样把 0 视为拿不到', resolveAgentConfirmCostDisplay({ estimated: 0, available: 100 }).estimatedPoints === null)
+  check('展示层把负数同样视为拿不到', resolveAgentConfirmCostDisplay({ estimated: -5 }).estimatedPoints === null)
+  check('正数照常显示（回归）', resolveAgentConfirmCostDisplay({ estimated: 6, available: 994 }).estimatedPoints === 6)
+  check('余额仍照常显示（0 分不影响余额行）', displayWithZeroCache.balanceText === null || typeof displayWithZeroCache.balanceText === 'string')
+}
+
 console.log(`\n${'─'.repeat(52)}`)
 console.log(`  通过 ${passed} / 失败 ${failed}`)
 process.exit(failed ? 1 : 0)

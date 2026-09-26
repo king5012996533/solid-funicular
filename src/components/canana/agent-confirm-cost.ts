@@ -47,7 +47,13 @@ export const resolveAgentConfirmCostDisplay = (input: {
   estimated?: unknown;
   available?: unknown;
 }): AgentConfirmCostDisplay => {
-  const estimatedPoints = readNonNegativeNumber(input.estimated);
+  const rawEstimated = readNonNegativeNumber(input.estimated);
+  /**
+   * **0 与负数一律按「拿不到」处理**：0 不是「不花钱」，而是「没估出来价」
+   * （实测 `/api/points/estimate` 返回 204 时就是 0）。显示「预扣 0 分」是**报错的数字**，
+   * 比降级成通用文案糟糕得多 —— 产品口径是「宁可不说数字，也不说错的」。
+   */
+  const estimatedPoints = rawEstimated !== null && rawEstimated > 0 ? rawEstimated : null;
   const available = readNonNegativeNumber(input.available);
   return {
     estimatedPoints,
@@ -121,7 +127,16 @@ export const rememberPreflightEstimate = (input: {
 }): boolean => {
   const key = normalizePreflightNodeKey(input.nodeIds);
   const estimatedCostTotal = readNonNegativeNumber(input.estimatedCostTotal);
-  if (!key || estimatedCostTotal === null) return false;
+  /**
+   * 只在**拿到正数总额**时才缓存。
+   *
+   * 为什么不能收 0：实测（`points-check` 真机验收）出现
+   * `/api/points/estimate` 返回 204、估算拿不到价，`totalEstimated` 就是 **0** ——
+   * 若把 0 当有效数字缓存，确认卡会「自信地」显示「本批将预扣 **0 分**」（一张图实际 6 分）。
+   * 这比降级更糟：降级只是不说数字，报 0 是**报错的数字**。宁可不缓存，让它降级。
+   */
+  if (estimatedCostTotal === null || estimatedCostTotal <= 0) return false;
+  if (!key) return false;
   const now = typeof input.now === "number" && Number.isFinite(input.now) ? input.now : Date.now();
   const ttlMs =
     typeof input.ttlMs === "number" && Number.isFinite(input.ttlMs) && input.ttlMs > 0
