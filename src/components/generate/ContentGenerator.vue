@@ -10,7 +10,6 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 // 导入子组件
 import { TypeSelector, type CreationType } from './selectors'
 import { AgentToolbar, ImageToolbar, VideoToolbar, AudioToolbar, DigitalHumanToolbar } from './toolbars'
-import { appendAutoLinkedTokens, mergeReferenceImages, type AutoLinkInput } from './auto-link'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
 import {
   probeReferenceUrls,
@@ -34,6 +33,16 @@ import {
   resolvePromptReferences,
   type ReferenceableAsset,
 } from '@/views/workflow/composables/reference-resolver'
+import type { UpstreamImageRole } from '@/views/workflow/composables/upstream-inputs'
+// 「本次提交哪些素材」的唯一算法在 shared/reference-collection（纯函数、有单测）
+import {
+  buildReferenceCollection,
+  type ReferenceCandidate,
+  type ReferenceCollectionItem,
+  type ReferenceFrameRole,
+} from '@/shared/reference-collection'
+// C1：点引用跳回上游卡片用的两个冻结原语（只读，不改画布状态）
+import { requestCenterOnNode, selectOnlyNode } from '@/views/workflow/composables/useWorkflowCanvas'
 
 // 弹出方向类型
 type Placement = 'top' | 'bottom' | 'auto'
@@ -123,9 +132,11 @@ interface GeneratorSendOptions {
   /** 解析失败的引用 token 原文（资产已失效或序号不存在），由调用方决定是否提示 */
   unresolvedReferences?: string[]
   /**
-   * 「智能引用 AutoLink」的开关状态。
-   * 节点侧据此决定要不要走「没有 @ 就注入全部上游素材」的兜底：
-   * 关掉开关时不能再兜底，否则关了个寂寞。
+   * 是否允许节点侧再走一次「没有 @ 就注入全部上游素材」的兜底。
+   *
+   * composer 现在自己产出**完整**的素材清单（`reference-collection.ts`，含上游自动那份），
+   * 所以画布上下文里一律传 false：节点再兜底一次就会把用户在清单里删掉的自动引用塞回来。
+   * 也就是说 AutoLink 已降级为「清单的默认填充」，不再是节点侧的第二套注入机制。
    */
   autoLink?: boolean
 }
@@ -236,6 +247,9 @@ const readAutoLinkPreference = (): boolean => {
 }
 const autoLinkEnabled = ref(readAutoLinkPreference())
 watch(autoLinkEnabled, (on) => {
+  // 重新打开开关 = 让自动那部分重新默认填充：清掉屏蔽名单，
+  // 否则用户之前删掉的那条在开关来回切之后永远回不来（「关掉消失、打开出现」才是可预期的）
+  suppressedEdgeUrls.value = []
   if (typeof window === 'undefined') return
   window.localStorage.setItem(AUTO_LINK_STORAGE_KEY, on ? '1' : '0')
 })
@@ -246,30 +260,21 @@ watch(autoValidateReferences, (on) => {
   window.localStorage.setItem(AUTO_VALIDATE_STORAGE_KEY, on ? '1' : '0')
 })
 
+/**
+ * 用户**手动上传**的参考图。
+ *
+ * 只放用户自己传的那份：上游连线自动带的素材不再往这里合并（以前两套合并逻辑
+ * 导致分不出「谁传的」，关掉 AutoLink 也摘不干净）。上游那份现在统一由
+ * `referenceCollection` 从 props 现算，在「已引用」行里逐条可见、可删。
+ */
 const imageReferenceImages = ref<string[]>([])
 /**
- * 上游塞进来的参考图（未合并前的原始清单）与「已合并进 imageReferenceImages 的那部分」。
+ * 被用户在清单里删掉的「自动」素材 url。
  *
- * 为什么要记来源：合并之后两类参考图长得一模一样，分不出「用户自己传的」和「上游自动带的」，
- * 于是关掉 AutoLink 也拦不住上游图 —— **实测踩到过**（关了开关再提交，请求体里照样带着上游图）。
- * 有这两个清单才能做到「关开关 = 只摘掉上游那份，用户自己传的一张不动」。
+ * 自动素材直接来自上游连线（props），本身没有可持久化的删除动作 ——
+ * 记一份屏蔽名单，让「删掉」不会被下一次清单重算抹回来。
  */
-const externalReferenceUrls = ref<string[]>([])
-const externalMergedUrls = ref<string[]>([])
-
-/** 按当前开关状态把两类参考图合成一份有效清单（规则在 auto-link.ts，带单测） */
-const syncImageReferences = () => {
-  const mergedBefore = new Set(externalMergedUrls.value)
-  const { effective, mergedExternal } = mergeReferenceImages({
-    // 用户自己的（含手动上传）：排掉上一次合并进来的上游那份
-    own: imageReferenceImages.value.filter(url => !mergedBefore.has(url)),
-    external: externalReferenceUrls.value,
-    enabled: autoLinkEnabled.value,
-    limit: IMAGE_REFERENCE_LIMIT,
-  })
-  externalMergedUrls.value = mergedExternal
-  imageReferenceImages.value = effective
-}
+const suppressedEdgeUrls = ref<string[]>([])
 const videoFirstFrameImage = ref('')
 const videoLastFrameImage = ref('')
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -279,20 +284,8 @@ const videoFirstFrameInputRef = ref<HTMLInputElement | null>(null)
 const videoLastFrameInputRef = ref<HTMLInputElement | null>(null)
 const IMAGE_REFERENCE_LIMIT = 9
 
-// 外部塞入的参考图（如节点画布把上游连线的图作为参考图）→ 按 AutoLink 开关同步进 imageReferenceImages
-// 用 deep 监听，让 ImageNode 切换上游连线时实时反映到输入框；开关状态变化时也要重算
-watch(
-  [() => props.externalReferenceImages, autoLinkEnabled],
-  ([urls]) => {
-    externalReferenceUrls.value = Array.isArray(urls) ? urls.filter(Boolean) : []
-    syncImageReferences()
-  },
-  { immediate: true, deep: true },
-)
-
-// 视频模式：同一批外部参考图按位置映射成首帧 / 尾帧，
-// 这样图片节点连到视频节点时首帧是自动带上的，不用手动再传一次。
-// 注意：这个 watcher 放在 currentType 声明之后，因为它依赖 currentType。
+// 上游连线自动注入的素材不再往本地状态里合并：`referenceCollection` 直接读 props 现算，
+// 于是「开关状态 / 连线变化 / 手动删除」都只走同一条重算路径，没有需要同步的第二份副本。
 
 
 // 登录态与全局登录弹窗。
@@ -343,21 +336,9 @@ const readDefaultCreationType = () => {
 const storedCreationType = readStoredCreationType()
 const currentType = ref<CreationType>(props.initialCreationType ?? storedCreationType ?? readDefaultCreationType())
 
-// 视频模式：外部参考图按位置映射成首帧 / 尾帧，
-// 这样图片节点连到视频节点时首帧是自动带上的，不用手动再传一次。
-watch(
-  [() => props.externalReferenceImages, currentType, autoLinkEnabled],
-  ([urls, type]) => {
-    if (type !== 'video' || !Array.isArray(urls)) return
-    // 关了 AutoLink 就不自动带首尾帧 —— 与图片参考图同一条语义
-    const normalized = autoLinkEnabled.value ? urls.filter(Boolean) : []
-    const first = String(normalized[0] || '')
-    const last = String(normalized[1] || '')
-    if (first !== videoFirstFrameImage.value) videoFirstFrameImage.value = first
-    if (last !== videoLastFrameImage.value) videoLastFrameImage.value = last
-  },
-  { immediate: true, deep: true },
-)
+// 视频的首帧 / 尾帧槽位只承载**用户手动上传**的画面：
+// 上游连线来的画面不再按「数组第 0/1 个」猜成首尾帧，而是按角色进 `referenceCollection`
+// （见 C2：位置猜测会把「只标了尾帧」的那张错当成首帧）。
 
 // 组件引用（用于弹窗互斥）
 const typeSelectorRef = ref<InstanceType<typeof TypeSelector> | null>(null)
@@ -625,6 +606,9 @@ const handleMentionSelect = (asset: ReferenceableAsset) => {
   const inline = mentionTarget.value === 'inline'
   inputValue.value = inserted.prompt
   closeMention()
+  // C1：从 @ 面板选一项时顺带把对应的上游卡片选中并居中 —— 菜单里看得见 token，
+  // 但看不出它对应画布上哪张图；跳过去一次就明白了。没有来源节点的资产不做任何事。
+  jumpToSourceNode(asset.sourceNodeId)
 
   if (inline) {
     // 内联 chip 输入框：立刻按新文本重建，token 当场变成 chip，光标回到插入点之后
@@ -652,74 +636,94 @@ const resolvedReferences = computed(() =>
   resolvePromptReferences(inputValue.value, referenceAssets.value),
 )
 
-const hasReferenceTokens = computed(() => {
-  const resolved = resolvedReferences.value
-  return resolved.media.length > 0 || resolved.texts.length > 0
-})
+/** 上游画面角色 → 清单角色。图片节点没有画面角色（不带该字段），按参考图处理 */
+const FRAME_ROLE_BY_UPSTREAM: Record<UpstreamImageRole, ReferenceFrameRole> = {
+  first_frame_image: 'first-frame',
+  last_frame_image: 'last-frame',
+  input_reference: 'reference',
+}
+const frameRoleOf = (asset: ReferenceableAsset): ReferenceFrameRole | undefined => {
+  const role = asset.frameRole
+  return role ? FRAME_ROLE_BY_UPSTREAM[role] : undefined
+}
 
-/**
- * AutoLink 的输入：开关状态 + 候选资产 + 已被显式引用的媒体 URL。
- * 规则本身在 auto-link.ts（纯函数、有单测），这里只负责把响应式数据喂进去。
- */
-const autoLinkInput = computed<AutoLinkInput>(() => ({
-  input: inputValue.value,
-  assets: referenceAssets.value,
-  referencedMediaUrls: resolvedReferences.value.media,
-  enabled: autoLinkEnabled.value,
-}))
-
-const autoLinkResult = computed(() => appendAutoLinkedTokens(autoLinkInput.value))
-
-/**
- * 提交时真正用的提示词与引用解析。
- * 开了 AutoLink 且有待自动引用的素材时，先把它们的 token 拼进正文再解析 ——
- * 于是正文里出现 `【图片1】`、URL 进 media，两处与手写引用走的是同一条路。
- */
-const outgoingResolution = computed(() => {
-  const autoLinkedPrompt = autoLinkResult.value.prompt
-  if (autoLinkedPrompt === inputValue.value) return resolvedReferences.value
-  return resolvePromptReferences(autoLinkedPrompt, referenceAssets.value)
-})
-
-/** 这次提交会自动带几个素材（UI 上如实告知） */
-const autoLinkedCount = computed(() => autoLinkResult.value.tokens.length)
-
-/**
- * 自动引用的素材也要出现在「已引用」行里。
- *
- * 早先只显示用户手写 @ 的那些，于是开了 AutoLink 的用户**看不到这次提交带了什么** ——
- * 只有开关旁边一句「自动引用 N 个」。（对齐 LibTV：他们的自动引用同样是可见的缩略图。）
- * 这一类没有 token 可删，所以不给叉号，只标一个「自动」。
- */
-const autoLinkedMediaItems = computed(() => {
-  const tokens = new Set(autoLinkResult.value.tokens)
-  if (!tokens.size) return [] as Array<{ url: string; asset: ReferenceableAsset; auto: true }>
-  return referenceAssets.value.flatMap((asset) => {
-    if (!tokens.has(String(asset.token))) return []
-    if (asset.kind !== 'image' && asset.kind !== 'video') return []
-    if (!asset.value) return []
-    return [{ url: asset.value, asset, auto: true as const }]
-  })
-})
-
-/** 「已引用」行只展示媒体（图片 / 视频）—— 文本引用读不出缩略图，语义也不一样 */
-const referencedMediaItems = computed(() => {
-  const resolved = resolvedReferences.value
-  if (!resolved.media.length) return [] as Array<{ url: string; asset: ReferenceableAsset }>
-
-  // media 里是 url，反查资产才能知道它对应的 token 文案
-  const assetByValue = new Map<string, ReferenceableAsset>()
+/** 媒体 url → 上游资产：反查 token / 来源节点 / 画面角色都靠它 */
+const mediaAssetByValue = computed(() => {
+  const map = new Map<string, ReferenceableAsset>()
   for (const asset of referenceAssets.value) {
     if (asset.kind !== 'image' && asset.kind !== 'video') continue
     if (!asset.value) continue
-    if (!assetByValue.has(asset.value)) assetByValue.set(asset.value, asset)
+    if (!map.has(asset.value)) map.set(asset.value, asset)
   }
-
-  return resolved.media.flatMap((url) => {
-    const asset = assetByValue.get(url)
-    return asset ? [{ url, asset }] : []
-  })
+  return map
 })
+
+/** 通道②：提示词里显式 @ 到的媒体，按出现顺序 */
+const explicitCandidates = computed<ReferenceCandidate[]>(() =>
+  resolvedReferences.value.media.map((url) => {
+    const asset = mediaAssetByValue.value.get(url)
+    if (!asset) return { url }
+    return { url, token: asset.token, sourceNodeId: asset.sourceNodeId, kind: asset.kind, role: frameRoleOf(asset) }
+  }),
+)
+
+/** 通道①：上游连线自动注入的素材（图片节点 = 参考图；视频节点 = 已按角色排好的画面） */
+const edgeCandidates = computed<ReferenceCandidate[]>(() => {
+  const suppressed = new Set(suppressedEdgeUrls.value)
+  const urls = Array.isArray(props.externalReferenceImages) ? props.externalReferenceImages : []
+  const out: ReferenceCandidate[] = []
+  for (const raw of urls) {
+    const url = String(raw || '').trim()
+    // 用户删掉的那条不再回来；没有来源节点的素材同样照常进清单，只是不可跳转
+    if (!url || suppressed.has(url)) continue
+    const asset = mediaAssetByValue.value.get(url)
+    out.push({
+      url,
+      token: asset?.token,
+      sourceNodeId: asset?.sourceNodeId,
+      kind: asset?.kind,
+      role: asset ? frameRoleOf(asset) : undefined,
+    })
+  }
+  return out
+})
+
+/** 通道④：手动上传的参考图；视频的首帧 / 尾帧由槽位决定角色，单独传入 */
+const manualCandidates = computed<ReferenceCandidate[]>(() =>
+  imageReferenceImages.value.map(url => ({ url })),
+)
+
+/**
+ * 本次实际会提交的素材清单 —— **唯一**的决策点。
+ *
+ * 四条通道在这里收敛成一份结果：顺序（显式 → 手动 → 自动）、去重（显式 > 手动 > 自动）、
+ * 每项的来源标注，规则都在 `shared/reference-collection.ts`（纯函数、有单测）。
+ * 提交载荷、输入框上方的缩略图行、视频的画面顺序都只读这一份，不再各算各的。
+ */
+const referenceCollection = computed(() => buildReferenceCollection({
+  explicit: explicitCandidates.value,
+  manual: manualCandidates.value,
+  manualFirstFrame: currentType.value === 'video' ? videoFirstFrameImage.value : '',
+  manualLastFrame: currentType.value === 'video' ? videoLastFrameImage.value : '',
+  edge: edgeCandidates.value,
+  autoLinkEnabled: autoLinkEnabled.value,
+  limit: currentType.value === 'video' ? 0 : IMAGE_REFERENCE_LIMIT,
+}))
+
+/** 「已引用」行显示的项：视频按画面角色排（首帧→尾帧→参考图），其余按提交顺序 */
+const outgoingReferenceItems = computed<ReferenceCollectionItem[]>(() =>
+  currentType.value === 'video' ? referenceCollection.value.frameItems : referenceCollection.value.items,
+)
+
+/** 本次真正会发出去的参考图 url —— 校验与请求体共用同一份，不会「校验 A、发出 B」 */
+const outgoingReferenceUrls = computed<string[]>(() =>
+  outgoingReferenceItems.value.map(item => item.url),
+)
+
+/** 清单里「自动」那部分有几条（界面上如实告知会带上几个上游素材） */
+const autoLinkedCount = computed(() =>
+  referenceCollection.value.items.filter(item => item.source === 'auto-from-edge').length,
+)
 
 /**
  * 缩略图上的 `@` 按钮：把该素材的 token 插进提示词（对齐 LibTV 缩略图右下角那个 @）。
@@ -732,8 +736,8 @@ const referencedMediaItems = computed(() => {
  *
  * 走的是敲 `@` 选素材的**同一条** `insertReferenceToken` 管线，不另写一套插入逻辑。
  */
-const insertReferenceFromThumbnail = (asset: ReferenceableAsset) => {
-  const token = String(asset.token || '').trim()
+const insertReferenceFromThumbnail = (tokenRaw: string) => {
+  const token = String(tokenRaw || '').trim()
   if (!token) return
   const caretRaw = inlineMentionRef.value?.getCaretOffset?.() ?? -1
   const caret = caretRaw >= 0 ? caretRaw : inputValue.value.length
@@ -755,10 +759,74 @@ const insertReferenceFromThumbnail = (asset: ReferenceableAsset) => {
  * 逐 token 匹配后整段比较，而不是直接 replace 子串：
  * `@图片1` 是 `@图片10` 的前缀，子串替换会误伤。
  */
-const removeMentionedReference = (item: { url: string; asset: ReferenceableAsset }) => {
-  const token = `@${item.asset.token}`
+const removeMentionedToken = (tokenRaw?: string) => {
+  const token = String(tokenRaw || '').trim()
+  if (!token) return
   const pattern = new RegExp(REFERENCE_TOKEN_PATTERN.source, 'g')
-  inputValue.value = inputValue.value.replace(pattern, (match) => (match === token ? '' : match))
+  inputValue.value = inputValue.value.replace(pattern, (match) => (match === `@${token}` ? '' : match))
+}
+
+/** C1：选中并把某个上游卡片移到视野中央（画布不在场时两个原语都是安全的空操作） */
+const jumpToSourceNode = (nodeIdRaw?: string) => {
+  const nodeId = String(nodeIdRaw || '').trim()
+  if (!nodeId) return
+  selectOnlyNode(nodeId)
+  requestCenterOnNode(nodeId)
+}
+
+/** 清单里每一项的角标：显式引用显示 token，自动 / 手动各标各的来源 */
+const referenceItemBadge = (item: ReferenceCollectionItem) => {
+  if (item.source === 'auto-from-edge') return '自动'
+  if (item.source === 'manual') return '手动'
+  return item.token ? `@${item.token}` : '引用'
+}
+
+/** 缩略图 hover 提示：来源 + 画面角色 + 是否可跳回上游 */
+const referenceItemTitle = (item: ReferenceCollectionItem) => {
+  const parts = [referenceItemBadge(item)]
+  if (item.role === 'first-frame') parts.push('首帧')
+  else if (item.role === 'last-frame') parts.push('尾帧')
+  if (item.source === 'auto-from-edge') parts.push('上游连线自动带上')
+  if (item.sourceNodeId) parts.push('点击跳回上游卡片')
+  return parts.join(' · ')
+}
+
+/** C1：点缩略图本体 = 跳回上游；叉号是删除，两者热区互不干扰（子按钮都 stop 冒泡） */
+const jumpToReferenceSource = (item: ReferenceCollectionItem) => {
+  jumpToSourceNode(item.sourceNodeId)
+}
+
+/**
+ * 清单里删掉一项。三种来源的「删」含义不同，但入口只有这一个：
+ *   显式 → 从提示词里删掉 token；
+ *   手动 → 从手动清单 / 首尾帧槽位里移除；
+ *   自动 → 记进屏蔽名单，之上游连线还在也不会再回来。
+ */
+const removeCollectionItem = (item: ReferenceCollectionItem) => {
+  if (item.source === 'explicit') {
+    removeMentionedToken(item.token)
+    return
+  }
+  if (item.source === 'auto-from-edge') {
+    if (!suppressedEdgeUrls.value.includes(item.url)) {
+      suppressedEdgeUrls.value = [...suppressedEdgeUrls.value, item.url]
+    }
+    return
+  }
+  let clearedFrame = false
+  if (item.url === videoFirstFrameImage.value) {
+    videoFirstFrameImage.value = ''
+    clearedFrame = true
+  }
+  if (item.url === videoLastFrameImage.value) {
+    videoLastFrameImage.value = ''
+    clearedFrame = true
+  }
+  if (clearedFrame) return
+  const index = imageReferenceImages.value.indexOf(item.url)
+  if (index >= 0) {
+    imageReferenceImages.value = imageReferenceImages.value.filter((_, currentIndex) => currentIndex !== index)
+  }
 }
 
 watch(
@@ -789,23 +857,6 @@ const handleKeydown = (e: KeyboardEvent) => {
 
 // 提交消息
 /**
- * 收集本次要发出去的参考图（按类型分别取）。
- * 抽出来是因为「校验」和「组装载荷」都要用同一份列表 ——
- * 两处各自算一次的话，很容易出现"校验的时候是这个数组、发出去的是另一个"。
- */
-const collectOutgoingReferences = (resolvedMedia: string[]): string[] => {
-  if (currentType.value === 'image') {
-    return hasReferenceTokens.value ? [...resolvedMedia] : [...imageReferenceImages.value]
-  }
-  if (currentType.value === 'video') {
-    return hasReferenceTokens.value
-      ? [...resolvedMedia]
-      : [videoFirstFrameImage.value, videoLastFrameImage.value].filter(Boolean)
-  }
-  return []
-}
-
-/**
  * 提交前校验参考图（对齐 LibTV 的「自动校验素材」开关）。
  *
  * 两层：先同步查格式（零成本），再并发探测可访问性。
@@ -835,22 +886,22 @@ const ensureReferencesUsable = async (urls: string[]): Promise<boolean> => {
 }
 
 const handleSubmit = async () => {
-  const resolved = outgoingResolution.value
-  // 自动引用也要走「解析后正文」这条路（内容里会出现【图片N】），
-  // 否则关了 AutoLink、又没手写 @ 时才能保持逐字节原样
-  const hasAutoLinked = autoLinkedCount.value > 0
-  const message = (hasReferenceTokens.value || hasAutoLinked ? resolved.text : inputValue.value).trim()
+  const resolved = resolvedReferences.value
+  // 没有 token 时 resolvePromptReferences 原样返回入参，所以这里逐字节等于输入内容
+  const message = resolved.text.trim()
   if (!message) return
 
-  // 提交前校验参考图；不通过就停在本地，不发请求
-  if (!await ensureReferencesUsable(collectOutgoingReferences(resolved.media))) return
+  // 提交前校验参考图：校验与请求体共用同一份清单（outgoingReferenceUrls），
+  // 不会再出现「校验的是这个数组、发出去的是另一个」
+  if (!await ensureReferencesUsable(outgoingReferenceUrls.value)) return
 
   // 引用失效（序号不存在 / 资产已废弃）不阻塞提交，但要把原文带出去让调用方提示
   const unresolvedOptions = resolved.unresolved.length
     ? { unresolvedReferences: [...resolved.unresolved] }
     : {}
-  // 开关状态随提交带出去：节点侧「没有 @ 就注入全部上游」的兜底要跟着关
-  const autoLinkOption = { autoLink: autoLinkEnabled.value }
+  // composer 已经产出完整清单（含上游自动那份），节点侧不要再兜底注入一次：
+  // 否则用户在清单里删掉的自动引用会在提交时被原样塞回来
+  const autoLinkOption = { autoLink: false }
 
   // 未登录时直接弹出登录框，并保留当前输入内容。
   if (!authStore.isLoggedIn.value) {
@@ -863,7 +914,10 @@ const handleSubmit = async () => {
     return
   }
 
-  // 触发发送事件
+  // 触发发送事件。referenceImages 一律取这份唯一清单：图片 / Agent 是参考图，
+  // 视频是按画面角色（首帧→尾帧→参考图）排好的输入画面。
+  const referenceImages = [...outgoingReferenceUrls.value]
+
   if (currentType.value === 'image') {
     const toolbar = imageToolbarRef.value
     const sizeConfig = toolbar?.currentSizeConfig?.()
@@ -872,8 +926,7 @@ const handleSubmit = async () => {
       modelKey: toolbar?.currentModelVersion || '',
       ratio: toolbar?.currentSize || '',
       resolution: sizeConfig?.quality || '',
-      // 显式引用覆盖自动注入：只要有 token，参考图就完全按解析结果来
-      referenceImages: collectOutgoingReferences(resolved.media),
+      referenceImages,
       count: toolbar?.currentCount || 1,
       ...unresolvedOptions,
       ...autoLinkOption,
@@ -884,13 +937,14 @@ const handleSubmit = async () => {
     const sizeConfig = toolbar.getCurrentSizeConfig()
     emit('send', message, currentType.value, {
       model: toolbar.getCurrentModelLabel(),
-      // 无引用时首帧 / 尾帧按位置映射进 referenceImages；有引用时以解析结果为准
-      referenceImages: collectOutgoingReferences(resolved.media),
+      referenceImages,
       ratio: toolbar.currentSize,
       resolution: sizeConfig.quality,
       duration: toolbar.currentDuration,
       feature: toolbar.currentFeature,
       ...unresolvedOptions,
+      // 与图片分支一致：composer 已是权威清单，节点侧不要再兜底注入上游画面
+      ...autoLinkOption,
     })
   } else if (currentType.value === 'audio' && audioToolbarRef.value) {
     const toolbar = audioToolbarRef.value
@@ -906,7 +960,7 @@ const handleSubmit = async () => {
       model: toolbar?.currentModelLabel || '',
       modelKey: toolbar?.currentModel || '',
       skill: toolbar?.currentSkill || 'general',
-      referenceImages: hasReferenceTokens.value ? [...resolved.media] : [...imageReferenceImages.value],
+      referenceImages,
       capabilityFlags: toolbar?.currentCapabilityFlags || {},
       ...unresolvedOptions,
     })
@@ -1254,21 +1308,22 @@ const hasReferencesClass = computed(() =>
 
 const imageReferenceCount = computed(() => imageReferenceImages.value.length)
 const collapsedReferenceRecordText = computed(() => {
-  if ((currentType.value === 'image' || currentType.value === 'agent') && imageReferenceImages.value.length) {
-    return `参考图片 ${imageReferenceImages.value.length} 张`
+  // 摘要按**清单**算：折叠后看不到缩略图，这里必须如实报出「这次会带几张 / 哪几帧」
+  if (currentType.value === 'image' || currentType.value === 'agent') {
+    const count = outgoingReferenceItems.value.length
+    return count ? `参考图片 ${count} 张` : ''
   }
 
   if (currentType.value === 'video') {
+    const frames = outgoingReferenceItems.value
+    if (!frames.length) return ''
+    const firstCount = frames.filter(item => item.role === 'first-frame').length
+    const lastCount = frames.filter(item => item.role === 'last-frame').length
     const parts: string[] = []
-    if (videoFirstFrameImage.value) {
-      parts.push('首帧')
-    }
-    if (videoLastFrameImage.value) {
-      parts.push('尾帧')
-    }
-    if (parts.length) {
-      return `参考画面 ${parts.join(' / ')}`
-    }
+    if (firstCount) parts.push('首帧')
+    if (lastCount) parts.push('尾帧')
+    if (!parts.length) parts.push(`画面 ${frames.length}`)
+    return `参考画面 ${parts.join(' / ')}`
   }
 
   return ''
@@ -1411,12 +1466,6 @@ const handleImageReferenceChange = async (event: Event) => {
 }
 
 const removeImageReference = (index: number) => {
-  const removed = imageReferenceImages.value[index]
-  if (removed) {
-    // 用户亲手删掉的、哪怕是上游合并进来的那张，也不该在重新打开开关后自己长回来
-    externalMergedUrls.value = externalMergedUrls.value.filter(url => url !== removed)
-    externalReferenceUrls.value = externalReferenceUrls.value.filter(url => url !== removed)
-  }
   imageReferenceImages.value = imageReferenceImages.value.filter((_, currentIndex) => currentIndex !== index)
 }
 
@@ -1877,49 +1926,40 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 已引用：@ 引用的媒体缩略图，点叉号即从文本里删掉对应 token -->
-          <!-- 已引用 / 自动引用。判据要把自动引用也算上：只按用户 token 判断的话，
-               开了 AutoLink 但没手写 @ 时整行不渲染，自动引用又变成看不见的（实测踩到过） -->
-          <div v-if="referencedMediaItems.length || autoLinkedMediaItems.length" class="mentioned-references">
+          <!-- 本次素材清单：渲染「唯一结果」referenceCollection ——
+               显式 @、手动上传、上游连线自动带上（可关）都在这里逐条可见、可删。
+               点缩略图本体 = 跳回上游卡片；点右下 @ = 插入 token；点叉号 = 删除该项。 -->
+          <div v-if="referenceAssets.length && outgoingReferenceItems.length" class="mentioned-references">
             <span class="mentioned-references__label">已引用</span>
             <div class="mentioned-references__list">
               <div
-                v-for="item in referencedMediaItems"
-                :key="item.url"
+                v-for="item in outgoingReferenceItems"
+                :key="`${item.source}-${item.url}`"
                 class="mentioned-reference-item"
-                :title="item.asset.token"
+                :class="{
+                  'is-auto': item.source === 'auto-from-edge',
+                  'is-manual': item.source === 'manual',
+                  'is-jumpable': !!item.sourceNodeId,
+                }"
+                :title="referenceItemTitle(item)"
+                @click="jumpToReferenceSource(item)"
               >
-                <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
-                <span class="mentioned-reference-badge">@{{ item.asset.token }}</span>
+                <img :src="item.url" :alt="referenceItemBadge(item)" class="generator-reference-preview-image" draggable="false">
+                <span class="mentioned-reference-badge">{{ referenceItemBadge(item) }}</span>
                 <button
+                  v-if="item.token"
                   type="button"
                   class="mentioned-reference-mention-btn"
-                  :title="`把 @${item.asset.token} 插入提示词`"
-                  @click.stop="insertReferenceFromThumbnail(item.asset)"
+                  :title="`把 @${item.token} 插入提示词`"
+                  @click.stop="insertReferenceFromThumbnail(item.token)"
                 >@</button>
                 <div class="remove-button-container">
-                  <button type="button" class="remove-button generator-reference-clear-btn" @click.stop="removeMentionedReference(item)">
+                  <button type="button" class="remove-button generator-reference-clear-btn" @click.stop="removeCollectionItem(item)">
                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <path d="M19.579 6.119a1.2 1.2 0 0 0-1.697-1.698L12 10.303 6.12 4.422a1.2 1.2 0 1 0-1.697 1.697L10.303 12l-5.881 5.882a1.2 1.2 0 0 0 1.697 1.697L12 13.698l5.882 5.882a1.2 1.2 0 1 0 1.697-1.697L13.697 12l5.882-5.882Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"></path>
                     </svg>
                   </button>
                 </div>
-              </div>
-              <!-- 自动引用的素材：没有 token 可删，所以不给叉号，只标「自动」 -->
-              <div
-                v-for="item in autoLinkedMediaItems"
-                :key="`auto-${item.url}`"
-                class="mentioned-reference-item is-auto"
-                :title="`自动引用：${item.asset.token}`"
-              >
-                <img :src="item.url" :alt="item.asset.token" class="generator-reference-preview-image" draggable="false">
-                <span class="mentioned-reference-badge">自动</span>
-                <button
-                  type="button"
-                  class="mentioned-reference-mention-btn"
-                  :title="`把 @${item.asset.token} 插入提示词（插入后即为显式引用）`"
-                  @click.stop="insertReferenceFromThumbnail(item.asset)"
-                >@</button>
               </div>
             </div>
           </div>
@@ -2891,6 +2931,15 @@ onUnmounted(() => {
 /* 自动引用的那些用虚线描边区分：看得出不是用户手写的 @ */
 .dimension-layout-FUl4Nj .mentioned-reference-item.is-auto {
   border-style: dashed;
+}
+
+/* 有来源节点的素材可点击跳回上游卡片：给光标与悬停描边，不给「点不动」的假按钮 */
+.dimension-layout-FUl4Nj .mentioned-reference-item.is-jumpable {
+  cursor: pointer;
+}
+
+.dimension-layout-FUl4Nj .mentioned-reference-item.is-jumpable:hover {
+  border-color: var(--brand-main-default);
 }
 
 .dimension-layout-FUl4Nj .mentioned-reference-badge {

@@ -16,7 +16,7 @@ import {
   type WorkflowVideoNodeData,
 } from './useWorkflowCanvas'
 import { nodeIndex, inboundEdges } from './workflow-graph-index'
-import { orderImageEdgesByRole } from './upstream-inputs'
+import { orderImageEdgesByRole, readEdgeImageRole, type UpstreamImageRole } from './upstream-inputs'
 
 export type ReferenceKind = 'image' | 'text' | 'video'
 
@@ -45,6 +45,14 @@ export interface ReferenceableAsset {
   displayName: string
   /** 图片/视频为 url，文本为正文。空值资产不会出现在列表里 */
   value: string
+  /**
+   * 该资产作为下游视频节点的**输入画面**时的角色（首帧/尾帧/参考图）。
+   *
+   * 只在目标节点是视频节点时才有值：图片节点没有「画面角色」这个概念，
+   * 给它无意义地塞一个默认值只会让同一份清单在不同目标下形状不一致。
+   * 有了它，下游就不必用「数组第 0/1 个」去猜哪张是首帧、哪张是尾帧。
+   */
+  frameRole?: UpstreamImageRole
 }
 
 /**
@@ -100,6 +108,8 @@ export const collectReferenceableAssets = (nodeId: string): ReferenceableAsset[]
   const seen = new Set<string>()
   const counters: Record<ReferenceKind, number> = { image: 0, text: 0, video: 0 }
   const buckets: Record<ReferenceKind, ReferenceableAsset[]> = { image: [], text: [], video: [] }
+  // 只有视频节点才需要「画面角色」：它的输入图分首帧/尾帧/参考图；图片节点的入图都是参考图
+  const targetIsVideo = nodeIndex.value.get(nodeId)?.type === 'video'
 
   /*
    * 编号顺序 = **角色（首帧→尾帧→参考图）再「第 N 张」**，最后才回落到连线插入顺序 —— 2026-09-26 修。
@@ -136,6 +146,7 @@ export const collectReferenceableAssets = (nodeId: string): ReferenceableAsset[]
       token: `${kindLabel}${index}`,
       displayName: displayNameFor(entry.label, kindLabel, index),
       value,
+      ...(targetIsVideo ? { frameRole: readEdgeImageRole(edge) } : {}),
     })
   }
 

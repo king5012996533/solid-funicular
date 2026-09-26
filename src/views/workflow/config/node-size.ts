@@ -77,3 +77,39 @@ export const cardSizeStyle = (size: NodeCardSize) => ({
   width: `${size.width}px`,
   height: `${size.height}px`,
 })
+
+/**
+ * 按节点类型解析卡片尺寸，用于「算插入节点落点」这类不依赖 Vue Flow 测量的场合。
+ *
+ * 生成类（图片 / 视频）跟比例走；其余（文本 / 素材，以及编组框自身）按工具类正方形。
+ * 类型用 string 而不是 WorkflowNodeType —— 这个文件是纯几何层，不反过来依赖状态层。
+ */
+export const resolveCardSize = (input: { type?: string; ratio?: string }): NodeCardSize => {
+  const type = String(input?.type || '')
+  if (type === 'image' || type === 'video') return resolveGenerationCardSize(input?.ratio)
+  return CANVAS_TOOL_NODE_SIZE
+}
+
+/** 连线上插入的新节点相对 A→B 中点向上偏的量：不压住原来的连线 */
+export const INSERTED_NODE_UPWARD_BIAS = 64
+
+export interface CanvasPoint {
+  x: number
+  y: number
+}
+
+/**
+ * A→B 连线上插入节点 N 时的落点（N 的左上角坐标）。
+ *
+ * 取 A 与 B 的**中心**连线的中点，再往上抬一点（`upwardBias`），并把 N 自身尺寸的一半退回去，
+ * 因为 Vue Flow 节点按左上角定位。抬起来是为了让新节点压在连线之上、一眼能看出它接在中间。
+ */
+export const resolveInsertedNodePosition = (
+  sourceCenter: CanvasPoint,
+  targetCenter: CanvasPoint,
+  insertedSize: NodeCardSize,
+  upwardBias = INSERTED_NODE_UPWARD_BIAS,
+): CanvasPoint => ({
+  x: (sourceCenter.x + targetCenter.x) / 2 - insertedSize.width / 2,
+  y: (sourceCenter.y + targetCenter.y) / 2 - insertedSize.height / 2 - upwardBias,
+})

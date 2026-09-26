@@ -6,7 +6,10 @@
 import { computed, ref, watch, onMounted, onUnmounted, nextTick, markRaw } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { VueFlow, useVueFlow, SelectionMode, type Connection, type NodeMouseEvent } from '@vue-flow/core'
+import {
+  VueFlow, useVueFlow, SelectionMode,
+  type Connection, type NodeMouseEvent, type EdgeMouseEvent, type NodeDragEvent,
+} from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { useAsyncAction, useShortcut } from '@/composables'
 import { useLoadingStore } from '@/stores/loading'
@@ -15,10 +18,10 @@ import {
   canvasViewport, updateViewport,
   undo, redo, canUndo, canRedo, manualSaveHistory, initSampleData, initHistory,
   pauseHistory, resumeHistory,
+  expandGroupChildIds, computeGroupBounds, GROUP_NODE_Z_INDEX,
   type WorkflowAddEdgeParams,
   type WorkflowCanvasEdge,
-  type WorkflowNodeType,
-} from './composables/useWorkflowCanvas'
+  type WorkflowNodeType, registerFlowNodeSync, selectOnlyNode, pendingCenterNodeId, consumePendingCenterNodeId } from './composables/useWorkflowCanvas'
 import { WORKFLOW_TEMPLATES } from './config/workflows'
 import { decideInitialCanvasEntry } from './config/canvas-entry'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
@@ -31,7 +34,9 @@ import TextNode from './components/nodes/TextNode.vue'
 import ImageNode from './components/nodes/ImageNode.vue'
 import VideoNode from './components/nodes/VideoNode.vue'
 import AssetNode from './components/nodes/AssetNode.vue'
+import GroupNode from './components/nodes/GroupNode.vue'
 import { buildCanvasBrief } from './config/canvas-brief'
+import { resolveCardSize, resolveInsertedNodePosition } from './config/node-size'
 
 // 边组件
 import ImageRoleEdge from './components/edges/ImageRoleEdge.vue'
@@ -52,7 +57,7 @@ import { useCanvasDrop } from '@/composables/useCanvasDrop'
 import {
   canvasBackgroundMode,
   removeNode,
-  duplicateNode,
+  removeEdge,
   clearCanvas,
 } from './composables/useWorkflowCanvas'
 import { useCanvasAlignmentGuides } from './composables/useCanvasAlignmentGuides'
@@ -61,11 +66,12 @@ import {
   NODE_TYPE_PRESENTATION,
   getNodeTypePresentation,
   suggestNodeTypes,
+  resolveInsertableNodeTypes,
+  describeInsertionRefusal,
   isCoherentConnection,
   describeCoherentRefusal,
   type ConnectDirection,
 } from './config/node-suggestions'
-import type { GraphNode } from '@vue-flow/core'
 import type { CanvasAgentContext } from './agent/canvas-agent-tools'
 import { runNodeById, beginAgentRunRound, hasNodeRunner } from './composables/useCanvasNodeRunner'
 import { resolveAttachedReferences } from './composables/resolveAttachedReferences'
@@ -82,6 +88,8 @@ const {
   updateNodeInternals,
   screenToFlowCoordinate,
   setNodes,
+  setCenter,
+  findNode,
   connectionStartHandle,
   getSelectedNodes,
 } = useVueFlow()
@@ -106,6 +114,7 @@ const nodeTypes = {
   image: markRaw(ImageNode),
   video: markRaw(VideoNode),
   asset: markRaw(AssetNode),
+  group: markRaw(GroupNode),
 } as any
 
 // 注册自定义边类型
@@ -615,27 +624,27 @@ const resolveCanvasToken = (value: string): string => {
 }
 
 /**
- * 建节点菜单的公共构造：三类菜单（拖线落空 / 双击空白 / 右键空白）
- * 列的都是同一批节点类型，图标和文案都该一致，所以只在这里拼一次。
+ * 节点类型菜单项的公共构造：把「类型 → 带图标/文案的菜单项」拼一次，
+ * 连线落空菜单与「边上插入节点」菜单都用它，保证同一个节点在两处长得一样。
  *
  * @param types 要列出的节点类型（顺序由调用方给定）
  * @param idPrefix 菜单项 id 前缀，便于区分来源做埋点
- * @param onClickFor 自定义点击行为；不传则走「建节点并连边」
+ * @param onClickFor 每个类型的点击行为（不同菜单用途不同：建节点 / 插到边上）
+ * @param labelPrefix 文案前缀（边上插入节点用「插入」说清楚点了会发生什么）
  */
 const buildNodeTypeMenuItems = (
   types: WorkflowNodeType[],
   idPrefix: string,
-  onClickFor?: (type: WorkflowNodeType) => () => void,
+  onClickFor: (type: WorkflowNodeType) => () => void,
+  labelPrefix = '',
 ): ContextMenuItem[] => types.map((type) => {
   const presentation = getNodeTypePresentation(type)
   return {
     id: `${idPrefix}-${type}`,
-    label: presentation?.name || type,
+    label: `${labelPrefix}${presentation?.name || type}`,
     iconPath: presentation?.icon,
     iconColor: presentation ? resolveCanvasToken(presentation.color) : undefined,
-    onClick: onClickFor
-      ? onClickFor(type)
-      : () => createNodeFromConnectMenu(type),
+    onClick: onClickFor(type),
   } as ContextMenuItem
 })
 
@@ -657,7 +666,11 @@ type DropKind = 'handle' | 'card' | 'panel' | 'blank'
 const readDropTarget = (event: MouseEvent | TouchEvent): { kind: DropKind; nodeId: string } => {
   const target = event.target as HTMLElement | null
   if (!target?.closest) return { kind: 'blank', nodeId: '' }
-  if (target.closest('.vue-flow__handle')) return { kind: 'handle', nodeId: '' }
+  // handle 也要带出所属节点 id：拖到自己手柄上松手时要能给「不能连自己」
+  if (target.closest('.vue-flow__handle')) {
+    const handleOwner = target.closest('.vue-flow__node')
+    return { kind: 'handle', nodeId: String(handleOwner?.getAttribute('data-id') || '') }
+  }
   // 节点内的浮层优先于卡片判定：面板盖在卡片上，先判卡片会把点面板误当成连卡片
   if (target.closest('.video-node-prompt-panel, .image-node-prompt-panel, .canvas-node-top-toolbar, .canvas-node-hover-toolbar')) {
     return { kind: 'panel', nodeId: '' }
@@ -743,8 +756,17 @@ const onConnectEnd = (event?: MouseEvent | TouchEvent) => {
   }
 
   if (producedEdge) return
-  // 落在 handle 上但没连成（自我连接等）：Vue Flow 不给事件，这里也不弹菜单
-  if (drop.kind === 'handle') return
+  /*
+   * 落在 handle 上但没连成：Vue Flow 在自连时不 emit connect，所以这里是「拖到自己手柄上松手」。
+   * 以前静默返回 —— 用户拖到自己手柄上松手，什么都没发生，只会以为功能坏了。
+   * 现在给一句人话（对齐 SceneFlow connectNodes 里的 `current.nodeId === targetNodeId` 守卫）。
+   */
+  if (drop.kind === 'handle') {
+    if (startHandle && originNode && drop.nodeId === originNode.id) {
+      ElMessage.info('不能连到节点自己身上')
+    }
+    return
+  }
   if (!startHandle || !originNode) return
   const candidates = suggestNodeTypes(originNode.type, direction)
   if (!candidates.length) return
@@ -767,7 +789,7 @@ const onConnectEnd = (event?: MouseEvent | TouchEvent) => {
     position: { x: flowPosition.x - 190, y: flowPosition.y - 140 },
   }
 
-  connectMenuItems.value = buildNodeTypeMenuItems(candidates, 'connect-add')
+  connectMenuItems.value = buildNodeTypeMenuItems(candidates, 'connect-add', type => () => createNodeFromConnectMenu(type))
   connectMenuPosition.value = { x: clientX, y: clientY }
   connectMenuVisible.value = true
 }
@@ -882,10 +904,6 @@ const onEdgesChange = (changes: Array<{ type?: string }>) => {
 // 处理画布点击
 const onPaneClick = () => {
   showNodeMenu.value = false
-  // 双击菜单挂在 body 上，靠 document 上的 mousedown 收不回来：
-  // d3-zoom / 节点拖拽都会吃掉画布上的 mousedown 冒泡，
-  // 所以单击空白由 pane 自己的 click 事件负责关掉它
-  closeDblClickMenu()
 }
 
 // 返回首页：保存草稿 → 跳转。globalKey:'blocking' 期间会弹遮罩"正在保存草稿…"，
@@ -1247,9 +1265,21 @@ const handleSpaceUp = (event: KeyboardEvent) => {
   }
 }
 
+/**
+ * 拖动组框时的起点记录。
+ *
+ * 子节点要跟着走「自拖拽开始的累计位移」（组框当前位置 - 起点），
+ * 不是每帧的增量 —— 每帧增量会因为 Vue Flow 的位置回写而丢步。
+ */
+const groupDragState = ref<{ groupId: string; originX: number; originY: number } | null>(null)
+
 // 节点拖拽期间暂停历史入栈，拖拽结束统一作为 1 条历史记录
-const onNodeDragStart = () => {
+const onNodeDragStart = (dragEvent: NodeDragEvent) => {
   pauseHistory()
+  const node = dragEvent?.node
+  groupDragState.value = node?.type === 'group'
+    ? { groupId: node.id, originX: node.position.x, originY: node.position.y }
+    : null
 }
 
 /**
@@ -1259,7 +1289,7 @@ const onNodeDragStart = () => {
  * 吸附只是调整节点位置，最终位置仍由 node-drag-stop 统一入栈一次。
  * 阈值随缩放换算（见 composable），所以放大缩小时手感一致。
  */
-const onNodeDrag = (dragEvent: { node: GraphNode; nodes: GraphNode[] }) => {
+const onNodeDrag = (dragEvent: NodeDragEvent) => {
   const { node, nodes: draggedNodes } = dragEvent
   if (!node?.dragging) return
   /**
@@ -1271,18 +1301,67 @@ const onNodeDrag = (dragEvent: { node: GraphNode; nodes: GraphNode[] }) => {
    * node-drag 触发 23 次、payload 里 peers=1、画布上却有 2 个节点、参考线元素 0 条。
    */
   const { dx, dy } = computeAlignment(node, nodes.value, viewport.value.zoom)
-  if (dx === null && dy === null) return
   /**
    * 多选拖拽：把主拖拽节点算出来的对齐量**整组平移** —— 组内相对位置不变、组整体吸附。
    * dragEvent.nodes 在这里正好是「正在被拖拽的那一批」（单选时就是它自己）。
    */
-  for (const dragged of draggedNodes?.length ? draggedNodes : [node]) {
-    if (dx !== null) dragged.position.x += dx
-    if (dy !== null) dragged.position.y += dy
+  if (dx !== null || dy !== null) {
+    for (const dragged of draggedNodes?.length ? draggedNodes : [node]) {
+      if (dx !== null) dragged.position.x += dx
+      if (dy !== null) dragged.position.y += dy
+    }
+  }
+
+  /**
+   * 组框拖动：带走子节点（对齐 SceneFlow use-canvas-node-drag.ts:70）。
+   * 位移取「组框当前位置 - 起点」的累计量，并跳过本次也被拖拽的节点 ——
+   * 否则组框与子节点同时被选中拖拽时，子节点会被移动两遍。
+   */
+  const state = groupDragState.value
+  if (state && state.groupId === node.id) {
+    const deltaX = node.position.x - state.originX
+    const deltaY = node.position.y - state.originY
+    if (deltaX !== 0 || deltaY !== 0) {
+      const draggedIds = new Set((draggedNodes || []).map(item => item.id))
+      moveGroupChildrenBy(state.groupId, deltaX, deltaY, draggedIds)
+      state.originX = node.position.x
+      state.originY = node.position.y
+    }
+  }
+}
+
+/**
+ * 把组框的一次位移应用到它的子节点（含嵌套组）。
+ *
+ * 拖拽期间只改 Vue Flow 的运行时位置（与对齐吸附同一套写法，每帧不重建数组）；
+ * 最终位置在 onNodeDragStop 里一次性写回画布状态，供自动保存与撤销历史使用。
+ */
+const moveGroupChildrenBy = (
+  groupId: string,
+  deltaX: number,
+  deltaY: number,
+  alreadyDragged: Set<string>,
+) => {
+  for (const childId of expandGroupChildIds(nodes.value, groupId)) {
+    if (alreadyDragged.has(childId)) continue
+    const child = findNode(childId)
+    if (!child) continue
+    child.position.x += deltaX
+    child.position.y += deltaY
   }
 }
 
 const onNodeDragStop = () => {
+  const state = groupDragState.value
+  if (state) {
+    // 把子节点最终位置写回画布状态：拖拽期间只改了运行时位置，这里补写一次
+    for (const childId of expandGroupChildIds(nodes.value, state.groupId)) {
+      const child = findNode(childId)
+      if (!child) continue
+      updateNode(childId, { position: { x: child.position.x, y: child.position.y } })
+    }
+    groupDragState.value = null
+  }
   resumeHistory()
   clearGuides()
 }
@@ -1315,20 +1394,26 @@ const pendingConnection = ref<{
   position: WorkflowCanvasPosition
 } | null>(null)
 
-// 双击画布空白弹出的节点类型菜单（与右键菜单、拖线菜单互斥）
-const dblClickMenuVisible = ref(false)
-const dblClickMenuPosition = ref<ContextMenuPosition>({ x: 0, y: 0 })
-const dblClickMenuItems = ref<ContextMenuItem[]>([])
-/** 双击点换算成画布坐标后的落点，选中类型时用它建节点 */
-const pendingDblClickPosition = ref<WorkflowCanvasPosition | null>(null)
+// 边的右键菜单（在 A→B 上插入中间节点）
+const edgeMenuVisible = ref(false)
+const edgeMenuPosition = ref<ContextMenuPosition>({ x: 0, y: 0 })
+const edgeMenuItems = ref<ContextMenuItem[]>([])
+/** 菜单打开时记下这条边的两端，选中插入类型后据此改接 */
+const pendingEdgeInsert = ref<{
+  edgeId: string
+  source: string
+  target: string
+  sourceHandle?: string
+  targetHandle?: string
+} | null>(null)
 
 /** 弹层互斥：画布上任何时刻只允许一个菜单可见，新开一个先把其它的关掉 */
 const closeCanvasMenus = () => {
   contextMenuVisible.value = false
   connectMenuVisible.value = false
+  edgeMenuVisible.value = false
   pendingConnection.value = null
-  dblClickMenuVisible.value = false
-  pendingDblClickPosition.value = null
+  pendingEdgeInsert.value = null
   showNodeMenu.value = false
 }
 
@@ -1359,11 +1444,16 @@ const openCanvasAgentFromMenu = (options: { aboutNodeId?: string } = {}) => {
   }
 }
 
+/**
+ * 空白处右键：只留「Agent 创作」与「粘贴」。
+ *
+ * 为什么不再列那 4 类节点：老项目（SceneFlow）的空白处右键**也没有**建节点菜单 ——
+ * 建节点只有两条路：左侧工具栏直达、以及「拖线落空」在落点给出可接的类型。
+ * 在这里再列一遍是纯重复入口（用户点名的「功能重叠」），删掉。
+ */
 const openPaneContextMenu = (event: MouseEvent) => {
   event.preventDefault()
   closeCanvasMenus()
-  const flowPos = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
-  // 与拖线落空、双击空白列的是同一批节点，所以共用构造器（图标/文案一致）
   contextMenuItems.value = [
     {
       id: 'agent-create',
@@ -1371,12 +1461,6 @@ const openPaneContextMenu = (event: MouseEvent) => {
       iconPath: AGENT_SPARKLE_PATH,
       onClick: () => openCanvasAgentFromMenu(),
     },
-    { id: 'divider', label: '', type: 'divider' },
-    ...buildNodeTypeMenuItems(
-      ['text', 'image', 'video', 'asset'],
-      'pane-add',
-      type => () => addNode(type, flowPos),
-    ),
     { id: 'divider', label: '', type: 'divider' },
     {
       id: 'paste',
@@ -1393,6 +1477,14 @@ const openNodeContextMenu = (payload: NodeMouseEvent) => {
   payload.event.preventDefault()
   const e = payload.event as unknown as MouseEvent
   closeCanvasMenus()
+  /*
+   * 只留「让 Agent 处理这个节点」。
+   *
+   * 原来这里还有「复制 / 删除」，但四类节点现在**都有自己的 hover 工具条**（复制 / 下载 / 删除），
+   * 键盘也各有一份（Cmd+C / Del）—— 同一件事三个入口，属于用户点名的「功能重复重叠」，
+   * 而且右键菜单紧挨着节点，误点删除的代价最高。所以破坏性动作从右键菜单里拿掉，
+   * 集中在「悬停工具条 + 快捷键」这两处（就地、可预期）。
+   */
   contextMenuItems.value = [
     {
       id: 'agent-handle-node',
@@ -1400,62 +1492,103 @@ const openNodeContextMenu = (payload: NodeMouseEvent) => {
       iconPath: AGENT_SPARKLE_PATH,
       onClick: () => openCanvasAgentFromMenu({ aboutNodeId: payload.node.id }),
     },
-    { id: 'divider', label: '', type: 'divider' },
-    { id: 'duplicate', label: '复制', shortcut: 'Cmd+C', onClick: () => duplicateNode(payload.node.id) },
-    { id: 'delete', label: '删除', shortcut: 'Del', danger: true, onClick: () => removeNode(payload.node.id) },
   ]
   contextMenuPosition.value = { x: e.clientX, y: e.clientY }
   contextMenuVisible.value = true
 }
 
-/** 双击是否落在画布空白处：节点、连线、连接点、画布内浮层都不算空白 */
-const isPaneBackgroundDblClick = (event: MouseEvent) => {
-  const target = event.target as HTMLElement | null
-  if (!target?.closest) return false
-  if (target.closest('.vue-flow__node, .vue-flow__edge, .vue-flow__handle, .vue-flow__panel')) return false
-  return Boolean(target.closest('.vue-flow__pane'))
+/**
+ * 边的右键菜单：在 A→B 上插入中间节点 N（对齐 SceneFlow 的「反推提示词自动插中间节点」）。
+ *
+ * 只列**插完两条边都仍然有人消费**的类型（`resolveInsertableNodeTypes`）：
+ * 插入后是 A→N→B，必须同时满足 A→N 与 N→B 合规。
+ * 一个候选都没有时不给入口，也不留一个点了没反应的死菜单。
+ */
+const openEdgeContextMenu = (payload: EdgeMouseEvent) => {
+  payload.event.preventDefault()
+  const e = payload.event as unknown as MouseEvent
+  closeCanvasMenus()
+
+  const edge = payload.edge
+  const sourceType = nodes.value.find(node => node.id === edge.source)?.type
+  const targetType = nodes.value.find(node => node.id === edge.target)?.type
+  if (!sourceType || !targetType) return
+
+  const candidates = resolveInsertableNodeTypes(sourceType, targetType)
+  // 没有合法中间节点就不给入口，但给一句人话，别让右键点上去像没反应
+  if (!candidates.length) {
+    ElMessage.info(describeInsertionRefusal(sourceType, targetType))
+    return
+  }
+
+  pendingEdgeInsert.value = {
+    edgeId: edge.id,
+    source: edge.source,
+    target: edge.target,
+    sourceHandle: edge.sourceHandle ?? undefined,
+    targetHandle: edge.targetHandle ?? undefined,
+  }
+  edgeMenuItems.value = buildNodeTypeMenuItems(
+    candidates,
+    'edge-insert',
+    type => () => insertNodeOnEdge(type),
+    '插入',
+  )
+  edgeMenuPosition.value = { x: e.clientX, y: e.clientY }
+  edgeMenuVisible.value = true
 }
 
 /**
- * 双击画布空白 → 在双击点弹节点类型菜单。
+ * 在边上插入节点：A→B 变成 A→N→B，且**原边不残留**。
  *
- * 与「拖线落空」的菜单不同：这里没有起点节点，连不出有意义的边，
- * 所以候选给全部节点类型（顺序即 NODE_TYPE_PRESENTATION），建出的节点是孤立的。
+ * 顺序很重要：先记下原边的两端与类型，删掉原边，再按同一套连边规则补上 A→N 与 N→B。
+ * 先删是为了让「第 N 张」的自动编号从干净的状态算起 —— 否则原边会占掉一个序号。
  */
-const openPaneDoubleClickMenu = (event: MouseEvent) => {
-  if (!isPaneBackgroundDblClick(event)) return
+const insertNodeOnEdge = (type: WorkflowNodeType) => {
+  const pending = pendingEdgeInsert.value
+  edgeMenuVisible.value = false
+  pendingEdgeInsert.value = null
+  if (!pending) return
 
-  closeCanvasMenus()
+  const sourceNode = nodes.value.find(node => node.id === pending.source)
+  const targetNode = nodes.value.find(node => node.id === pending.target)
+  if (!sourceNode || !targetNode) return
 
-  // 与拖线菜单同一套居中偏移：Vue Flow 节点按左上角定位，把双击点当作节点中心
-  const flowPosition = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
-  pendingDblClickPosition.value = { x: flowPosition.x - 190, y: flowPosition.y - 140 }
-  dblClickMenuItems.value = buildNodeTypeMenuItems(
-    NODE_TYPE_PRESENTATION.map(presentation => presentation.type),
-    'dblclick-add',
-    type => () => createNodeFromDblClickMenu(type),
+  const insertedSize = resolveCardSize({ type })
+  const sourceSize = resolveCardSize({ type: sourceNode.type, ratio: String((sourceNode.data as { ratio?: string })?.ratio || '') })
+  const targetSize = resolveCardSize({ type: targetNode.type, ratio: String((targetNode.data as { ratio?: string })?.ratio || '') })
+  const position = resolveInsertedNodePosition(
+    { x: sourceNode.position.x + sourceSize.width / 2, y: sourceNode.position.y + sourceSize.height / 2 },
+    { x: targetNode.position.x + targetSize.width / 2, y: targetNode.position.y + targetSize.height / 2 },
+    insertedSize,
   )
-  dblClickMenuPosition.value = { x: event.clientX, y: event.clientY }
-  dblClickMenuVisible.value = true
-}
 
-/** 双击菜单里选了类型：在双击点建节点（不带边）+ 置顶 + 选中 */
-const createNodeFromDblClickMenu = (type: WorkflowNodeType) => {
-  const position = pendingDblClickPosition.value
-  dblClickMenuVisible.value = false
-  pendingDblClickPosition.value = null
-  if (!position) return
-
+  // 先删原边，再补两条新边
+  removeEdge(pending.edgeId)
   const newNodeId = placeNewNode(type, position)
+  applyTypedEdgeConnection({
+    source: pending.source,
+    target: newNodeId,
+    sourceHandle: pending.sourceHandle || 'right',
+    targetHandle: 'left',
+  })
+  applyTypedEdgeConnection({
+    source: newNodeId,
+    target: pending.target,
+    sourceHandle: 'right',
+    targetHandle: pending.targetHandle || 'left',
+  })
+
+  // 选中新节点（复用冻结原语），选中态即打开它的输入面板的下方提示词区
   nextTick(() => {
-    setNodes(nodes.value.map(node => ({ ...node, selected: node.id === newNodeId })))
+    selectOnlyNode(newNodeId)
     updateNodeInternals([newNodeId])
   })
 }
 
-const closeDblClickMenu = () => {
-  dblClickMenuVisible.value = false
-  pendingDblClickPosition.value = null
+const closeEdgeMenu = () => {
+  edgeMenuVisible.value = false
+  pendingEdgeInsert.value = null
 }
 
 // 清空画布（带确认）
@@ -1466,7 +1599,79 @@ const clearCanvasWithConfirm = () => {
   }
 }
 
+// === 成组 / 拆组（Ctrl+G / Ctrl+Shift+G，对齐 SceneFlow canvas-client-page.tsx:1146-1177）===
+
+/**
+ * 取节点尺寸给组框算包围盒：优先用 Vue Flow 的实测值，没测出来时按类型兜底。
+ * 组框是按「子节点包围盒 + 内边距」定的，尺寸不准框就会夹住节点或空一大圈。
+ */
+const sizeOfNode = (id: string): { width: number; height: number } => {
+  const graphNode = findNode(id)
+  const measuredWidth = Number(graphNode?.dimensions?.width || 0)
+  const measuredHeight = Number(graphNode?.dimensions?.height || 0)
+  if (measuredWidth > 0 && measuredHeight > 0) {
+    return { width: measuredWidth, height: measuredHeight }
+  }
+  return resolveCardSize({
+    type: graphNode?.type,
+    ratio: String((graphNode?.data as { ratio?: string } | undefined)?.ratio || ''),
+  })
+}
+
+/** 把当前选中的节点包进一个新的编组框（选中少于两个时给可读提示，不静默） */
+const groupSelectedNodes = () => {
+  const selected = getSelectedNodes.value.filter(node => node.type !== 'group')
+  if (selected.length < 2) {
+    ElMessage.info('选中至少两个节点才能编组')
+    return
+  }
+
+  const bounds = computeGroupBounds(
+    selected.map(node => ({ id: node.id, position: { x: node.position.x, y: node.position.y } })),
+    sizeOfNode,
+  )
+  if (!bounds) return
+
+  const groupId = addNode('group', bounds.position, {
+    label: '编组',
+    groupChildIds: selected.map(node => node.id),
+    groupWidth: bounds.width,
+    groupHeight: bounds.height,
+  })
+  // 压到最低层级：组框在子节点下方，不挡子节点的点击与拖拽
+  updateNode(groupId, { zIndex: GROUP_NODE_Z_INDEX })
+  // 组框插到数组最前：同层级（未选中时的 z=0 与无 zIndex 的节点）下先渲染即在底部，与 zIndex 双保险
+  nodes.value = [
+    ...nodes.value.filter(node => node.id === groupId),
+    ...nodes.value.filter(node => node.id !== groupId),
+  ]
+
+  nextTick(() => {
+    selectOnlyNode(groupId)
+    updateNodeInternals([groupId])
+  })
+}
+
+/** 拆掉选中的编组框：子节点原地保留，并把它们选中 */
+const ungroupSelectedNodes = () => {
+  const groups = getSelectedNodes.value.filter(node => node.type === 'group')
+  if (!groups.length) {
+    ElMessage.info('请先选中要拆开的编组框')
+    return
+  }
+
+  const childIds = groups.flatMap(group => expandGroupChildIds(nodes.value, group.id))
+  groups.forEach(group => removeNode(group.id))
+
+  const childSet = new Set(childIds)
+  nextTick(() => {
+    setNodes(nodes.value.map(node => ({ ...node, selected: childSet.has(node.id) })))
+  })
+}
+
 // 扩展快捷键
+useShortcut('CmdOrCtrl+G', () => groupSelectedNodes())
+useShortcut('CmdOrCtrl+Shift+G', () => ungroupSelectedNodes())
 useShortcut('CmdOrCtrl+A', () => selectAll())
 useShortcut('CmdOrCtrl+C', () => {
   copySelected()
@@ -1870,6 +2075,30 @@ const settleCanvasBaseline = async () => {
   canvasSnapshot.value = initialCanvasBaselineSnapshot.value
 }
 
+/**
+ * 把 Vue Flow 的 setNodes 注册给画布状态层，供**别的组件树**发起「选中某节点」。
+ * 见 useWorkflowCanvas.ts 里 selectOnlyNode 的注释：选中是 UI 状态，不进源数据。
+ */
+registerFlowNodeSync(next => setNodes(next))
+
+/**
+ * 消费「请把这个节点移到视野中央」的请求（由生成器面板的"点引用跳回上游"发起）。
+ * 为什么用请求-消费而不是直接调用：调用方拿不到 Vue Flow 实例。
+ */
+watch(pendingCenterNodeId, () => {
+  const targetId = consumePendingCenterNodeId()
+  if (!targetId) return
+  const node = nodes.value.find(item => item.id === targetId)
+  if (!node) return
+  const measured = findNode(targetId)
+  const width = Number((measured as { dimensions?: { width?: number } })?.dimensions?.width) || 300
+  const height = Number((measured as { dimensions?: { height?: number } })?.dimensions?.height) || 200
+  setCenter(node.position.x + width / 2, node.position.y + height / 2, {
+    zoom: viewport.value.zoom,
+    duration: 300,
+  })
+})
+
 onMounted(async () => {
   // 首次也要结算一次，否则 isCanvasDirty 在第一次变更前一直比的是空串
   canvasSnapshot.value = buildCanvasSnapshotNow()
@@ -1967,10 +2196,8 @@ watch(canvasSnapshot, () => {
           class="workflow-canvas-wrap"
           @dragover="onCanvasFileDragOver"
           @drop="onCanvasFileDrop"
-          @dblclick="openPaneDoubleClickMenu"
         >
-          <!-- zoom-on-double-click 关掉了 vue-flow 自带的双击缩放：
-               双击空白现在改成弹「新建节点」菜单，两者不能同时生效 -->
+          <!-- zoom-on-double-click 关掉 vue-flow 自带的双击缩放（双击空白不再触发任何菜单） -->
           <!-- 网格吸附为什么关掉（2026-09-23）：
                原来这里开着 :snap-to-grid="true" :snap-grid="[20,20]"，结果是**拖拽不跟手** ——
                指针在同一个 20px 格子里移动时节点纹丝不动，跨格才跳一下。
@@ -2012,6 +2239,7 @@ watch(canvasSnapshot, () => {
             @node-drag-stop="onNodeDragStop"
             @pane-context-menu="openPaneContextMenu"
             @node-context-menu="openNodeContextMenu"
+            @edge-context-menu="openEdgeContextMenu"
             class="workflow-canvas"
             :class="{ 'workflow-canvas--space-panning': isSpacePressed }"
           >
@@ -2072,12 +2300,12 @@ watch(canvasSnapshot, () => {
             :items="connectMenuItems"
             @close="closeConnectMenu"
           />
-          <!-- 双击空白：没有起点节点，所以在双击点给出全部节点类型 -->
+          <!-- 边的右键：在这条边上插入一个中间节点（A→B 变 A→N→B，且原边不残留） -->
           <CanvasContextMenu
-            :visible="dblClickMenuVisible"
-            :position="dblClickMenuPosition"
-            :items="dblClickMenuItems"
-            @close="closeDblClickMenu"
+            :visible="edgeMenuVisible"
+            :position="edgeMenuPosition"
+            :items="edgeMenuItems"
+            @close="closeEdgeMenu"
           />
         </div>
 

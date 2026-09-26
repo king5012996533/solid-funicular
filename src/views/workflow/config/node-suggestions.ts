@@ -93,6 +93,8 @@ const COHERENT_DOWNSTREAM: Record<WorkflowNodeType, WorkflowNodeType[]> = {
   // 素材给下游当参考图 / 首帧，和图片节点的下游一致
   asset: ['image', 'video'],
   video: [],
+  // 编组框不产内容、也不消费内容 —— 它只是把其它节点框在一起，不参加连线
+  group: [],
 }
 
 export type ConnectDirection = 'downstream' | 'upstream'
@@ -126,6 +128,36 @@ export const describeCoherentRefusal = (
   if (sourceType === 'video') return '视频节点产出的成片目前没有任何节点会读取，连过去不会生效'
   if (targetType === 'text') return '文本节点的内容由你自己输入或导入文件决定，它不读上游'
   return '这两类节点之间没有可用的数据流向'
+}
+
+/**
+ * 在 A→B 这条边上插入中间节点 N 时，**哪些类型能插**。
+ *
+ * 判据是「插完两条边都仍然有人消费」：
+ *   插入前 A→B 有意义；插入后变成 A→N→B，就必须同时满足
+ *   `A→N` 与 `N→B` 都合规（`isCoherentConnection`）。
+ * 只满足一条的组合不能给入口 —— 否则会造出一条没人读的边，
+ * 正是我们要削掉的那类假交互（见文件头「菜单和连线必须用同一套规则」）。
+ *
+ * 只从 NODE_TYPE_PRESENTATION 里挑（不含 group）：编组框不参加连线。
+ * 输出顺序与菜单里的节点顺序一致，方便形成肌肉记忆。
+ */
+export const resolveInsertableNodeTypes = (
+  sourceType: WorkflowNodeType,
+  targetType: WorkflowNodeType,
+): WorkflowNodeType[] => NODE_TYPE_PRESENTATION
+  .map(item => item.type)
+  .filter(candidate => isCoherentConnection(sourceType, candidate)
+    && isCoherentConnection(candidate, targetType))
+
+/** 一条边上没有任何可插入类型时给一句人话（而不是给一个点了没反应的入口） */
+export const describeInsertionRefusal = (
+  sourceType: WorkflowNodeType,
+  targetType: WorkflowNodeType,
+): string => {
+  const filterable = resolveInsertableNodeTypes(sourceType, targetType)
+  if (filterable.length) return ''
+  return `${getNodeTypePresentation(sourceType)?.name || sourceType} → ${getNodeTypePresentation(targetType)?.name || targetType} 之间没有可插入的节点`
 }
 
 /**

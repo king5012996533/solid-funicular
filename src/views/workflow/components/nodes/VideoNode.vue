@@ -47,6 +47,13 @@ import { resolveFrameTimestamp, buildFrameFileName, type FramePosition } from '@
 import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type VideoModel } from '@/config/models'
 import { pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt, orderImageEdgesByRole } from '../../composables/upstream-inputs'
+import {
+  captureUpstreamFingerprint,
+  compareUpstreamFingerprint,
+  readUpstreamFingerprint,
+  resolveUpstreamStaleBadge,
+  type UpstreamOutput,
+} from './upstream-staleness'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -125,6 +132,37 @@ const upstreamFrameUrls = computed<string[]>(() => {
     if (url) frames.push(url)
   }
   return frames
+})
+
+/**
+ * 直接上游里「有产出」的图片节点 —— 「上游已变 / 需重跑」标记的唯一数据源。
+ * 与 upstreamFrameUrls 是同一批节点（上游图就是本节点的输入画面），这里取成 id→url 以便比对。
+ */
+const upstreamOutputs = computed<UpstreamOutput[]>(() => {
+  const list: UpstreamOutput[] = []
+  for (const edge of inboundEdges.value.get(props.id) || []) {
+    const sourceNode = nodeIndex.value.get(edge.source)
+    if (sourceNode?.type !== 'image') continue
+    const url = String((sourceNode.data as { url?: string })?.url || '').trim()
+    if (!url) continue
+    list.push({ id: edge.source, url })
+  }
+  return list
+})
+
+/**
+ * 上游换了图就出角标「上游已更新，建议重跑」（重跑本节点后指纹刷新，角标自动消失）。
+ * 上游被删静默清掉 —— 理由见 ./upstream-staleness.ts 的文件头。角标是**纯提示不是按钮**。
+ */
+const upstreamStaleBadge = computed(() =>
+  resolveUpstreamStaleBadge(
+    compareUpstreamFingerprint(readUpstreamFingerprint(props.data?.upstreamFingerprint), upstreamOutputs.value),
+  ),
+)
+const upstreamStaleText = computed(() => upstreamStaleBadge.value?.text || '')
+const upstreamStaleTitle = computed(() => {
+  const badge = upstreamStaleBadge.value
+  return badge ? `${badge.count} 个上游产出已更新` : ''
 })
 
 const composeFinalPrompt = (inline: string) => composePrompt(upstreamPromptText.value, inline)
@@ -539,7 +577,12 @@ onMounted(() => {
 const handlePromptSend = (
   text: string,
   _type: string,
-  options?: GeneratorParamsSnapshot & { referenceImages?: string[]; unresolvedReferences?: string[] },
+  options?: GeneratorParamsSnapshot & {
+    referenceImages?: string[]
+    unresolvedReferences?: string[]
+    /** 「智能引用 AutoLink」开关状态：关掉时不再兜底注入上游画面（composer 已是权威清单） */
+    autoLink?: boolean
+  },
 ) => {
   const prompt = composeFinalPrompt(text)
   if (!prompt) {
@@ -556,9 +599,18 @@ const handlePromptSend = (
   }
   const params = options || appliedParams.value
   // 显式引用（@）优先：composer 解析出的媒体才是本次真正要提交的参考画面，
-  // 上游连线只是「一个 @ 都没敲」时的自动注入，两者不能混着报数
+  // 上游连线只是「一个 @ 都没敲」时的自动注入，两者不能混着报数。
+  //
+  // `autoLink === false` 表示 **composer 已经是权威清单**（它把显式 @ / 手动首尾帧 /
+  // 连线自动注入三条通道合成了一份可见可删的清单）。这时**不许再兜底注入上游画面** ——
+  // 否则用户在清单里删掉的、或者关掉 AutoLink 想排除的那些画面，会在提交时被原样塞回来，
+  // 也就是「关了开关等于没关」。图片节点早就这么做了（ImageNode 的 rawRefImages），
+  // 这里以前漏了，是工作包 C 在复检时发现的。
   const explicitRefs = Array.isArray(options?.referenceImages) ? options.referenceImages.filter(Boolean) : []
-  const frames = explicitRefs.length ? explicitRefs : upstreamFrameUrls.value
+  const composerIsAuthoritative = options?.autoLink === false
+  const frames = explicitRefs.length
+    ? explicitRefs
+    : (composerIsAuthoritative ? [] : upstreamFrameUrls.value)
 
   // 真的提交（2026-09-23）：服务端已补齐 video 执行策略（异步任务制：建单 → 轮询 → 取件），
   // 这里不再只弹「尚未接通」，而是走与图片节点同一条客户端链路。
@@ -621,6 +673,8 @@ const submitGeneration = async (input: {
     submittedAt: Date.now(),
     loading: true,
     error: '',
+    // 本次提交用到的上游产出指纹：上游之后换了图 → 卡片出「上游已更新，建议重跑」
+    upstreamFingerprint: captureUpstreamFingerprint(upstreamOutputs.value),
   })
   return taskId
 }
@@ -781,6 +835,14 @@ onBeforeUnmount(() => {
       :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
       :style="[cardSizeStyle(cardSize), agentHighlightStyle]"
     >
+
+      <!-- 「上游已更新，建议重跑」：上游换了产出之后的纯提示（不是按钮）—— 重跑走本节点自己的
+           生成链路（选中后在下方输入框提交），重跑一次指纹刷新、角标消失。 -->
+      <span
+        v-if="upstreamStaleText && !isLoading"
+        class="video-node-stale-badge"
+        :title="upstreamStaleTitle"
+      >{{ upstreamStaleText }}</span>
 
       <div v-if="collapsed" class="node-collapsed-summary">
         <span class="node-collapsed-summary__text">
@@ -987,6 +1049,22 @@ onBeforeUnmount(() => {
 }
 .video-node-card.is-selected {
   border-color: var(--canvas-node-border-selected);
+}
+/* 「上游已更新，建议重跑」角标（与图片节点同款）：盖在卡片右上，不吃鼠标事件。色值走 token。 */
+.video-node-stale-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--canvas-float-block-default);
+  border: 1px solid var(--stroke-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
 }
 /* Agent 画布动作高亮（仅 UI 的瞬时描边，不进节点数据）：刚创建=实线渐隐，生成中=虚线脉冲 */
 .video-node-card.is-agent-created {

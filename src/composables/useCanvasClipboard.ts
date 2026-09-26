@@ -11,6 +11,7 @@ import { useVueFlow } from '@vue-flow/core'
 import {
   addNode,
   addEdge,
+  updateNode,
   type WorkflowCanvasNode,
   type WorkflowCanvasEdge,
   type WorkflowNodeType,
@@ -80,6 +81,20 @@ export function useCanvasClipboard() {
       const newId = addNode(sourceNode.type as WorkflowNodeType, position, { ...sourceNode.data })
       idMap.set(sourceNode.id, newId)
       addedNodeIds.push(newId)
+    }
+
+    /*
+     * 组框成员要**按 idMap 重映射**：粘贴时节点 id 全是新的，照抄旧 id 会让粘贴出来的组框
+     * 继续声称原件的那批子节点。只复制了组框而没复制子节点时，映射不到的一律丢掉
+     * （宁可空组，也不要一个指向别处的组）。
+     */
+    for (const sourceNode of payload.nodes) {
+      const raw = (sourceNode.data as { groupChildIds?: string[] } | undefined)?.groupChildIds
+      if (!Array.isArray(raw) || !raw.length) continue
+      const newId = idMap.get(sourceNode.id)
+      if (!newId) continue
+      const remapped = raw.map(id => idMap.get(id)).filter((id): id is string => Boolean(id))
+      updateNode(newId, { groupChildIds: remapped })
     }
 
     const addedEdgeIds: string[] = []

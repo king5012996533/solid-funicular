@@ -22,7 +22,7 @@ import { computed, ref, watch } from 'vue'
 import { migrateLegacyConfigNodes } from './legacy-config-node-migration'
 import type { WorkflowCanvasPosition } from './workflow-orchestrator-types'
 
-export type WorkflowNodeType = 'text' | 'image' | 'video' | 'asset'
+export type WorkflowNodeType = 'text' | 'image' | 'video' | 'asset' | 'group'
 
 export interface WorkflowNodeDataBase {
   label?: string
@@ -130,11 +130,30 @@ export interface WorkflowAssetNodeData extends WorkflowNodeDataBase {
   assetType?: 'image' | 'video'
 }
 
+/**
+ * 编组节点（对齐 SceneFlow 的 CanvasNodeType.Group）。
+ *
+ * 它不产内容、不参加连线，只做两件事：
+ *   1. 在其它节点**底层**画一个框（zIndex 压到最低），把一组节点框在一起；
+ *   2. 记住框住了谁（`groupChildIds`）—— 拖动框时按这份名单带走子节点。
+ *
+ * 子节点之间、子节点与组框之间都**没有**父子关系（不是 Vue Flow 的 parentNode）：
+ * 位置仍是画布绝对坐标，所以拆组后子节点原地保留。
+ */
+export interface WorkflowGroupNodeData extends WorkflowNodeDataBase {
+  /** 组内子节点 id（对齐 SceneFlow 的 metadata.groupChildIds） */
+  groupChildIds?: string[]
+  /** 组框宽高。存在 data 上而不是 Vue Flow 的 dimensions：要跟画布一起保存 */
+  groupWidth?: number
+  groupHeight?: number
+}
+
 export interface WorkflowNodeDataMap {
   text: WorkflowTextNodeData
   image: WorkflowImageNodeData
   video: WorkflowVideoNodeData
   asset: WorkflowAssetNodeData
+  group: WorkflowGroupNodeData
 }
 
 export type WorkflowNodeData = WorkflowNodeDataMap[WorkflowNodeType]
@@ -237,6 +256,52 @@ const getNodeId = () => `node_${nodeId++}`
 export const nodes = ref<WorkflowCanvasNode[]>([])
 export const edges = ref<WorkflowCanvasEdge[]>([])
 export const canvasViewport = ref<WorkflowCanvasViewportSnapshot>({ x: 100, y: 50, zoom: 0.8 })
+
+/* ============================================================================
+ * 跨组件树的两个小原语（2026-09-26）
+ *
+ * 背景：**选中态与视口归 Vue Flow 管**（在 index.vue 的 useVueFlow 里），
+ * 而这两个动作有别的调用方，它们在**另一棵组件树**里（生成器面板要做
+ * 「点引用跳回上游卡片」、Agent 建完节点要选中它）。原来只有 index.vue 自己
+ * 直接调 setNodes 干过这件事，别处拿不到实例，只能干瞪眼。
+ *
+ * 所以这里放一个注册点 + 一个待处理标记，谁都能用，且不引入对组件实例的依赖。
+ * ========================================================================== */
+
+let applyNodesToFlow: ((next: WorkflowCanvasNode[]) => void) | null = null
+
+/** index.vue 挂载时把自己的 setNodes 注册进来（避免 composable 依赖组件实例） */
+export const registerFlowNodeSync = (apply: ((next: WorkflowCanvasNode[]) => void) | null) => {
+  applyNodesToFlow = apply
+}
+
+/**
+ * 只选中某个节点（其余取消选中）。
+ *
+ * **只作用于 Vue Flow 的运行态，不写 `nodes.value`、不进历史**：
+ * 选中是 UI 状态，写进源数据会把「选一下」也变成一次可撤销的编辑、还会触发草稿保存。
+ * 这与 index.vue 里既有的三处 setNodes 写法保持一致（它们也只改运行态）。
+ */
+export const selectOnlyNode = (id: string) => {
+  const target = String(id || '').trim()
+  if (!target) return
+  applyNodesToFlow?.(nodes.value.map(node => ({ ...node, selected: node.id === target })))
+}
+
+/** 「请把这个节点移到视野中央」的一次性请求，由 index.vue 消费 */
+export const pendingCenterNodeId = ref<string | null>(null)
+
+export const requestCenterOnNode = (id: string) => {
+  const target = String(id || '').trim()
+  if (target) pendingCenterNodeId.value = target
+}
+
+/** 取走待处理的居中请求（取走即清空，避免重复居中） */
+export const consumePendingCenterNodeId = () => {
+  const id = pendingCenterNodeId.value
+  pendingCenterNodeId.value = null
+  return id
+}
 
 // 画布外观（迁移自 infinite-canvas，纳入历史快照）
 export const canvasBackgroundMode = ref<WorkflowBackgroundMode>('dots')
@@ -386,6 +451,8 @@ const getDefaultNodeData = <T extends WorkflowNodeType>(type: T): WorkflowNodeDa
     }
     case 'asset':
       return { label: '素材' } as WorkflowNodeDataMap[T]
+    case 'group':
+      return { label: '编组', groupChildIds: [] as string[] } as WorkflowNodeDataMap[T]
     default:
       throw new Error(`不支持的节点类型: ${String(type)}`)
   }
@@ -438,6 +505,94 @@ export const removeNode = (id: string) => {
   edges.value = edges.value.filter(edge => edge.source !== id && edge.target !== id)
 }
 
+// === 编组的纯逻辑（成员展开 / 包围盒），单测直接覆盖 ===
+
+/** 组框相对子节点包围盒向外扩的内边距（对齐 SceneFlow 的 GROUP_PADDING = 48） */
+export const GROUP_PADDING = 48
+/** 单个节点也能成组时，组框的最小边长 */
+export const GROUP_MIN_SIZE = 160
+/**
+ * 组框的 zIndex。压到负数：未选中时永远在其它节点之下；
+ * 选中时 Vue Flow 的 elevateNodesOnSelect 会 +1000，正好回到 0（仍在生成节点之下）。
+ * 见 index.vue 里 groupSelectedNodes 的用法。
+ */
+export const GROUP_NODE_Z_INDEX = -1000
+
+export interface NodeFrameSize {
+  width: number
+  height: number
+}
+
+/**
+ * 展开一个组框实际涵盖的节点 id（含嵌套组）。
+ *
+ * 为什么需要递归：组里可以再套组。只取一层的话，拖外层组框会漏掉内层组的子节点，
+ * 内层组自己会被移动、它的子节点却留在原地 —— 视觉上就是「组被拖散了」。
+ * 用 visited 去重，避免环形引用（A 的 groupChildIds 里出现 A 自己）时死循环。
+ */
+export const expandGroupChildIds = (
+  allNodes: WorkflowCanvasNode[],
+  groupId: string,
+): string[] => {
+  const readChildIds = (node: WorkflowCanvasNode | undefined): string[] => {
+    const ids = (node?.data as WorkflowGroupNodeData | undefined)?.groupChildIds
+    return Array.isArray(ids) ? ids : []
+  }
+
+  const byId = new Map(allNodes.map(node => [node.id, node]))
+  const collected: string[] = []
+  const visited = new Set<string>([groupId])
+  const queue = [...readChildIds(allNodes.find(node => node.id === groupId))]
+
+  while (queue.length) {
+    const id = String(queue.shift() || '').trim()
+    if (!id || visited.has(id)) continue
+    visited.add(id)
+    collected.push(id)
+    const node = byId.get(id)
+    if (node?.type === 'group') queue.push(...readChildIds(node))
+  }
+
+  return collected
+}
+
+/**
+ * 按子节点包围盒 + 内边距算出组框位置与尺寸（对齐 SceneFlow canvas-utils.ts createCanvasGroup）。
+ *
+ * @param children 子节点（至少要有一个）
+ * @param sizeOf   取节点尺寸的函数 —— 尺寸来自 Vue Flow 的测量值或配置兜底，
+ *                 纯函数不依赖 Vue Flow，所以由调用方注入
+ */
+export const computeGroupBounds = (
+  children: Array<{ id: string; position: WorkflowCanvasPosition }>,
+  sizeOf: (id: string) => NodeFrameSize,
+  padding = GROUP_PADDING,
+): { position: WorkflowCanvasPosition; width: number; height: number } | null => {
+  const valid = children.filter(child => child?.id && child.position)
+  if (!valid.length) return null
+
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+
+  for (const child of valid) {
+    const size = sizeOf(child.id)
+    const width = Number.isFinite(size.width) ? Math.max(0, size.width) : 0
+    const height = Number.isFinite(size.height) ? Math.max(0, size.height) : 0
+    minX = Math.min(minX, child.position.x - padding)
+    minY = Math.min(minY, child.position.y - padding)
+    maxX = Math.max(maxX, child.position.x + width + padding)
+    maxY = Math.max(maxY, child.position.y + height + padding)
+  }
+
+  return {
+    position: { x: minX, y: minY },
+    width: Math.max(GROUP_MIN_SIZE, maxX - minX),
+    height: Math.max(GROUP_MIN_SIZE, maxY - minY),
+  }
+}
+
 // 复制节点
 export const duplicateNode = (id: string) => {
   const source = nodes.value.find(node => node.id === id)
@@ -446,11 +601,18 @@ export const duplicateNode = (id: string) => {
   const newId = getNodeId()
   const maxZ = Math.max(0, ...nodes.value.map(n => n.zIndex || 0))
 
+  /*
+   * 复制出来的**组框必须清空成员名单**。
+   * 为什么不能照抄 `groupChildIds`：那份名单指的是**原来那些子节点**，
+   * 照抄就会变成「两个组框同时声称同一批子节点」，拖其中一个组，另一个也跟着动。
+   * 想连子节点一起复制应该用「框选后复制粘贴」（那条路会重映射 id）。
+   */
+  const isGroup = source.type === 'group'
   nodes.value = [...nodes.value, {
     id: newId,
     type: source.type,
     position: { x: source.position.x + 50, y: source.position.y + 50 },
-    data: { ...source.data },
+    data: isGroup ? { ...source.data, groupChildIds: [] } : { ...source.data },
     zIndex: maxZ + 1
   }]
   return newId

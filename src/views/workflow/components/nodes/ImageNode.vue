@@ -13,13 +13,31 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import { ElMessage } from 'element-plus'
-import { Aim, Crop, MagicStick, Picture, Sunny } from '@element-plus/icons-vue'
+import {
+  Aim,
+  Brush,
+  CopyDocument,
+  Crop,
+  Delete,
+  Download,
+  FullScreen,
+  Lock,
+  MagicStick,
+  Picture,
+  Sunny,
+  Unlock,
+  Upload,
+} from '@element-plus/icons-vue'
 import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canvas/CanvasNodeTopToolbar.vue'
+import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/canvas/CanvasNodeHoverToolbar.vue'
 import ImageCropDialog from '@/components/canvas/ImageCropDialog.vue'
+import ImageMaskBrushDialog from '@/components/canvas/ImageMaskBrushDialog.vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import {
   updateNode,
+  removeNode,
+  duplicateNode,
   addNode,
   addEdge,
   nodes,
@@ -42,6 +60,13 @@ import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt, sortEdgesByExplicitOrder } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
+import {
+  captureUpstreamFingerprint,
+  compareUpstreamFingerprint,
+  readUpstreamFingerprint,
+  resolveUpstreamStaleBadge,
+  type UpstreamOutput,
+} from './upstream-staleness'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import {
   createGenerationTask,
@@ -118,6 +143,12 @@ const errorMsg = ref(props.data?.error || '')
  */
 const backgroundPending = ref(!!props.data?.backgroundPending)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+/**
+ * hover 工具条的显隐（复制 / 下载 / 删除）。
+ * 与 Video / Text / Asset 三类节点同一套写法：鼠标进出卡片容器切换 —— 图片节点原来没有这条，
+ * 四类节点的卡片动作集合不一致（本轮补齐，见 B3）。
+ */
+const showActions = ref(false)
 
 watch(
   [() => props.data?.url, () => props.data?.loading, () => props.data?.error, () => props.data?.backgroundPending],
@@ -261,10 +292,80 @@ const handleFileChange = async (event: Event) => {
   }
 }
 
+/* ── 卡片动作（B2 / B3）──────────────────────────────────────────────────────
+ *
+ * 纪律：**不许出现假入口**。每一项点下去都必须有真实结果；做不到的就不放上来
+ * （「超分」老项目自己也没实现，见 docs/canvas-port-from-sceneflow.md 的不抄清单）。
+ * 「复制 / 下载 / 删除」放 hover 工具条（与视频节点同一套），其余放顶部工具条。
+ */
+
+/** hover 工具条：复制（复制节点）/ 下载（有图时）/ 删除 —— 与 VideoNode 的 hoverActions 一致 */
+const hoverActions = computed<NodeToolbarAction[]>(() => {
+  const list: NodeToolbarAction[] = [
+    { id: 'duplicate', label: '复制', icon: CopyDocument, onClick: handleDuplicate },
+  ]
+  if (imageUrl.value) {
+    list.push({ id: 'download', label: '下载', icon: Download, onClick: handleDownload })
+  }
+  list.push({ id: 'delete', label: '删除', icon: Delete, danger: true, onClick: handleDelete })
+  return list
+})
+
+const handleDuplicate = () => {
+  const newId = duplicateNode(props.id)
+  if (newId) setTimeout(() => updateNodeInternals([newId]), 50)
+}
+
+const handleDelete = () => removeNode(props.id)
+
+/** 下载当前这张图（文件名带时间戳，避免浏览器重名覆盖） */
+const handleDownload = () => {
+  const url = String(imageUrl.value || '').trim()
+  if (!url) return
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `image_${Date.now()}.png`
+  a.click()
+}
+
+/** 复制提示词：把 data.prompt 放进剪贴板。没有提示词就如实说，不假装复制成功 */
+const handleCopyPrompt = async () => {
+  const prompt = String(props.data?.prompt || '').trim()
+  if (!prompt) {
+    ElMessage.info('这个节点还没有提示词，先写一个再复制')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(prompt)
+    ElMessage.success('已复制提示词')
+  } catch {
+    // 剪贴板接口在非安全上下文 / 无权限时会 reject，这种情况要能看见
+    ElMessage.error('复制失败，请手动选中提示词复制')
+  }
+}
+
+/**
+ * 锁比例 / 自由比例。
+ *
+ * 我们的图片卡片尺寸**跟着生成比例走**（config/node-size.ts），图上一直是 `object-fit: cover`
+ * —— 非当前比例的图会被裁切。这个开关让用户能切到 `contain`：
+ *   · 锁比例（默认）：按卡片比例裁切填满，卡片网格整齐；
+ *   · 自由比例：完整显示原图（可能留白），用来看清非当前比例的图。
+ * 状态落在节点 data 的 `freeResize` 上，跟画布一起保存/撤销。
+ */
+const freeRatio = computed(() => props.data?.freeResize === true)
+const handleToggleFreeRatio = () => {
+  updateNode(props.id, { freeResize: !freeRatio.value })
+}
+
+/** 替换图片：复用与上传同一条链路（选文件 → uploadStorageFile → 回填 url） */
+const handleReplaceImage = () => triggerUpload()
+
 /**
  * 「图片高清」：拿本节点这张图 + 一句固定指令走图生图（image-edit），结果落到**新节点**。
  *
- * 与 LibTV 空图片节点上的「尝试：图片高清」同名同义。两条刻意的决定沿用旧版：
+ * 入口只有顶部工具条的「高清」一项（空态里原来还有一项同名的「图片高清」，因为重复已删，
+ * 见模板空态注释）。两条刻意的决定沿用旧版：
  *  1. 结果不覆盖原图 —— 高清重绘是可以对比、可以回退的操作，覆盖掉就找不回来了；
  *  2. 提示词与尺寸都来自预设（config/image-edit-presets），档位只从模型声明的列表里取，
  *     模型不认的值绝不会透传上去。
@@ -288,6 +389,8 @@ const runImageEditJob = async (preset: ImageEditPreset) => {
     label: preset.label,
     loading: true,
     prompt: preset.prompt,
+    // 结果节点的上游就是这张源图：源图以后换了，这个结果节点也该重跑
+    upstreamFingerprint: captureUpstreamFingerprint([{ id: props.id, url: sourceUrl }]),
   })
   addEdge({
     source: props.id,
@@ -377,11 +480,13 @@ const { style: toolbarStyle } = useNodeToolbar({
 })
 
 /**
- * 工具栏条目：**只放已经接线的能力**，每一项点下去都会真的产出新节点。
+ * 工具栏条目：**只放已经接线的能力**，每一项点下去都有真实结果。
  *
- * 与 LibTV 对照：他们图片节点是 9 项 + 4 个图标按钮，我们只放得起这 5 项 ——
- * 「九宫格 / 元素编辑 / 图层分离 / 宫格切分」这些我们还没有对应管线，
- * 宁可少放，也不摆「接入中」那种假入口（上一轮刚因为假入口砍过一遍）。
+ * 与 LibTV 对照：他们图片节点是 9 项 + 4 个图标按钮。我们这一条上：
+ *   · 生成类（高清 / 全景 / 多角度 / 打光 / 裁剪）—— 都走已验证的生成管线，结果落**新节点**；
+ *   · 卡片类（复制提示词 / 替换图片 / 锁比例 / 局部编辑 / 查看大图）—— B2 补齐，均为本地或现成链路。
+ * 「九宫格 / 图层分离 / 宫格切分 / 超分」这些没有对应管线（超分老项目自己也没实现），
+ * **宁可少放，也不摆「接入中」那种假入口**（上一轮刚因为假入口砍过一遍）。
  * 标签用 LibTV 的叫法：全景 / 多角度 / 打光 / 高清。
  */
 const toolbarItems = computed<NodeTopToolbarItem[]>(() => [
@@ -413,6 +518,18 @@ const toolbarItems = computed<NodeTopToolbarItem[]>(() => [
   },
   { type: 'divider' },
   { id: 'crop', label: '裁剪', icon: Crop, onClick: () => { cropVisible.value = true } },
+  // 以下五项都是「已经有管线」的卡片动作（老项目 canvas-image-toolbar-tools.tsx 里的同名动作）；
+  // 每一项点下去都有真实结果，见各自函数注释。「超分」老项目自己也没实现，**不放**。
+  { id: 'copy-prompt', label: '复制提示词', icon: CopyDocument, onClick: () => { void handleCopyPrompt() } },
+  { id: 'replace', label: '替换图片', icon: Upload, onClick: handleReplaceImage },
+  {
+    id: 'free-ratio',
+    label: freeRatio.value ? '自由比例' : '锁比例',
+    icon: freeRatio.value ? Unlock : Lock,
+    onClick: handleToggleFreeRatio,
+  },
+  { id: 'mask-edit', label: '局部编辑', icon: Brush, onClick: () => { maskVisible.value = true } },
+  { id: 'view', label: '查看大图', icon: FullScreen, onClick: () => openImagePreview() },
 ])
 
 // 裁剪是纯本地操作（不上上游）：裁完直接把结果上传成一个新节点
@@ -423,6 +540,7 @@ const handleCropConfirm = async (blob: Blob) => {
   const targetId = addNode('image', { x: sourceNode.position.x + 640, y: sourceNode.position.y }, {
     label: '裁剪',
     loading: true,
+    upstreamFingerprint: captureUpstreamFingerprint([{ id: props.id, url: String(imageUrl.value || '') }]),
   })
   try {
     const file = new File([blob], `crop-${Date.now()}.png`, { type: 'image/png' })
@@ -441,6 +559,102 @@ const handleCropConfirm = async (blob: Blob) => {
 
 const previewVisible = ref(false)
 const previewTarget = ref('')
+
+/**
+ * 局部编辑（涂抹重绘）：蒙版 + 一句改动要求 → 走 image-edit，结果落到**新节点**（不覆盖原图）。
+ *
+ * 这条管线服务端早就有：`mask` 与参考图走同一条取图通道（server/generation-tasks/
+ * upstream-helpers.ts 的 requestImageEdit），上游确实认这个参数（圆内改动量是圆外的 3.9 倍，
+ * 见 tests/image-edit-mask.test.ts）。但 `ImageMaskBrushDialog.vue` 在仓库里**一直没有任何调用点**
+ * —— 对话框躺着、用户点不到。这里把它接上（B2 的「局部编辑」）。
+ */
+const maskVisible = ref(false)
+
+const handleMaskConfirm = async (payload: { mask: Blob; prompt: string }) => {
+  const sourceUrl = String(imageUrl.value || '').trim()
+  if (!sourceUrl) {
+    ElMessage.info('这个节点还没有图，先上传一张')
+    return
+  }
+  if (isGenerating.value) return
+  const sourceNode = nodes.value.find((n) => n.id === props.id)
+  if (!sourceNode) return
+
+  const targetId = addNode('image', { x: sourceNode.position.x + 640, y: sourceNode.position.y }, {
+    label: '局部编辑',
+    loading: true,
+    prompt: payload.prompt,
+    upstreamFingerprint: captureUpstreamFingerprint([{ id: props.id, url: sourceUrl }]),
+  })
+  addEdge({
+    source: props.id,
+    target: targetId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+    type: 'imageOrder',
+    data: { imageOrder: 1 },
+  })
+
+  try {
+    // 蒙版必须先入库成 PNG 才能被上游取到（对话框导出的就是原图分辨率的 PNG）
+    const maskFile = new File([payload.mask], `mask-${Date.now()}.png`, { type: 'image/png' })
+    const maskUpload = await uploadStorageFile(maskFile, 'asset')
+    if (!maskUpload) throw new Error('蒙版上传失败')
+
+    const fallbackKey = String(props.data?.model || '').trim()
+    const { providerId, modelKey } = await resolveGenerationTaskModel({
+      modelKey: fallbackKey,
+      fallbackModelKey: fallbackKey,
+      category: 'IMAGE',
+      missingModelMessage: '未匹配到有效图片模型，请先在后台配置模型',
+    })
+    const requestBody: Record<string, unknown> = {
+      model: modelKey,
+      prompt: payload.prompt,
+      n: 1,
+      providerId,
+      mask: maskUpload.publicUrl,
+    }
+    const saved = await createGenerationTask({
+      source: 'workflow',
+      type: 'image',
+      requestMode: 'image-edit',
+      prompt: payload.prompt,
+      modelKey,
+      mask: maskUpload.publicUrl,
+      referenceImages: [sourceUrl],
+      requestBody: appendImageReferencesToRequestBody(requestBody, [sourceUrl]),
+    })
+    const taskId = String(saved?.id || '').trim()
+    if (!taskId) throw new Error('局部编辑任务创建失败')
+
+    const controller = new AbortController()
+    taskStreamController.value = controller
+    await subscribeGenerationTaskEvents(taskId, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'snapshot' || event.type === 'completed') {
+          const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+          if (urls.length) {
+            updateNode(targetId, { url: urls[0], loading: false, error: '', executed: true, taskRecordId: taskId })
+          }
+        }
+        if (event.type === 'failed') {
+          updateNode(targetId, { loading: false, error: String(event.message || event.record?.error || '局部编辑失败') })
+        }
+        if (event.type === 'stopped') {
+          updateNode(targetId, { loading: false, error: '任务已停止' })
+        }
+      },
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '局部编辑失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
 
 const openImagePreview = (url?: unknown) => {
   // 只认字符串：工具栏那份是 `item.onClick()`（无参），但悬停工具栏是
@@ -524,6 +738,45 @@ const upstreamReferenceUrls = computed<string[]>(() => {
     setTimeout(() => { droppedNonRasterRefsHint.value = false }, 3000)
   }
   return refs
+})
+
+/**
+ * 直接上游里「有产出」的图片节点集合 —— 「上游已变 / 需重跑」标记的唯一数据源。
+ *
+ * 与 upstreamReferenceUrls 同一套过滤（只认栅格图）：非栅格的图本节点根本用不上，
+ * 把它算进指纹只会让上游换了个格式就冒出角标。返回顺序不影响比较（按 id 建表）。
+ */
+const upstreamOutputs = computed<UpstreamOutput[]>(() => {
+  const list: UpstreamOutput[] = []
+  for (const edge of inboundEdges.value.get(props.id) || []) {
+    const sourceNode = nodeIndex.value.get(edge.source)
+    if (sourceNode?.type !== 'image') continue
+    const url = String((sourceNode.data as { url?: string })?.url || '').trim()
+    if (!url || !isRasterReferenceUrl(url)) continue
+    list.push({ id: edge.source, url })
+  }
+  return list
+})
+
+/**
+ * 上游换了图就出角标「上游已更新，建议重跑」（重跑本节点后指纹刷新，角标自动消失）。
+ * 上游被删静默清掉 —— 理由见 ./upstream-staleness.ts 的文件头。
+ * 角标是**纯提示**（不是按钮）：重跑入口是节点自己的生成链路，不在这里再开一个。
+ */
+const upstreamStaleBadge = computed(() =>
+  resolveUpstreamStaleBadge(
+    compareUpstreamFingerprint(readUpstreamFingerprint(props.data?.upstreamFingerprint), upstreamOutputs.value),
+  ),
+)
+
+/** 提交时记指纹：与提交写在同一个 updateNode 里，保证「提交过」与「记了谁」一致 */
+const captureCurrentUpstreamFingerprint = () => captureUpstreamFingerprint(upstreamOutputs.value)
+
+/** 角标文案与悬浮说明（拆成字符串 computed，模板里不必处理 null） */
+const upstreamStaleText = computed(() => upstreamStaleBadge.value?.text || '')
+const upstreamStaleTitle = computed(() => {
+  const badge = upstreamStaleBadge.value
+  return badge ? `${badge.count} 个上游产出已更新` : ''
 })
 
 /**
@@ -896,6 +1149,8 @@ const submitGeneration = async (input: GenerationInput, submittedAt: number) => 
     submittedAt,
     loading: true,
     error: '',
+    // 本次提交用到的上游产出指纹：上游之后换了图 → 卡片出「上游已更新，建议重跑」
+    upstreamFingerprint: captureCurrentUpstreamFingerprint(),
   })
   return taskId
 }
@@ -1191,6 +1446,9 @@ const handlePromptSend = async (
     const taskId = String(saved?.id || '').trim()
     if (!taskId) throw new Error('图片任务创建失败')
 
+    // 提交即记上游指纹（口径与 submitGeneration 一致）：上游之后换图 → 卡片出「建议重跑」
+    updateNode(props.id, { upstreamFingerprint: captureCurrentUpstreamFingerprint() })
+
     const controller = new AbortController()
     taskStreamController.value = controller
     await subscribeGenerationTaskEvents(taskId, {
@@ -1251,7 +1509,7 @@ watch(
 </script>
 
 <template>
-  <div class="image-node-wrapper">
+  <div class="image-node-wrapper" @mouseenter="showActions = true" @mouseleave="showActions = false">
     <!-- 标题行（卡外，位于卡片上方）：双击改名。无折叠按钮 —— 图片节点没有 collapsed 态 -->
     <div class="image-node-title" :title="titleEdit.editing.value ? '' : '双击编辑名称'" @dblclick.stop="titleEdit.start">
       <el-icon class="image-node-title-icon"><Picture /></el-icon>
@@ -1301,13 +1559,22 @@ watch(
         <div class="image-node-background-text">后台生成中，完成后会出现在这里</div>
         <button type="button" class="image-node-background-btn nodrag nopan" @click.stop="refreshBackgroundNow">刷新看看</button>
       </div>
-      <img v-else-if="showImage" :src="imageUrl" alt="生成图片" class="image-node-image" @dblclick.stop="openImagePreview()" />
+      <img
+        v-else-if="showImage"
+        :src="imageUrl"
+        alt="生成图片"
+        class="image-node-image"
+        :class="{ 'is-free-ratio': freeRatio }"
+        @dblclick.stop="openImagePreview()"
+      />
 
       <!-- 角标盖在图上，不吃鼠标事件（不挡双击预览与拖拽） -->
       <span v-if="showImage && isGenerated" class="image-node-ai-badge">AI生成</span>
 
-      <!-- 空态：照抄 LibTV 的「尝试」写法（空图片节点上就是这两项）。
-           两项都必须有真实行为 —— 图生图落到本节点上传，图片高清走已验证的 image-edit 管线。 -->
+      <!-- 空态：只保留「图生图」。
+           原来这里还有「图片高清」，但它与顶部工具条的「高清」是同一个 handleEnhance，
+           而且在空卡上点它只会得到「这个节点还没有图，先上传一张」—— 空态本来就没有图，
+           属于重复且点不出结果的一项，本轮删掉（B3）。 -->
       <div v-else-if="showEmpty" class="image-node-empty">
         <div class="image-node-empty-title">尝试：</div>
         <div class="image-node-empty-menu">
@@ -1315,12 +1582,18 @@ watch(
             <el-icon class="image-node-empty-item-icon"><Picture /></el-icon>
             <span>图生图</span>
           </button>
-          <button type="button" class="image-node-empty-item nodrag nopan" @click.stop="handleEnhance">
-            <el-icon class="image-node-empty-item-icon"><MagicStick /></el-icon>
-            <span>图片高清</span>
-          </button>
         </div>
       </div>
+
+      <!-- 「上游已更新，建议重跑」：上游换了产出之后的提示。它是**纯提示不是按钮** ——
+           重跑入口是节点自己的生成链路（选中卡片后在下方输入框提交），这里不另开一个，
+           也就没有「点了没反应」的假入口。重跑一次指纹刷新，角标自动消失。
+           注意：必须摆在空态这条 v-if/v-else-if 链**之外**，否则会把空态的 v-else-if 挂到自己身上。 -->
+      <span
+        v-if="upstreamStaleText && !showLoading"
+        class="image-node-stale-badge"
+        :title="upstreamStaleTitle"
+      >{{ upstreamStaleText }}</span>
 
       <input
         ref="fileInputRef"
@@ -1342,6 +1615,11 @@ watch(
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
     <CanvasNodeAddHandle side="right" :visible="isSelected" />
     <ImageCropDialog v-model="cropVisible" :src="imageUrl" @confirm="handleCropConfirm" />
+    <!-- 局部编辑：涂抹蒙版 + 一句改动要求；确认后走 image-edit，结果落到**新节点** -->
+    <ImageMaskBrushDialog v-model="maskVisible" :src="imageUrl" @confirm="handleMaskConfirm" />
+
+    <!-- hover 工具条（复制 / 下载 / 删除）：与 Video / Text / Asset 三类节点同一套 —— 图片节点原来缺这条（B3） -->
+    <CanvasNodeHoverToolbar :visible="showActions" :actions="hoverActions" />
 
     <el-image-viewer v-if="previewVisible" :url-list="[previewTarget]" :z-index="4000" :scale="0.86" teleported hide-on-click-modal @close="previewVisible = false" />
     <div
@@ -1541,6 +1819,8 @@ watch(
 /* cover 而不是 contain：LibTV 的图片节点就是 object-cover —— 非当前比例的图被裁切，
    而不是让卡片变形（空节点也一样是 622×350 的固定框） */
 .image-node-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 自由比例：完整显示原图（可能留白）；默认「锁比例」保持 cover，按卡片比例裁切填满 */
+.image-node-image.is-free-ratio { object-fit: contain; }
 
 /* 空态「尝试」列表：与 LibTV 一致的分组标题 + 竖排列 */
 .image-node-empty { display: flex; flex-direction: column; justify-content: center; height: 100%; padding: 20px; box-sizing: border-box; }
@@ -1560,6 +1840,24 @@ watch(
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.55);
   color: rgba(255, 255, 255, 0.92);
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
+}
+
+/* 「上游已更新，建议重跑」：与 AI 生成角标对称（右上），同样不吃鼠标事件。
+   色值走 token，不写死。 */
+.image-node-stale-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--canvas-float-block-default);
+  border: 1px solid var(--stroke-secondary);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 16px;
   pointer-events: none;

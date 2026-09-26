@@ -67,6 +67,12 @@ export const NODE_INPUT_SPECS: Record<WorkflowNodeType, NodeInputSpec> = {
     optional: [],
     emptyHint: '从素材库选择一个素材，或上传新的',
   },
+  // 编组框只是把节点框在一起，不参与连线、也不消费上游
+  group: {
+    required: [],
+    optional: [],
+    emptyHint: '框住选中的节点，拖动框可整体移动',
+  },
 }
 
 /** 上游节点的最小形状，避免纯规则层依赖完整的 Vue Flow 类型 */
