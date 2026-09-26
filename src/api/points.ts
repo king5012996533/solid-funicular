@@ -25,8 +25,9 @@ export interface PointsBalanceResponse {
 /**
  * 单个预估项。
  *
- * `model` 是画布模型选择键 `providerId::CATEGORY::modelKey`（节点里存的就是它），
- * 服务端拿它解析定价；`count` 是这一步要生成的数量，`size` 是画幅（可选）。
+ * `model` 必须是三段式选择键 `providerId::CATEGORY::modelKey`（服务端靠它解析出厂商去查定价表）。
+ * 节点里存的可能只是裸 modelKey，调用方（preflight_check）负责先用目录补全再发；补不出的原样发出，
+ * 服务端会明确回「估不出」而不是 0。`count` 是这一步要生成的数量，`size` 是画幅（可选）。
  */
 export interface PointsEstimateItem {
   model: string;
@@ -36,8 +37,17 @@ export interface PointsEstimateItem {
 
 export interface PointsEstimateResponse {
   success?: boolean;
+  /**
+   * 整批预估合计（**只在每一项都估得出时才给**）。
+   *
+   * 有任一项估不出（模型键解析不了 / 计价表查不到价）时**整个字段缺失** —— 调用方必须把它当
+   * 「拿不到」走降级，绝不能用 0 冒充「不花钱」。服务端不再把估不出静默算成 0。
+   */
   totalEstimated?: number;
-  details?: Array<{ model: string; size: string; count: number; cost: number }>;
+  /** 逐项明细：`cost` 估不出时为 null（同样不是 0） */
+  details?: Array<{ model: string; size: string; count: number; cost: number | null; estimated: boolean }>;
+  /** 估不出的项及原因，供日志与降级判据 */
+  unestimatable?: Array<{ model: string; reason: string; detail?: string }>;
   message?: string;
 }
 

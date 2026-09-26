@@ -33,6 +33,7 @@ import {
   requestPointsEstimate,
   type PointsEstimateItem,
 } from "@/api/points";
+import { resolveModelSelectionKey } from "@/config/models";
 import { rememberPreflightEstimate } from "@/components/canana/agent-confirm-cost";
 
 /**
@@ -361,6 +362,24 @@ const withTimeout = async <T>(
 };
 
 /**
+ * 把节点的模型字段补成预校验接口要的**三段式选择键**。
+ *
+ * `/api/points/estimate` 的契约是 `providerId::CATEGORY::modelKey`（服务端靠它解析出
+ * providerId 再去定价表查价）。但画布节点里存的可能是**裸 modelKey**（早期 / 导入的画布就是
+ * `gpt-image-2`）—— 2026-09-26 真机 bug：原样转发裸键 + 服务端静默按 0 计，于是一张实际 6 分的
+ * gpt-image-2 预估成 0，确认卡拿不到「本批将预扣 N 分」。
+ *
+ * 这里用目录把裸键补成选择键；目录里确实没有（下架 / 未配置）就原样发出，
+ * 由服务端明确回「估不出」（不再由客户端猜或补数字）。
+ */
+const toEstimateModelKey = (node: CanvasAgentNodeSnapshot) => {
+  const raw = String(node.model || "").trim();
+  if (!raw) return "";
+  const category = node.type === "video" ? "VIDEO" : "IMAGE";
+  return resolveModelSelectionKey(raw, category) || raw;
+};
+
+/**
  * 探「这一批余额够不够」所需的外部事实。
  *
  * 折算方式（为什么这么算）：`/api/points/estimate` 给的是**整批合计** `totalEstimated`，
@@ -387,7 +406,7 @@ const collectPreflightQuota = async (
   }
 
   const items: PointsEstimateItem[] = visualNodes.map((node) => ({
-    model: node.model || "",
+    model: toEstimateModelKey(node),
     count: 1,
     // 画幅能拿到就带上：定价若按画幅分档，漏传会低估；拿不到时服务端按默认算
     ...(node.size ? { size: node.size } : {}),

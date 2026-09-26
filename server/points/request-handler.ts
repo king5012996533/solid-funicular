@@ -2,6 +2,8 @@ import { sendJson } from '../ai-gateway/shared'
 import { requireCurrentSessionUser } from '../auth/session'
 import { getPointBalance, resolveModelPricingCost } from '../marketing-center/service'
 import { buildNormalizedGenerationParams } from '../../src/shared/model-pricing-rules'
+import { writeScopedLog } from '../shared/logging'
+import { computePointsEstimate } from './estimate-core'
 import { POINTS_BALANCE_PATH, POINTS_ESTIMATE_PATH } from './constants'
 
 /**
@@ -50,27 +52,18 @@ export const handlePointsRequest = async (req: any, res: any) => {
 }
 
 /**
- * 画布的模型选择键 → 计费函数要的三个参数。
- *
- * 画布节点存的是 `providerId::CATEGORY::modelKey`（模型选择器的选择键），
- * 而 `resolveModelPricingCost` 要 providerId + modelKey + endpointType 三项。
- * 在这里解析一次，调用方（前端）不必知道计费函数的入参形状。
- */
-const parseModelSelectionKey = (raw: string) => {
-  const parts = String(raw || '').split('::').map((item) => item.trim())
-  if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
-    return { providerId: parts[0], endpointType: parts[1].toLowerCase(), modelKey: parts[2] }
-  }
-  return null
-}
-
-/**
  * `POST /api/points/estimate` —— 一批节点的预估消耗。
  *
  * 为什么必须由服务端算：真实扣费走的是 `resolveModelPricingCost`（读 model_pricing 定价表）。
  * 前端复写一套「张数 × 常量」迟早与计费漂移，最后表现为「预校验说 30 分、实际扣了 42 分」——
  * 用户对不上账，比不预估还糟。这里直接调同一个函数，**连参数归一化都共用**（size/count 一起传进去），
  * 所以按张/按次/按秒的区别由定价算法自己处理，接口不再另乘一次张数。
+ *
+ * 载荷契约：`{ items: [{ model, size?, count? }] }`，`model` 是**三段式模型选择键**
+ * `providerId::CATEGORY::modelKey`。裸 `modelKey`（早期/导入画布存的形态）解析不出 providerId，
+ * 这是 2026-09-26 真机 bug 的根：客户端原样转发了裸键，这里却又静默把解析失败当成 0 —— 于是
+ * 一张实际 6 分的 gpt-image-2 估成 0。现在估不出的项不再算 0，而是 `cost:null` + `unestimatable`
+ * 明细，整批总额要么全算出来、要么整个不给（上层据此降级「拿不到」），并落日志。
  *
  * 性能：同一批里多个节点常是同一「模型 + 规格 + 张数」，所以按这个三元组去重后再查，
  * 10 个同规格节点只查一次库。不能只按模型去重：perImage 随张数变、perTask 不变，
@@ -93,50 +86,41 @@ export const handlePointsEstimateRequest = async (req: any, res: any) => {
     const body = await readJsonBody(req)
     const items = Array.isArray(body?.items) ? body.items : []
     if (!items.length) {
-      sendJson(res, 200, { success: true, totalEstimated: 0, details: [] })
+      sendJson(res, 200, { success: true, totalEstimated: 0, details: [], unestimatable: [] })
       return
     }
 
-    // 单个节点的预估：与结算同一个解析器 + 同一套参数归一化
-    const estimateOne = async (item: any) => {
-      const model = String(item?.model || '').trim()
-      const parsed = parseModelSelectionKey(model)
-      if (!parsed) return 0
-      const resolved = await resolveModelPricingCost({
-        providerId: parsed.providerId,
-        modelKey: parsed.modelKey,
-        endpointType: parsed.endpointType as 'chat' | 'image' | 'video',
-        params: buildNormalizedGenerationParams({
-          kind: parsed.endpointType === 'video' ? 'video' : 'image',
-          size: item?.size,
-          count: item?.count,
-        }),
+    // parseModelSelectionKey + 与结算同一解析器 + 同一套参数归一化，全在纯逻辑核心里
+    const outcome = await computePointsEstimate(items, (item) => resolveModelPricingCost({
+      providerId: item.providerId,
+      modelKey: item.modelKey,
+      endpointType: item.endpointType,
+      params: buildNormalizedGenerationParams({
+        kind: item.endpointType === 'video' ? 'video' : 'image',
+        size: item.size,
+        count: item.count,
+      }),
+    }))
+
+    // 「估不出」必须留痕（我靠日志定位）：把客户端的真实载荷形状也带出来，
+    // 下次再出问题能一眼看出是发了裸 modelKey 还是模型没配价。
+    if (outcome.unestimatable.length) {
+      writeScopedLog('warn', '积分预估', '有节点估不出消耗（按「拿不到」处理，不返回 0）', {
+        userId: currentUser.id,
+        requested: items.length,
+        unestimatable: outcome.unestimatable,
       })
-      // 未配价/未标定/匹配失败 → 预估按 0：真正的拦截在建单接口（那里会返回可读的 4xx）。
-      // 这里不能沿用旧的草案价，否则预校验通过、建单却被拒，用户看到的数字前后矛盾。
-      if (resolved?.refuse) return 0
-      return Math.max(0, Math.trunc(Number(resolved?.pointCost) || 0))
     }
 
-    // 去重：同一「模型 + 规格 + 张数」只查一次定价（key 必须带上 size/count，见函数头注释）
-    const costCache = new Map<string, number>()
-    let totalEstimated = 0
-    const details: Array<{ model: string; size: string; count: number; cost: number }> = []
-    for (const item of items) {
-      const model = String(item?.model || '').trim()
-      const size = String(item?.size || '').trim()
-      const count = Math.max(1, Math.trunc(Number(item?.count) || 1))
-      const cacheKey = `${model}::${size}::${count}`
-      let cost = costCache.get(cacheKey)
-      if (cost === undefined) {
-        cost = await estimateOne(item)
-        costCache.set(cacheKey, cost)
-      }
-      totalEstimated += cost
-      details.push({ model, size, count, cost })
+    const payload: Record<string, unknown> = {
+      success: true,
+      details: outcome.details,
+      unestimatable: outcome.unestimatable,
     }
-
-    sendJson(res, 200, { success: true, totalEstimated, details })
+    if (typeof outcome.totalEstimated === 'number') {
+      payload.totalEstimated = outcome.totalEstimated
+    }
+    sendJson(res, 200, payload)
   } catch (error: any) {
     // 5xx：调用方走降级分支（跳过配额校验），不阻断预校验整体流程
     sendJson(res, 500, { success: false, message: error?.message || '预估消耗计算失败' })
