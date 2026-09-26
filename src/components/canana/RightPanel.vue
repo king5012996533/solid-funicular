@@ -678,21 +678,37 @@ const settleConfirm = (approved) => {
 }
 
 const askUserRequest = ref(null)     // { context, questions, resolve }
-const askUserAnswers = ref([])       // 与问题一一对应：点选项即填入，也允许自由输入
+const askUserAnswers = ref([])       // 与问题一一对应：{ optionKey, text } —— 点选项选中并高亮，也可自由输入
+
+/** 点选一个方案：记住代号（回执据此带出代号+名称+特点），并清掉自由输入，避免两者打架 */
+const selectAskUserOption = (index, optionKey) => {
+  const entry = askUserAnswers.value[index]
+  if (!entry) return
+  entry.optionKey = optionKey
+  entry.text = ''
+}
+
+/** 一旦开始自由输入（「都不满意，我来说」），就取消已选方案 */
+const clearAskUserOption = (index) => {
+  const entry = askUserAnswers.value[index]
+  if (entry) entry.optionKey = ''
+}
 
 /**
  * 服务端 Agent 通过桥要提问时调用；返回的 Promise 一直挂到用户提交或跳过。
  *
- * 提问是「关键信息不足」时的补救 —— 它和确认卡一样是阻塞式的（同一轮里等答复），
+ * 提问是「关键信息不足 / 需要拍板」时的补救 —— 它和确认卡一样是阻塞式的（同一轮里等答复），
  * 所以卡片必须让人看得见：面板收起时它在屏幕外，用户只会看到画布一动不动，然后十分钟后收到超时。
  * 上一次的提问卡还没答复就再来一张时，先把上一张按「未回答」结掉，避免谁也答不了。
+ *
+ * 批次 2：选项已由工具层归一成「代号 + 名称 + 特点」的对象，这里只负责呈现与收集作答。
  */
 const askUser = (request) =>
   new Promise((resolve) => {
     isPanelCollapsed.value = false
     askUserRequest.value?.resolve?.({ answers: [], skipped: true })
     const questions = Array.isArray(request?.questions) ? request.questions.slice(0, 3) : []
-    askUserAnswers.value = questions.map(() => '')
+    askUserAnswers.value = questions.map(() => ({ optionKey: '', text: '' }))
     askUserRequest.value = { context: request?.context, questions, resolve }
     scrollToBottom()
   })
@@ -701,10 +717,14 @@ const settleAskUser = (answers, skipped = false) => {
   const pending = askUserRequest.value
   if (!pending) return
   askUserRequest.value = null
-  const payload = (pending.questions || []).map((item, index) => ({
-    question: item.question,
-    answer: String((answers || [])[index] ?? '').trim(),
-  }))
+  // 只回「点选的代号 / 自由输入」，代号 → 代号+名称+特点的拼装由工具层统一做（回执真源在 shared）
+  const payload = (pending.questions || []).map((item, index) => {
+    const entry = (answers || [])[index] || {}
+    return {
+      optionKey: String(entry.optionKey || '').trim(),
+      text: String(entry.text || '').trim(),
+    }
+  })
   pending.resolve(skipped ? { answers: [], skipped: true } : { answers: payload })
   askUserAnswers.value = []
 }
@@ -1362,12 +1382,13 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       <!-- 半自动闸门：Agent 要花钱/交付前必须在这里拿到用户答复，否则那一步做不下去 -->
       <div v-if="confirmRequest" class="agent-confirm-card">
         <div class="agent-confirm-card__head">
-          <span class="agent-confirm-card__title">{{ confirmRequest.title }}</span>
+          <span class="agent-confirm-card__kicker">🎬 导演决策点 · 请批准</span>
           <span
             v-if="confirmRequest.riskLevel"
             :class="['agent-confirm-card__risk', `is-${confirmRequest.riskLevel}`]"
           >{{ { low: '低风险', medium: '中风险', high: '高风险' }[confirmRequest.riskLevel] || confirmRequest.riskLevel }}</span>
         </div>
+        <div class="agent-confirm-card__title">{{ confirmRequest.title }}</div>
         <div class="agent-confirm-card__summary">{{ confirmRequest.summary }}</div>
         <ul v-if="confirmRequest.items?.length" class="agent-confirm-card__items">
           <li v-for="(item, index) in confirmRequest.items" :key="index">{{ item }}</li>
@@ -1396,34 +1417,41 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         </div>
       </div>
 
-      <!-- 关键信息不足：Agent 在同一轮里等用户回答（与确认卡并列，样式沿用同一套类名） -->
+      <!-- 导演决策点：Agent 已做了一版、需要用户在两个方向里拍板（同一轮里等答复，与确认卡并列） -->
       <div v-if="askUserRequest" class="agent-ask-card">
         <div class="agent-ask-card__head">
-          <span class="agent-ask-card__title">需要你补充一点信息</span>
+          <span class="agent-ask-card__kicker">🎬 导演决策点</span>
         </div>
         <div v-if="askUserRequest.context" class="agent-ask-card__context">{{ askUserRequest.context }}</div>
         <div v-for="(item, index) in askUserRequest.questions" :key="index" class="agent-ask-card__q">
           <div class="agent-ask-card__question">{{ item.question }}</div>
           <div v-if="item.options?.length" class="agent-ask-card__options">
             <button
-              v-for="(option, oi) in item.options"
-              :key="oi"
+              v-for="option in item.options"
+              :key="option.key"
               type="button"
-              :class="['agent-ask-card__option', { 'is-active': askUserAnswers[index] === option }]"
-              @click="askUserAnswers[index] = option"
-            >{{ option }}</button>
+              :class="['agent-ask-card__option', { 'is-active': askUserAnswers[index]?.optionKey === option.key }]"
+              @click="selectAskUserOption(index, option.key)"
+            >
+              <span class="agent-ask-card__option-key">{{ option.key }}</span>
+              <span class="agent-ask-card__option-body">
+                <span class="agent-ask-card__option-label">{{ option.label }}</span>
+                <span v-if="option.notes?.length" class="agent-ask-card__option-notes">{{ option.notes.join(' / ') }}</span>
+              </span>
+            </button>
           </div>
           <input
-            v-model="askUserAnswers[index]"
+            v-model="askUserAnswers[index].text"
             class="agent-ask-card__input"
             type="text"
-            placeholder="也可以直接输入你的答案"
+            placeholder="都不满意？直接说你的方案"
+            @input="clearAskUserOption(index)"
             @keydown.enter.stop.prevent="settleAskUser(askUserAnswers)"
           />
         </div>
         <div class="agent-ask-card__actions">
           <button type="button" class="agent-ask-card__btn is-skip" @click="settleAskUser([], true)">跳过</button>
-          <button type="button" class="agent-ask-card__btn is-submit" @click="settleAskUser(askUserAnswers)">提交</button>
+          <button type="button" class="agent-ask-card__btn is-submit" @click="settleAskUser(askUserAnswers)">确认</button>
         </div>
       </div>
 
@@ -2107,7 +2135,8 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   gap: 8px;
   margin-bottom: 6px;
 }
-.agent-confirm-card__title { font-size: 13px; font-weight: 700; color: #312e81; }
+.agent-confirm-card__kicker { font-size: 13px; font-weight: 700; color: #312e81; }
+.agent-confirm-card__title { margin-top: 6px; font-size: 13px; font-weight: 700; color: #1e293b; }
 .agent-confirm-card__risk {
   flex: 0 0 auto;
   padding: 1px 8px;
@@ -2185,21 +2214,44 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
 }
 .agent-ask-card__head { margin-bottom: 6px; }
-.agent-ask-card__title { font-size: 13px; font-weight: 700; color: #312e81; }
+.agent-ask-card__kicker { font-size: 13px; font-weight: 700; color: #312e81; }
 .agent-ask-card__context { font-size: 12px; line-height: 1.6; color: #3730a3; }
 .agent-ask-card__q { margin-top: 10px; }
 .agent-ask-card__question { font-size: 12px; font-weight: 600; color: #334155; }
-.agent-ask-card__options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+/* 方案是可点选的行（代号 + 名称 + 特点），不再是一排小胶囊 —— 名称与特点要看得清 */
+.agent-ask-card__options { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .agent-ask-card__option {
-  padding: 4px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
   border: 1px solid #c7d2fe;
-  border-radius: 999px;
+  border-radius: 10px;
   background: #fff;
-  color: #4338ca;
+  color: #312e81;
   font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
 .agent-ask-card__option.is-active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+.agent-ask-card__option-key {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: #e0e7ff;
+  color: #4338ca;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.agent-ask-card__option.is-active .agent-ask-card__option-key { background: rgba(255, 255, 255, 0.25); color: #fff; }
+.agent-ask-card__option-body { display: flex; flex-direction: column; gap: 2px; }
+.agent-ask-card__option-label { font-weight: 600; }
+.agent-ask-card__option-notes { color: #64748b; }
+.agent-ask-card__option.is-active .agent-ask-card__option-notes { color: #e0e7ff; }
 .agent-ask-card__input {
   width: 100%;
   margin-top: 6px;

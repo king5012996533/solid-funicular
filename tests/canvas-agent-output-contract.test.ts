@@ -79,8 +79,13 @@ const CONTRACT_MARKERS = [
 /** 状态标记的统一口径（避免把「待办」误读成「失败」）。 */
 const STATUS_MARKERS = ['✅ 已完成', '🔄 生成中', '⏳ 待提交', '❌ 失败', '⚠️ 风险或待定']
 
-/** system（空上下文）的字符上界：实测 2592，留出余量防止悄悄反弹。 */
-const SYSTEM_CHARS_EMPTY_UPPER_BOUND = 2900
+/**
+ * system（空上下文）的字符上界。
+ *
+ * 批次 2 在契约里加了一段「决策口径（导演决策点）」后为 2958 字符；批次 1 基线是 2702，
+ * +10% 的上界即 2972。这道界就是防「以后又往里塞长文」的，再往上加就要先减。
+ */
+const SYSTEM_CHARS_EMPTY_UPPER_BOUND = 2972
 
 console.log('\n【1】契约规定的结构真能被渲染器渲染成标签')
 {
@@ -102,7 +107,7 @@ console.log('\n【2】契约正文含全部固定结构与状态口径')
   for (const marker of STATUS_MARKERS) {
     check(`契约含状态标记「${marker}」`, CANVAS_AGENT_OUTPUT_CONTRACT.includes(marker))
   }
-  check('契约≤ 800 字符（别把契约本身写成散文）', CANVAS_AGENT_OUTPUT_CONTRACT.length <= 800)
+  check('契约≤ 1100 字符（别把契约本身写成散文）', CANVAS_AGENT_OUTPUT_CONTRACT.length <= 1100)
 }
 
 console.log('\n【3】system 提示里存在输出契约与状态口径，且明确禁止大段散文')
@@ -128,7 +133,7 @@ console.log('\n【4】system 字符数给了上界（别把之前的瘦身成果
     systemEmpty.length <= SYSTEM_CHARS_EMPTY_UPPER_BOUND,
   )
   // 契约是刻意加的固定段，长度要有界（prompt 每轮都发）
-  check(`契约长度有界（现在 ${CANVAS_AGENT_OUTPUT_CONTRACT.length} 字符）`, CANVAS_AGENT_OUTPUT_CONTRACT.length <= 800)
+  check(`契约长度有界（现在 ${CANVAS_AGENT_OUTPUT_CONTRACT.length} 字符）`, CANVAS_AGENT_OUTPUT_CONTRACT.length <= 1100)
 }
 
 console.log('\n【5】XSS：恶意正文被转义，不产生真实标签')

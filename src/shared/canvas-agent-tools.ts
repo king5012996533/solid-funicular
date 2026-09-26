@@ -173,14 +173,21 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
   {
     name: "ask_user",
     label: "向用户提问",
+    /**
+     * 2026-09-26 批次 2：从「客服式追问」升级成「导演决策点」。
+     *
+     * 产品判断：用户看到「需要补充一点信息」时的感受是「你还没干活」；而「我已完成第一版方案，
+     * 发现视觉方向有两个选择：A / B」传达的是「我在推进，只差你拍板」。所以这个工具的说明与
+     * 界面一起改口径 —— 先给情境，再给最多 2 个成型的方案（代号 + 名称 + 2~3 条特点）。
+     */
     description:
-      "【关键信息不足时用】当「要做什么 / 产出成片还是单张 / 大概多大规模」这类**猜不出来**的信息缺失时，用这个工具问用户。它会在**同一轮里等用户回答**，拿到答案你继续往下做，不会把一次委托拆成好几轮 —— 所以在回复里用纯文字提问是错的，要用这个工具。一次把想问的问全（最多 3 个），每个问题给 2~4 个可点选项，用户也可以自己输入。有常识默认值的偏好（风格 / 画幅 / 画质 / 镜头数 / 时长）**不要问**，按默认值做并在最后汇报里说明。",
+      "【关键信息不足 / 需要用户拍板时用】缺了**猜不出来**的关键信息，或已经做了一版、发现**两个都说得通的方向**需要用户拍板时，用这个工具提「导演决策点」。用法：context 写一句**情境**（你已完成什么、卡在哪），questions 里给方案 —— 每个问题**最多 2 个方案**，每个方案写**代号 + 名称 + 2~3 条特点**（例如 `{ key: \"A\", label: \"电影写实\", notes: [\"克制\", \"留白\", \"长镜头\"] }`），用户也可以自己输入。它会在**同一轮里等用户回答**，拿到答案你继续往下做，不会把一次委托拆成好几轮 —— 所以在回复里用纯文字提问是错的，要用这个工具。一次把想问的问全（最多 3 个）。**禁止**「需要补充一点信息」这类客服腔；开口前先说你已经完成了什么。有常识默认值的偏好（画幅 / 画质 / 镜头数 / 时长）不用开工前空问，按默认值做并在最后汇报里说明。",
     parameters: {
       type: "object",
       properties: {
         context: {
           type: "string",
-          description: "为什么需要问（一句话，帮用户快速判断该答什么）",
+          description: "为什么需要问（一句话情境：你已完成什么、卡在哪两个方向上）",
         },
         questions: {
           type: "array",
@@ -191,8 +198,25 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
               question: { type: "string", description: "问题本身，一句话" },
               options: {
                 type: "array",
-                items: { type: "string" },
-                description: "可点选的答案（2~4 个），用户也可以自己输入",
+                description: "可点选的方案（每个问题最多 2 个，硬上限 6），用户也可以自己输入；兼容旧的纯字符串写法",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      properties: {
+                        key: { type: "string", description: "方案代号，如 A / B（缺省时按位置补 A/B/C）" },
+                        label: { type: "string", description: "方案名称，如「电影写实」" },
+                        notes: {
+                          type: "array",
+                          items: { type: "string" },
+                          description: "2~3 条特点，如 [\"克制\", \"留白\", \"长镜头\"]",
+                        },
+                      },
+                      required: ["label"],
+                    },
+                  ],
+                },
               },
             },
             required: ["question"],
@@ -610,3 +634,159 @@ export const describeConfirmationDecision = (
   }
   return lines.join("\n");
 };
+
+/**
+ * 「导演决策点」的一个方案（2026-09-26，批次 2）。
+ *
+ * 为什么要有「代号 + 名称 + 特点」三件套：以前 options 是纯字符串，模型回执只能看到用户点了哪串字。
+ * 用户选「方案 A」时，模型拿到「电影写实」四个字，却不知道**为什么**是这个方案（克制/留白/长镜头
+ * 才是取舍依据）。代号让回执能稳定指代「A」，特点让模型知道用户的取舍逻辑。
+ * **只回一个字母不算回执** —— 见 `buildAgentAskUserReceipt`。
+ */
+export interface AgentAskUserOption {
+  /** 方案代号（A / B / 1 / 2…）。缺省时按位置补 A/B/C… */
+  key?: string;
+  /** 方案名称，例如「电影写实」 */
+  label?: string;
+  /** 2~3 条特点，例如 ["克制", "留白", "长镜头"]；也接受「克制 / 留白 / 长镜头」这种字符串 */
+  notes?: string[] | string;
+}
+
+/**
+ * `ask_user` 的 options 入参：既接受**旧的纯字符串**，也接受方案对象。
+ *
+ * 兼容旧写法是硬要求：旧对话/旧调用里 options 就是字符串数组，直接当对象读会静默丢光选项。
+ */
+export type AgentAskUserOptionInput = string | AgentAskUserOption;
+
+/** 归一化后的方案：key / label 一定存在，notes 一定是数组 */
+export interface NormalizedAgentAskUserOption {
+  key: string;
+  label: string;
+  notes: string[];
+}
+
+/** 单问的方案上限：提示词要求最多 2 个，这里给 6 的硬上限兜住模型偶尔的长列表 */
+export const MAX_ASK_USER_OPTIONS = 6;
+/** 每个方案最多 3 条特点（提示词说 2~3 条），多余的丢掉 */
+export const MAX_ASK_USER_OPTION_NOTES = 3;
+
+/** 位置 → 代号：0→A、1→B…；26 个之后回绕（模型正常不会给这么多方案） */
+const askUserOptionKeyForIndex = (index: number) => String.fromCharCode(65 + (index % 26));
+
+/** 特点归一：数组直接用，字符串按常见分隔符拆开；去空、去重、截到上限 */
+const normalizeAskUserOptionNotes = (raw: unknown): string[] => {
+  const items = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? raw.split(/[、,，/|]+/)
+      : [];
+  const out: string[] = [];
+  for (const item of items) {
+    const note = String(item ?? "").trim();
+    if (!note || out.includes(note)) continue;
+    out.push(note);
+    if (out.length >= MAX_ASK_USER_OPTION_NOTES) break;
+  }
+  return out;
+};
+
+/**
+ * 把 `ask_user` 的 options 归一成「代号 + 名称 + 特点」。
+ *
+ * 降级规则（不抛错，宁可少一个方案也不让整张卡崩）：
+ *   · 字符串       → 名称就是这串字，代号按位置补（旧写法）；
+ *   · 对象缺 label → 用 key 当名称；
+ *   · key/label 都空 → 丢弃这一项；
+ *   · notes 为非数组/非字符串 → 当成没有特点。
+ */
+export const normalizeAgentAskUserOptions = (raw: unknown): NormalizedAgentAskUserOption[] => {
+  if (!Array.isArray(raw)) return [];
+  const out: NormalizedAgentAskUserOption[] = [];
+  for (const item of raw) {
+    if (item === null || item === undefined) continue;
+    let key = "";
+    let label = "";
+    let notes: string[] = [];
+    if (typeof item === "string") {
+      label = item.trim();
+    } else if (typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      key = String(record.key ?? "").trim();
+      label = String(record.label ?? "").trim();
+      notes = normalizeAskUserOptionNotes(record.notes);
+      if (!label) label = key;
+    } else {
+      label = String(item).trim();
+    }
+    if (!label) continue;
+    if (!key) key = askUserOptionKeyForIndex(out.length);
+    out.push({ key, label, notes });
+    if (out.length >= MAX_ASK_USER_OPTIONS) break;
+  }
+  return out;
+};
+
+/** 把方案格式化成一行「代号 名称 · 特点 / 特点」——回执与界面共用，避免两侧措辞漂移 */
+export const formatAgentAskUserOption = (option: NormalizedAgentAskUserOption): string => {
+  const notes = (option.notes || []).filter(Boolean);
+  return `${option.key} ${option.label}${notes.length ? ` · ${notes.join(" / ")}` : ""}`;
+};
+
+/** 用户对一问的作答：点了选项给 optionKey，自由输入给 text（都可能是空） */
+export interface AgentAskUserAnswer {
+  question: string;
+  /** 用户点选的方案代号（自由输入时为空/缺省） */
+  optionKey?: string;
+  /** 自由输入的文字（点选项时通常为空） */
+  text?: string;
+}
+
+/** 回执里的选中方案：代号 + 名称 + 特点，三者缺一模型都不算「知道选了什么」 */
+export interface AgentAskUserChoice {
+  key: string;
+  label: string;
+  notes: string[];
+}
+
+export interface AgentAskUserResolvedAnswer {
+  question: string;
+  /** 给模型看的答案：选中方案是「代号 名称 · 特点…」，自由输入是用户原话 */
+  answer: string;
+  /** 选中的方案（点选项时才有）—— 模型据此知道「选了哪个、为什么」 */
+  choice?: AgentAskUserChoice;
+}
+
+export interface AgentAskUserReceipt {
+  answered: true;
+  answers: AgentAskUserResolvedAnswer[];
+}
+
+/**
+ * 把「问题 + 用户作答」拼成回执载荷。
+ *
+ * 这是**回执真源**：模型必须同时拿到代号、名称与特点，不能只拿到一个字母或一个名称。
+ * 自由输入（都没满意 → 用户自己说）直接回原话，不带 choice。
+ */
+export const buildAgentAskUserReceipt = (
+  questions: Array<{ question: string; options?: NormalizedAgentAskUserOption[] }>,
+  answers: AgentAskUserAnswer[] | undefined,
+): AgentAskUserReceipt => ({
+  answered: true,
+  answers: questions.map((question, index) => {
+    const raw = answers?.[index];
+    const optionKey = String(raw?.optionKey || "").trim();
+    const text = String(raw?.text || "").trim();
+    const picked = optionKey
+      ? (question.options || []).find((option) => option.key === optionKey)
+      : undefined;
+    if (picked) {
+      return {
+        question: question.question,
+        answer: formatAgentAskUserOption(picked),
+        choice: { key: picked.key, label: picked.label, notes: [...picked.notes] },
+      };
+    }
+    return { question: question.question, answer: text };
+  }),
+});

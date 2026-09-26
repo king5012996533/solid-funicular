@@ -86,12 +86,13 @@ console.log('\n【2】system 提示：硬规则 + 预扣三要素')
   check('手册第 4 步改为「会预扣积分」', CANVAS_AGENT_STORYBOARD_PRODUCTION_PLAYBOOK.includes('会预扣积分'))
 }
 
-console.log('\n【3】system 长度仍在量级内（空上下文 2592，允许 ±10%）')
+// 批次 2 在契约里加了一段「决策口径」后空上下文为 2958（批次 1 基线 2702，仍在 +10% 内）
+console.log('\n【3】system 长度仍在量级内（空上下文 2702，允许 ±10%）')
 {
   const system = buildSystemPrompt({ brief: '', summary: '' })
   check(
-    `空上下文 system ∈ [2333, 2851]（现在 ${system.length}）`,
-    system.length >= 2333 && system.length <= 2851,
+    `空上下文 system ∈ [2432, 2972]（现在 ${system.length}）`,
+    system.length >= 2432 && system.length <= 2972,
   )
 }
 

@@ -615,27 +615,40 @@ await (async () => {
 
 await (async () => {
     const { ctx } = createFakeContext()
+    // 批次 2：面板点选项只回代号；回执里的「代号 + 名称 + 特点」由 shared 统一拼出来
     const answers = [
-        { question: '要做什么产品？', answer: '保温杯' },
-        { question: '成片还是单张？', answer: '单张' },
+        { optionKey: 'A', text: '' },
+        { optionKey: 'B', text: '' },
     ]
     ctx.askUser = async () => ({ answers })
     const res = await run(ctx, 'ask_user', {
         context: '先确认目标与产物',
         questions: [
-            { question: '要做什么产品？', options: ['保温杯', '耳机'] },
+            { question: '要做什么产品？', options: [{ key: 'A', label: '保温杯', notes: ['便携'] }, { key: 'B', label: '耳机' }] },
             { question: '成片还是单张？', options: ['成片', '单张'] },
         ],
     })
     assert(res.ok, '正常调用应成功')
     const parsed = JSON.parse(res.result)
     assert(parsed.answered === true, `回执必须是 JSON 且 answered:true：${res.result}`)
+    const first = parsed.answers?.[0]
     assert(
-        JSON.stringify(parsed.answers) === JSON.stringify(answers),
-        `回执里的 answers 应与注入回调的返回值一致：${res.result}`,
+        first?.choice?.key === 'A'
+            && first?.choice?.label === '保温杯'
+            && JSON.stringify(first?.choice?.notes) === JSON.stringify(['便携']),
+        `回执必须带代号 + 名称 + 特点：${res.result}`,
+    )
+    assert(
+        first.answer.includes('保温杯') && first.answer.includes('便携'),
+        `给模型看的答案要含名称与特点：${res.result}`,
+    )
+    const second = parsed.answers?.[1]
+    assert(
+        second?.choice?.key === 'B' && second?.choice?.label === '单张',
+        `旧纯字符串选项要按位置补代号并回名称：${res.result}`,
     )
     passed += 1
-    console.log('  ok   ask_user 正常调用 → JSON 回执、answers 与注入回调一致')
+    console.log('  ok   ask_user 正常调用 → 回执带代号 + 名称 + 特点（兼容旧纯字符串选项）')
 })()
 
 await (async () => {
