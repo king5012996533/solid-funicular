@@ -13,6 +13,7 @@ export interface AdminProviderItem {
   imageEndpoint: string
   imageEditEndpoint: string
   videoEndpoint: string
+  audioEndpoint: string
   defaultChatModel: string
   supportedTypes: string[]
   isEnabled: boolean
@@ -43,6 +44,7 @@ export interface AdminProviderPayload {
   imageEndpoint: string
   imageEditEndpoint: string
   videoEndpoint: string
+  audioEndpoint: string
   defaultChatModel: string
   supportedTypes: string[]
   isEnabled: boolean

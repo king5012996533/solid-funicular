@@ -43,6 +43,8 @@ const DEFAULT_CREATION_MODE_OPTIONS = [
   { value: 'agent', label: 'Agent 模式' },
   { value: 'image', label: '图片生成' },
   { value: 'video', label: '视频生成' },
+  // 音频生成：与前端 src/api/system-config.ts 的同名清单必须一致，否则入口一边有一边没有
+  { value: 'audio', label: '音频生成' },
   { value: 'digital-human', label: '数字人' },
   { value: 'motion', label: '动作模仿' },
 ]

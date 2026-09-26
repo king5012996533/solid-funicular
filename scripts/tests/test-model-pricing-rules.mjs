@@ -16,6 +16,8 @@ import {
   getGenerationCost,
   matchPricingTier,
   normalizeVideoSeconds,
+  normalizeAudioSeconds,
+  AUDIO_SECONDS_MAX,
   validateModelPricing,
 } from '../../src/shared/model-pricing-rules.ts'
 
@@ -41,6 +43,21 @@ check('0 / 负数 / 非法值 → 保底 1 秒（不产生 0 或负价）', () =
 })
 check('范围内的值原样通过', () => {
   assert(normalizeVideoSeconds(8) === 8, '8 秒不该被改')
+})
+
+check('音频时长走自己的区间：180 秒**不能**被砍成 20（那是视频的上限）', () => {
+  assert(normalizeAudioSeconds(180) === 180, `180 秒应原样通过，实际 ${normalizeAudioSeconds(180)}`)
+  assert(normalizeAudioSeconds(30) === 30, `30 秒应原样通过，实际 ${normalizeAudioSeconds(30)}`)
+})
+check('音频时长：0 / 负数 / NaN 保底 1 秒（不产生 0 或负价）', () => {
+  assert(normalizeAudioSeconds(0) === 1 && normalizeAudioSeconds(-5) === 1, '应保底 1')
+  assert(normalizeAudioSeconds(Number.NaN) === 1, 'NaN 应保底 1')
+})
+check(`音频时长上限是 ${AUDIO_SECONDS_MAX} 秒，超出要被拦住`, () => {
+  assert(normalizeAudioSeconds(99999) === AUDIO_SECONDS_MAX, `应 clamp 到 ${AUDIO_SECONDS_MAX}`)
+})
+check('反证：音频若误用视频的 20 秒上限，180 秒就会被改掉', () => {
+  assert(normalizeVideoSeconds(180) !== 180, '视频 clamp 确实会改掉 180 —— 所以音频不能复用它')
 })
 
 console.log('\n== 请求参数归一化（结算与预估从同一处解释请求）==')

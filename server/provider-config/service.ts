@@ -29,7 +29,8 @@ export interface PublicModelCatalogItem {
   providerId: string
   providerCode: string
   providerName: string
-  category: 'CHAT' | 'IMAGE' | 'VIDEO'
+  /** 与 AiModel.category 同口径；加了 AUDIO 后这里的联合必须跟上一处改，否则目录构造处会报「ModelCategory 不能赋值」 */
+  category: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
   label: string
   modelKey: string
   description: string
@@ -45,11 +46,14 @@ export interface PublicModelCatalogResult {
     chat: PublicModelCatalogItem[]
     image: PublicModelCatalogItem[]
     video: PublicModelCatalogItem[]
+    /** 音频/音乐模型（2026-09-26 新增一类生成）。前端读取应当容错：字段缺失按空数组处理 */
+    audio: PublicModelCatalogItem[]
   }
   defaults: {
     chat: string
     image: string
     video: string
+    audio: string
   }
 }
 
@@ -67,6 +71,8 @@ export interface AdminProviderPayload {
   imageEndpoint?: string
   imageEditEndpoint?: string
   videoEndpoint?: string
+  /** 音频/音乐端点（2026-09-26 新增一类生成，见 schema 注释） */
+  audioEndpoint?: string
   defaultChatModel?: string
   supportedTypes?: string[]
   isEnabled?: boolean
@@ -137,6 +143,7 @@ const normalizeProviderPayload = (payload: AdminProviderPayload, options: { isCr
     imageEndpoint: String(payload.imageEndpoint || '/images/generations').trim() || '/images/generations',
     imageEditEndpoint: String(payload.imageEditEndpoint || '/images/edits').trim() || '/images/edits',
     videoEndpoint: String(payload.videoEndpoint || '/videos').trim() || '/videos',
+    audioEndpoint: String(payload.audioEndpoint || '/audio/generations').trim() || '/audio/generations',
     defaultChatModel: String(payload.defaultChatModel || '').trim(),
     supportedTypes: normalizeSupportedTypes(payload.supportedTypes),
     isEnabled: payload.isEnabled !== false,
@@ -157,6 +164,7 @@ const buildProviderListItem = (provider: {
   imageEndpoint: string
   imageEditEndpoint: string
   videoEndpoint: string
+  audioEndpoint: string
   defaultChatModel: string | null
   supportedTypesJson: unknown
   isEnabled: boolean
@@ -189,6 +197,7 @@ const buildProviderListItem = (provider: {
     imageEndpoint: provider.imageEndpoint,
     imageEditEndpoint: provider.imageEditEndpoint,
     videoEndpoint: provider.videoEndpoint,
+    audioEndpoint: provider.audioEndpoint,
     defaultChatModel: provider.defaultChatModel || '',
     supportedTypes,
     isEnabled: provider.isEnabled,
@@ -230,6 +239,7 @@ const materializeLegacyProvider = async () => {
       imageEndpoint: legacyConfig.imageEndpoint,
       imageEditEndpoint: '/images/edits',
       videoEndpoint: legacyConfig.videoEndpoint,
+      audioEndpoint: '/audio/generations',
       defaultChatModel: legacyConfig.defaultChatModel,
       supportedTypesJson: DEFAULT_SUPPORTED_TYPES,
       isEnabled: legacyConfig.isEnabled,
@@ -376,6 +386,7 @@ export const createAdminProvider = async (payload: AdminProviderPayload) => {
       imageEndpoint: normalizedPayload.imageEndpoint,
       imageEditEndpoint: normalizedPayload.imageEditEndpoint,
       videoEndpoint: normalizedPayload.videoEndpoint,
+      audioEndpoint: normalizedPayload.audioEndpoint,
       defaultChatModel: normalizedPayload.defaultChatModel || null,
       supportedTypesJson: normalizedPayload.supportedTypes,
       isEnabled: normalizedPayload.isEnabled,
@@ -435,6 +446,7 @@ export const updateAdminProvider = async (id: string, payload: AdminProviderPayl
       imageEndpoint: normalizedPayload.imageEndpoint,
       imageEditEndpoint: normalizedPayload.imageEditEndpoint,
       videoEndpoint: normalizedPayload.videoEndpoint,
+      audioEndpoint: normalizedPayload.audioEndpoint,
       defaultChatModel: normalizedPayload.defaultChatModel || null,
       supportedTypesJson: normalizedPayload.supportedTypes,
       isEnabled: normalizedPayload.isEnabled,
@@ -519,6 +531,7 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
       const chatModels: PublicModelCatalogItem[] = []
       const imageModels: PublicModelCatalogItem[] = []
       const videoModels: PublicModelCatalogItem[] = []
+      const audioModels: PublicModelCatalogItem[] = []
 
       /**
        * 配了密钥的厂商 id。
@@ -575,6 +588,8 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
             imageModels.push(currentItem)
           } else if (model.category === 'VIDEO') {
             videoModels.push(currentItem)
+          } else if (model.category === 'AUDIO') {
+            audioModels.push(currentItem)
           }
         }
       }
@@ -583,6 +598,7 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
         chat: chatModels.find(item => item.isDefault)?.selectionKey || pickUsableModel(chatModels)?.selectionKey || '',
         image: pickUsableModel(imageModels)?.selectionKey || '',
         video: pickUsableModel(videoModels)?.selectionKey || '',
+        audio: pickUsableModel(audioModels)?.selectionKey || '',
       }
 
       return {
@@ -591,6 +607,7 @@ export const getPublicModelCatalog = async (): Promise<PublicModelCatalogResult>
           chat: chatModels,
           image: imageModels,
           video: videoModels,
+          audio: audioModels,
         },
         defaults,
       }
@@ -673,6 +690,7 @@ export const getDefaultProviderOverview = async () => {
     imageEndpoint: provider.imageEndpoint,
     imageEditEndpoint: provider.imageEditEndpoint,
     videoEndpoint: provider.videoEndpoint,
+    audioEndpoint: provider.audioEndpoint,
     isEnabled: provider.isEnabled,
   }
 }

@@ -2,7 +2,7 @@ import { readJsonBody, sendJson } from '../ai-gateway/shared'
 import type { AgentRunState } from '../../src/types/agent'
 
 export interface GenerationOutputPayload {
-  outputType: 'image' | 'video' | 'text' | 'file'
+  outputType: 'image' | 'video' | 'audio' | 'text' | 'file'
   url?: string
   textContent?: string
   mimeType?: string

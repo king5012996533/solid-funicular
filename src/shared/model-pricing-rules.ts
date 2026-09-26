@@ -56,7 +56,7 @@ export interface ModelPricingSpec {
 
 /** 归一化后、用于定价的参数（各渠道的原始参数先经 normalize 变成它） */
 export interface NormalizedGenerationParams {
-  kind: 'image' | 'video'
+  kind: 'image' | 'video' | 'audio'
   /** 图片：请求的尺寸；视频：分辨率档 */
   width?: number
   height?: number
@@ -134,6 +134,26 @@ export const normalizeVideoSeconds = (input: number, max = 20, min = 1): number 
 }
 
 /**
+ * 音频时长归一化：**clamp 到 1~600 秒**。
+ *
+ * 为什么不复用 `normalizeVideoSeconds`：那个的上限是 20 秒，是视频模型的档位决定的。
+ * 音频/音乐常见 30s / 60s / 180s，套 20 秒的上限会把它们统统砍成 20 ——
+ * 「请求 180 秒、按 20 秒记账」正是我们已经在视频上踩过的坑，不能在新分类上再犯一遍。
+ */
+export const AUDIO_SECONDS_MIN = 1
+export const AUDIO_SECONDS_MAX = 600
+
+export const normalizeAudioSeconds = (
+  input: unknown,
+  max = AUDIO_SECONDS_MAX,
+  min = AUDIO_SECONDS_MIN,
+): number => {
+  const value = Math.trunc(Number(input) || 0)
+  if (!Number.isFinite(value)) return min
+  return Math.max(min, Math.min(max, value))
+}
+
+/**
  * 把上游请求里的原始规格归一化成定价入参（结算与预估都从它拿值，避免两边各自解释请求）。
  *
  * - `size` 形如 `1024x1024`（个别渠道用 `×`）：拆成长宽供 longEdge/shortEdge 归档，
@@ -143,7 +163,7 @@ export const normalizeVideoSeconds = (input: number, max = 20, min = 1): number 
  * - `count` 保底 1（perTask 渠道不随张数变化，perImage 渠道则要按张乘）。
  */
 export const buildNormalizedGenerationParams = (input: {
-  kind: 'image' | 'video'
+  kind: 'image' | 'video' | 'audio'
   /** 上游尺寸字符串，如 `1024x1024` / `1536x1024` */
   size?: unknown
   /** 一次请求产出几个（图片张数）；缺省按 1 */
@@ -162,6 +182,10 @@ export const buildNormalizedGenerationParams = (input: {
     ...(sizeText ? { label: sizeText } : {}),
     ...(input.kind === 'video' && Number.isFinite(secondsValue) && secondsValue > 0
       ? { seconds: normalizeVideoSeconds(secondsValue) }
+      : {}),
+    // 音频走自己的区间（见 normalizeAudioSeconds 的注释：不能用视频的 1~20）
+    ...(input.kind === 'audio' && Number.isFinite(secondsValue) && secondsValue > 0
+      ? { seconds: normalizeAudioSeconds(secondsValue) }
       : {}),
   }
 }

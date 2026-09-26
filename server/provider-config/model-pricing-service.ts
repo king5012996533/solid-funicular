@@ -134,6 +134,14 @@ const buildPricingPreview = (input: {
   defaultParamsJson: unknown
 }) => {
   const size = readDefaultSize(input.defaultParamsJson)
+  /*
+   * 预览用的参数要跟真实扣费用的同口径：
+   *   视频按秒（kind='video' + seconds）
+   *   音频也按秒（kind='audio' + seconds）—— 音频常用 perSecond / perTask 两种价，
+   *     但时长仍是它最可能变动的维度，所以预览给一个秒数，让运营看到的是"上限那档"
+   *   图片按张（kind='image' + count）
+   * 音频的默认时长同样从 defaultParamsJson 里读，读不到就退回一个保守值。
+   */
   const params: NormalizedGenerationParams =
     input.category === 'VIDEO'
       ? {
@@ -141,7 +149,13 @@ const buildPricingPreview = (input: {
           seconds: readDefaultVideoSeconds(input.defaultParamsJson),
           count: 1,
         }
-      : { kind: 'image', count: 1, ...(size ? { label: size } : {}) }
+      : input.category === 'AUDIO'
+        ? {
+            kind: 'audio',
+            seconds: readDefaultVideoSeconds(input.defaultParamsJson),
+            count: 1,
+          }
+        : { kind: 'image', count: 1, ...(size ? { label: size } : {}) }
 
   const result = getGenerationCost({
     spec: input.spec,

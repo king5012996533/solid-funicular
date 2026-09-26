@@ -193,6 +193,109 @@ export const extractImageUrlsFromText = (text: string) => {
   return urls
 }
 
+const isRecordValue = (value: unknown): value is Record<string, unknown> => {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+const readTrimmedString = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+const dedupeStrings = (values: string[]) => Array.from(new Set(values.filter(Boolean)))
+
+/** b64 音频的 MIME：优先用上游声明的格式，未声明时按 mp3 兜底（与图片一律当 png 同一套做法）。 */
+const resolveAudioDataUrlMimeType = (item: Record<string, unknown>) => {
+  const declared = readTrimmedString(item.mime_type)
+    || readTrimmedString(item.mimeType)
+    || readTrimmedString(item.format)
+  return /^audio\//i.test(declared) ? declared.toLowerCase() : 'audio/mpeg'
+}
+
+/**
+ * 音频扩展名/路径特征：用于从纯文本里挑出音频地址，避免把普通网页链接当音频。
+ * mp4 不在此列 —— 它既可能是音频容器也可能是视频，误当音频会把视频链接塞进音频输出。
+ */
+const AUDIO_URL_PATTERN = /\.(mp3|wav|ogg|oga|m4a|aac|flac|opus|weba)(\?|#|$)/i
+
+/**
+ * 从上游 JSON 响应里提取音频地址，覆盖三类已知形状（不同厂商各占一种）：
+ * - OpenAI 风格：`{ data: [{ url }] }` / `{ data: [{ b64_json }] }`
+ * - 任务制取件风格：`{ output: { audio_url } }` / `{ output: { url } }` / 顶层 `{ audio_url }`
+ * - 部分网关把音频塞在 `data[].audio_url` 或 `output.audio.url`
+ *
+ * b64 统一转成 `data:audio/...;base64,...`，与图片那边一样让前端能直接播放。
+ */
+export const extractAudioUrlsFromJsonResponse = (result: unknown) => {
+  const urls: string[] = []
+  if (!isRecordValue(result)) {
+    return urls
+  }
+
+  const pushItem = (item: unknown) => {
+    if (typeof item === 'string') {
+      const directUrl = item.trim()
+      if (directUrl) urls.push(directUrl)
+      return
+    }
+    if (!isRecordValue(item)) {
+      return
+    }
+    const url = readTrimmedString(item.url)
+      || readTrimmedString(item.audio_url)
+      || readTrimmedString(item.audioUrl)
+    if (url) {
+      urls.push(url)
+      return
+    }
+    const b64 = readTrimmedString(item.b64_json) || readTrimmedString(item.b64Json)
+    if (b64) {
+      urls.push(`data:${resolveAudioDataUrlMimeType(item)};base64,${b64}`)
+    }
+  }
+
+  if (Array.isArray(result.data)) {
+    for (const item of result.data) {
+      pushItem(item)
+    }
+  }
+
+  // 任务制取件：output 可能直接是对象、字符串地址，或再包一层 audio
+  pushItem(result.output)
+  if (isRecordValue(result.output)) {
+    const nestedAudio = result.output.audio
+    pushItem(nestedAudio)
+    if (isRecordValue(nestedAudio)) {
+      pushItem(nestedAudio.url)
+    }
+  }
+
+  // 顶层字段（少数网关直接平铺）
+  pushItem(result)
+
+  return dedupeStrings(urls)
+}
+
+/**
+ * 从纯文本里提取音频地址：data:audio 内联、带音频扩展名的裸链接、路径含 /audio/ 的链接。
+ * markdown 链接里的地址同样会被裸链接正则捞到，因此不必单独处理。
+ */
+export const extractAudioUrlsFromText = (text: string) => {
+  const urls: string[] = []
+  const normalizedText = String(text || '')
+
+  const base64Audio = normalizedText.match(/data:audio\/[^;]+;base64,[A-Za-z0-9+/=]+/g)
+  if (base64Audio) {
+    urls.push(...base64Audio)
+  }
+
+  const candidates = normalizedText.match(/https?:\/\/[^\s"'<>)\]}]+/g) || []
+  for (const candidate of candidates) {
+    if (AUDIO_URL_PATTERN.test(candidate) || /\/audio\//i.test(candidate)) {
+      urls.push(candidate)
+    }
+  }
+
+  return dedupeStrings(urls)
+}
+
 export const parseUpstreamStreamChunk = (chunk: string) => {
   try {
     const parsed = JSON.parse(chunk)

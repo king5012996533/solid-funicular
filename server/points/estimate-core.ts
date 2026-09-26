@@ -13,7 +13,7 @@
  *   2. 同一「模型 + 规格 + 张数」只解析一次价（perImage 随张数变、perTask 不变）。
  */
 
-export type EstimateEndpointType = 'chat' | 'image' | 'video'
+export type EstimateEndpointType = 'chat' | 'image' | 'video' | 'audio'
 
 export interface EstimateItemInput {
   model?: unknown

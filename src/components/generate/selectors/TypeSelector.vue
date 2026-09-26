@@ -14,6 +14,7 @@ const creationTypes = [
   { value: 'agent' as CreationType, label: 'Agent 模式', icon: 'agent' },
   { value: 'image' as CreationType, label: '图片生成', icon: 'image' },
   { value: 'video' as CreationType, label: '视频生成', icon: 'video' },
+  { value: 'audio' as CreationType, label: '音频生成', icon: 'audio' },
   { value: 'digital-human' as CreationType, label: '数字人', icon: 'digital-human' },
   { value: 'motion' as CreationType, label: '动作模仿', icon: 'motion' }
 ]
@@ -160,6 +161,15 @@ const selectType = (type: CreationType) => {
                         fill="currentColor"></path>
                 </g>
               </svg>
+              <!-- 音频生成图标 -->
+              <svg v-else-if="modelValue === 'audio'" width="1em" height="1em" viewBox="0 0 24 24"
+                   preserveAspectRatio="xMidYMid meet" fill="none"
+                   role="presentation" xmlns="http://www.w3.org/2000/svg">
+                <g>
+                  <path d="M4 10v4M8 7v10M12 4.5v15M16 7v10M20 10v4"
+                        stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+                </g>
+              </svg>
               <!-- 数字人图标 -->
               <svg v-else-if="modelValue === 'digital-human'" width="1em" height="1em" viewBox="0 0 24 24"
                    preserveAspectRatio="xMidYMid meet" fill="none"
@@ -241,6 +251,15 @@ const selectType = (type: CreationType) => {
                   <path data-follow-fill="currentColor"
                         d="M12.534 1.626c5.489.278 9.854 4.817 9.854 10.374l-.001.023a6.098 6.098 0 0 0-2.04-.836 8.388 8.388 0 1 0-6.613 9.02 6.184 6.184 0 0 0 1.41 1.693c-.992.314-2.048.488-3.144.488l-.535-.014c-5.311-.27-9.57-4.528-9.839-9.84L1.612 12C1.612 6.263 6.263 1.613 12 1.613l.534.013Zm6.425 12.95a.728.728 0 0 1 1.342 0 4.579 4.579 0 0 0 2.394 2.415.737.737 0 0 1 0 1.35 4.578 4.578 0 0 0-2.394 2.414.728.728 0 0 1-1.342 0 4.578 4.578 0 0 0-2.394-2.414.737.737 0 0 1 0-1.35 4.579 4.579 0 0 0 2.394-2.415Zm-8.325-6.06c.444-.047.986.266 2.07.891l1.19.688c1.082.625 1.623.938 1.805 1.346a1.37 1.37 0 0 1 0 1.118c-.181.408-.722.721-1.805 1.347l-1.19.687c-1.084.625-1.626.937-2.07.89a1.375 1.375 0 0 1-.969-.558c-.262-.361-.262-.987-.262-2.237v-1.375c0-1.25 0-1.876.262-2.238.23-.315.582-.518.969-.56Z"
                         fill="currentColor"></path>
+                </g>
+              </svg>
+              <!-- 音频生成图标 -->
+              <svg v-else-if="type.value === 'audio'" width="1em" height="1em" viewBox="0 0 24 24"
+                   preserveAspectRatio="xMidYMid meet" fill="none"
+                   role="presentation" xmlns="http://www.w3.org/2000/svg">
+                <g>
+                  <path d="M4 10v4M8 7v10M12 4.5v15M16 7v10M20 10v4"
+                        stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
                 </g>
               </svg>
               <!-- 数字人图标 -->

@@ -110,6 +110,8 @@ interface GeneratingRecord {
   /** 思考结束时间戳（毫秒）。完成态时设置，用于 UI 显示固定耗时。 */
   thinkingEndedAt?: number
   images: string[]
+  /** 音频任务的结果 URL（服务端 record.audios，或 outputs 里的 audio 输出） */
+  audios?: string[]
   done: boolean
   stopped?: boolean
   /**
@@ -1635,6 +1637,17 @@ const formatGroupLabel = (date: Date): string => {
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
 }
 
+/** 音频任务的结果 URL：优先用服务端额外给的 record.audios，缺失时从 outputs 里挑 audio 输出 */
+const readPersistedAudioUrls = (record: PersistedGenerationRecord): string[] => {
+  const withAudio = record as PersistedGenerationRecord & { audios?: unknown }
+  const raw = Array.isArray(withAudio.audios)
+      ? withAudio.audios
+      : (Array.isArray(record.outputs) ? record.outputs : [])
+          .filter(output => output.outputType === 'audio' && output.url)
+          .map(output => output.url)
+  return raw.map(item => String(item || '').trim()).filter(Boolean)
+}
+
 // 将后端返回的持久化记录还原成页面使用结构。
 const createRecordFromPersisted = (record: PersistedGenerationRecord): GeneratingRecord => {
   const isImageRecord = record.type === 'image'
@@ -1644,7 +1657,9 @@ const createRecordFromPersisted = (record: PersistedGenerationRecord): Generatin
       ? 'IMAGE'
       : record.type === 'video'
         ? 'VIDEO'
-        : 'CHAT'
+        : record.type === 'audio'
+          ? 'AUDIO'
+          : 'CHAT'
   return {
     id: nextId++,
     dbId: record.id,
@@ -1671,6 +1686,7 @@ const createRecordFromPersisted = (record: PersistedGenerationRecord): Generatin
         : record.content,
     thinkingContent: record.thinkingContent || '',
     images: record.images,
+    audios: readPersistedAudioUrls(record),
     done: record.done,
     stopped: Boolean(record.stopped),
     progressStage: isImageRecord || isResearchRecord
@@ -1761,6 +1777,7 @@ const syncRecordWithPersisted = (record: GeneratingRecord, saved: PersistedGener
       ? 100
       : Math.max(record.progressPercent || 0, mapTaskStageToProgressPercent(record.progressStage))
   record.images = Array.isArray(saved.images) ? [...saved.images] : []
+  record.audios = readPersistedAudioUrls(saved)
   if (Array.isArray(saved.referenceImages) && saved.referenceImages.length) {
     record.referenceImages = [...saved.referenceImages]
   } else if (!Array.isArray(record.referenceImages)) {
@@ -2610,7 +2627,9 @@ const handleSend = async (message: string, type: CreationType, options?: { model
       ? 'IMAGE'
       : recordType === 'video'
         ? 'VIDEO'
-        : 'CHAT'
+        : recordType === 'audio'
+          ? 'AUDIO'
+          : 'CHAT'
   const record: GeneratingRecord = {
     id: recordId,
     sessionId: activeSession.id,
@@ -2682,6 +2701,8 @@ const handleSend = async (message: string, type: CreationType, options?: { model
   } else if (record.type === 'image') {
     // 一次对话内按用户设定的 count 生成 N 张图：单条 record 携带 N 个 GenerationOutput。
     void startImageGenerationTask(generatingRecords.value[0])
+  } else if (record.type === 'audio') {
+    void startAudioGenerationTask(generatingRecords.value[0])
   }
 }
 
@@ -2914,6 +2935,47 @@ const startImageGenerationTask = async (record: GeneratingRecord) => {
     )
     record.progressPercent = 100
     record.error = formatGenerationError(error instanceof Error ? error.message : '', '图片生成失败')
+  }
+}
+
+// 音频生成同样提交服务端任务，由后端继续执行并写回生成记录。
+// requestBody 严格按冻结契约：providerId / model / prompt / duration（时长单位秒）。
+const startAudioGenerationTask = async (record: GeneratingRecord) => {
+  try {
+    const { providerId, modelKey: requestModelKey } = await resolveGenerationTaskModel({
+      modelKey: record.modelKey,
+      category: 'AUDIO',
+      missingModelMessage: '未配置音频模型，请先检查后台模型配置',
+    })
+
+    const saved = await createGenerationTask({
+      sessionId: record.sessionId,
+      source: 'generate',
+      type: 'audio',
+      prompt: record.prompt,
+      model: record.model,
+      modelKey: requestModelKey,
+      duration: record.duration,
+      requestBody: {
+        providerId,
+        model: requestModelKey,
+        prompt: record.prompt,
+        duration: record.duration,
+      },
+    })
+
+    syncRecordWithPersisted(record, saved)
+    connectGenerationTaskStream(record)
+  } catch (error: unknown) {
+    record.done = true
+    record.stopped = false
+    record.progressStage = 'failed'
+    record.progressMessage = resolveTaskStageLabel(
+        'failed',
+        formatGenerationError(error instanceof Error ? error.message : '', '音频生成失败'),
+    )
+    record.progressPercent = 100
+    record.error = formatGenerationError(error instanceof Error ? error.message : '', '音频生成失败')
   }
 }
 
@@ -3270,6 +3332,33 @@ onUnmounted(() => {
                     :thinking-started-at="record.thinkingStartedAt"
                     :thinking-ended-at="record.thinkingEndedAt"
                 />
+                <div v-else-if="record.type === 'audio'" class="audio-record-canana">
+                  <div class="group-title">{{ record.time }}</div>
+                  <div class="audio-record-card">
+                    <div class="audio-record-head">
+                      <span class="audio-record-model">{{ record.model || record.modelKey || '音频模型' }}</span>
+                      <span v-if="record.duration" class="audio-record-duration">{{ record.duration }}s</span>
+                    </div>
+                    <p class="audio-record-prompt">{{ record.prompt }}</p>
+                    <div v-if="record.error" class="audio-record-error">
+                      {{ formatGenerationError(record.error, '音频生成失败') }}
+                    </div>
+                    <template v-else-if="record.done && record.audios && record.audios.length">
+                      <audio
+                        v-for="(audioUrl, audioIndex) in (record.audios || [])"
+                        :key="audioIndex"
+                        class="audio-record-player"
+                        controls
+                        preload="metadata"
+                        :src="audioUrl"
+                      ></audio>
+                    </template>
+                    <div v-else-if="!record.done" class="audio-record-progress">
+                      {{ record.progressMessage || '音频生成中' }}
+                    </div>
+                    <div v-else class="audio-record-empty">任务已结束但没有产出音频，可以重试</div>
+                  </div>
+                </div>
                 <ImageLoadingRecord
                     v-else
                     :time="record.time"
@@ -3454,5 +3543,64 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+/* 音频生成记录：卡片里只摆一条音频播放器，颜色 / 圆角走既有 token */
+.audio-record-canana {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audio-record-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 12px;
+  background: var(--bg-block-secondary-default);
+}
+
+.audio-record-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.audio-record-model {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.audio-record-duration {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.audio-record-prompt {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.audio-record-player {
+  width: 100%;
+}
+
+.audio-record-progress,
+.audio-record-empty {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.audio-record-error {
+  color: var(--functional-danger, #f53f3f);
+  font-size: 13px;
+  line-height: 20px;
 }
 </style>

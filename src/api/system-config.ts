@@ -132,6 +132,13 @@ const DEFAULT_CREATION_MODE_OPTIONS: ConversationModeOptionConfig[] = [
   { value: 'agent', label: 'Agent 模式' },
   { value: 'image', label: '图片生成' },
   { value: 'video', label: '视频生成' },
+  /*
+   * 音频生成（2026-09-26）加进默认清单。
+   * 为什么必须加在这里：创作类型下拉是被**后台配置的「会话入口模式选项」白名单**过滤的，
+   * 只加 CreationType 枚举的话，代码里有这个类型、界面上却永远看不到入口。
+   * 没有可用音频模型时工具栏会显示「未配置音频模型」并禁用发送，不会变成一个点不动的假入口。
+   */
+  { value: 'audio', label: '音频生成' },
   { value: 'digital-human', label: '数字人' },
   { value: 'motion', label: '动作模仿' },
 ]

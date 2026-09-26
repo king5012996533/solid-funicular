@@ -145,6 +145,8 @@ const mapGenerationType = (type: string) => {
       return 'IMAGE'
     case 'video':
       return 'VIDEO'
+    case 'audio':
+      return 'AUDIO'
     case 'digital-human':
       return 'DIGITAL_HUMAN'
     case 'motion':
@@ -188,6 +190,8 @@ const mapOutputType = (outputType: GenerationOutputPayload['outputType']) => {
   switch (outputType) {
     case 'video':
       return 'VIDEO'
+    case 'audio':
+      return 'AUDIO'
     case 'text':
       return 'TEXT'
     case 'file':
@@ -198,9 +202,16 @@ const mapOutputType = (outputType: GenerationOutputPayload['outputType']) => {
   }
 }
 
-// 只把图片和视频输出同步为可展示资源。
+// 只把图片、视频与音频输出同步为可展示资源。
 const isDisplayableAssetOutput = (outputType: GenerationOutputPayload['outputType']) => {
-  return outputType === 'image' || outputType === 'video'
+  return outputType === 'image' || outputType === 'video' || outputType === 'audio'
+}
+
+// 输出类型 → 资产类型三值映射（素材表 AssetType 只有 IMAGE/VIDEO/AUDIO）。
+const mapAssetType = (outputType: GenerationOutputPayload['outputType']): 'IMAGE' | 'VIDEO' | 'AUDIO' => {
+  if (outputType === 'video') return 'VIDEO'
+  if (outputType === 'audio') return 'AUDIO'
+  return 'IMAGE'
 }
 
 // 统一收敛输出结果，兼容旧的 images 数组与新的 outputs 结构。
@@ -518,7 +529,7 @@ const syncAssetItemsForRecord = async (
         data: {
           // 父表删除重建后 generationOutputId 会被 SetNull，这里刷新到最新 output id。
           generationOutputId: output.id,
-          assetType: output.outputType === 'video' ? 'VIDEO' : 'IMAGE',
+          assetType: mapAssetType(output.outputType),
           coverUrl: output.outputType === 'image' ? output.url : null,
           thumbnailUrl: output.outputType === 'image' ? output.url : null,
           width: output.width || null,
@@ -539,7 +550,7 @@ const syncAssetItemsForRecord = async (
         userId: currentUserId,
         generationRecordId,
         generationOutputId: output.id,
-        assetType: output.outputType === 'video' ? 'VIDEO' : 'IMAGE',
+        assetType: mapAssetType(output.outputType),
         title: null,
         description: null,
         coverUrl: output.outputType === 'image' ? output.url : null,
@@ -803,6 +814,10 @@ const serializeGenerationRecord = (record: any) => ({
   })),
   images: (record.outputs || [])
     .filter((output: any) => output.outputType === 'IMAGE' && output.url)
+    .map((output: any) => output.url),
+  // 音频产物单独给一份 audios（与 images 对偶），前端音频节点直接用它取播放地址。
+  audios: (record.outputs || [])
+    .filter((output: any) => output.outputType === 'AUDIO' && output.url)
     .map((output: any) => output.url),
   agentRun: record.agentRun
     ? {

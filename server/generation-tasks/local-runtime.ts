@@ -9,7 +9,7 @@ export interface LocalRunningGenerationTask {
   strategyKey: GenerationTaskStrategyKey
   abortController: AbortController
   associationNo: string
-  billedEndpointType: 'chat' | 'image' | 'video'
+  billedEndpointType: 'chat' | 'image' | 'video' | 'audio'
   billedPointCost: number
   billedProviderId: string
   billedModelKey: string

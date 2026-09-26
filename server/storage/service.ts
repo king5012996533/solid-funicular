@@ -32,6 +32,16 @@ const getExtensionByMimeType = (mimeType: string) => {
       return '.mp4'
     case 'video/webm':
       return '.webm'
+    case 'audio/mpeg':
+      return '.mp3'
+    case 'audio/wav':
+      return '.wav'
+    case 'audio/ogg':
+      return '.ogg'
+    case 'audio/mp4':
+      return '.m4a'
+    case 'audio/aac':
+      return '.aac'
     case 'text/plain':
       return '.txt'
     case 'application/json':

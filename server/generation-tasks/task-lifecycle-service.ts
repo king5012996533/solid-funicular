@@ -99,7 +99,7 @@ export interface TaskLifecycleContext {
   resolveModelPricingCost: (input: {
     providerId: string
     modelKey: string
-    endpointType: 'image' | 'video'
+    endpointType: 'image' | 'video' | 'audio'
     params?: NormalizedGenerationParams
   }) => Promise<{
     pointCost: number
@@ -115,7 +115,7 @@ export interface TaskLifecycleContext {
     pointCost: number
     sourceId: string
     associationNo: string
-    endpointType: 'chat' | 'image' | 'video'
+    endpointType: 'chat' | 'image' | 'video' | 'audio'
     providerId: string
     modelKey: string
     modelName: string
@@ -132,7 +132,7 @@ export interface TaskLifecycleContext {
     pointCost: number
     sourceId: string
     associationNo: string
-    endpointType: 'chat' | 'image' | 'video'
+    endpointType: 'chat' | 'image' | 'video' | 'audio'
     providerId: string
     modelKey: string
     modelName: string
@@ -278,7 +278,7 @@ export const startGenerationTask = async (
   let committedConsume: {
     associationNo: string
     pointCost: number
-    endpointType: 'chat' | 'image' | 'video'
+    endpointType: 'chat' | 'image' | 'video' | 'audio'
     providerId: string
     modelKey: string
     modelName: string
@@ -498,8 +498,12 @@ export const startGenerationTask = async (
       skillKey,
     })
 
-    // 图片与视频共用这一段创建路径：按任务类型取端点（视频要按秒计价，kind 必须给对）。
-    const billingEndpointType = strategy.key === 'video' ? 'video' : 'image'
+    // 图片、视频与音频共用这一段创建路径：按任务类型取端点（视频按秒、音频按次/秒，kind 必须给对）。
+    const billingEndpointType = strategy.key === 'video'
+      ? 'video'
+      : strategy.key === 'audio'
+        ? 'audio'
+        : 'image'
     const requestBody = payload.requestBody || {}
     const billingDetail = await context.resolveModelPricingCost({
       providerId,

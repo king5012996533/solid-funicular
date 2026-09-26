@@ -50,6 +50,7 @@ import {
 import { GenerationTaskRequestError } from './shared'
 import { getGenerationTaskExecutionStrategy, type GenerationTaskExecutionStrategyContext, type TaskAbortReason } from './execution-strategies'
 import { executeImageTask } from './image-task-executor'
+import { executeAudioTask } from './audio-task-executor'
 import { executeVideoTask } from './video-task-executor'
 import {
   createVideoTaskRequest,
@@ -96,6 +97,7 @@ import {
   parseChatChunkError,
   requestImageGeneration,
   requestImageEdit,
+  requestAudioGeneration,
   resolveWorkspaceImageModel,
   requestAgentWorkspaceModelPlan,
 } from './upstream-helpers'
@@ -121,6 +123,11 @@ const GENERATION_TASK_STAGE_LABELS: Record<string, string> = {
   'image_task:request_success': '图片任务请求成功',
   'image_task:stopped': '图片任务已停止',
   'image_task:failed': '图片任务执行失败',
+  'audio_task:request_start': '音频任务开始请求',
+  'audio_task:request_upstream': '音频任务请求上游',
+  'audio_task:request_success': '音频任务请求成功',
+  'audio_task:stopped': '音频任务已停止',
+  'audio_task:failed': '音频任务执行失败',
   'agent_task:failed': '智能体对话任务执行失败',
   'agent_workspace_task:failed': '智能体工作台任务执行失败',
   'research_task:completed': '研究任务执行完成',
@@ -174,6 +181,7 @@ const buildGatewayAssociationNo = () => {
 const buildTaskExecutionStrategyContext = () => ({
   executeImageGenerationTask,
   executeVideoGenerationTask,
+  executeAudioGenerationTask,
   executeAgentChatTask,
   executeCanvasAgentTask,
   executeAgentWorkspaceTask,
@@ -257,6 +265,31 @@ const executeImageGenerationTask = async (task: RunningGenerationTask, payload: 
       }),
     }),
     requestImageEdit: (input) => requestImageEdit({
+      ...input,
+      fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({
+        ...retryInput,
+        logGenerationTask,
+      }),
+    }),
+    buildInitialRecordPayload,
+    updateGenerationRecord,
+    getGenerationRecordById,
+    emitTaskStreamEvent: (recordId, event) => emitTaskStreamEvent(recordId, event, taskEventEmitterContext),
+    logGenerationTask,
+  })
+}
+
+/**
+ * 音频任务：与图片那条完全对称（一次请求返回成品），上下文装配照 image 来，
+ * 差别只是上游端点类型与响应提取器（见 upstream-helpers 的 requestAudioGeneration）。
+ */
+const executeAudioGenerationTask = async (task: RunningGenerationTask, payload: GenerationTaskStartPayload) => {
+  await executeAudioTask(task, payload, {
+    syncSharedTaskRuntime,
+    ensureTaskNotAborted: (runningTask) => ensureTaskNotAborted(runningTask, { abortTaskWithReason }),
+    emitTaskProgressEvent: (recordId, input) => emitTaskProgressEvent(recordId, input, taskEventEmitterContext),
+    markTaskRetryState,
+    requestAudioGeneration: (input) => requestAudioGeneration({
       ...input,
       fetchWithBurstRateRetry: (retryInput) => fetchWithBurstRateRetry({
         ...retryInput,

@@ -266,7 +266,7 @@ const readModelBillingPower = (value: unknown) => {
 export const resolveModelPricingCost = async (input: {
   providerId: string
   modelKey: string
-  endpointType: 'chat' | 'image' | 'video'
+  endpointType: 'chat' | 'image' | 'video' | 'audio'
   params?: NormalizedGenerationParams
 }): Promise<{
   pointCost: number
@@ -313,14 +313,15 @@ export const resolveModelPricingCost = async (input: {
 export const resolveGenerationPointCost = async (input: {
   providerId: string
   modelKey: string
-  endpointType: 'chat' | 'image' | 'video'
+  endpointType: 'chat' | 'image' | 'video' | 'audio'
   capabilityFlags?: ModelCapabilityFlags | null
 }) => {
   const providerId = String(input.providerId || '').trim()
   const modelKey = String(input.modelKey || '').trim()
   const category = String(input.endpointType || '').trim().toUpperCase()
 
-  if (!providerId || !modelKey || (category !== 'CHAT' && category !== 'IMAGE' && category !== 'VIDEO')) {
+  // 类别白名单必须与 AiModel.category 的枚举同步；漏掉 AUDIO 会让音频模型按「不属于任何类别」被判 0 分。
+  if (!providerId || !modelKey || (category !== 'CHAT' && category !== 'IMAGE' && category !== 'VIDEO' && category !== 'AUDIO')) {
     return {
       pointCost: 0,
       modelId: '',
@@ -376,7 +377,7 @@ export const consumeGenerationPoints = async (input: {
   pointCost: number
   sourceId: string
   associationNo: string
-  endpointType: 'chat' | 'image' | 'video'
+  endpointType: 'chat' | 'image' | 'video' | 'audio'
   providerId: string
   modelKey: string
   modelName?: string
@@ -414,9 +415,11 @@ export const consumeGenerationPoints = async (input: {
       associationNo: input.associationNo,
       remark: input.endpointType === 'video'
         ? '视频生成消耗积分'
-        : input.endpointType === 'image'
-          ? '图片生成消耗积分'
-          : '对话消耗积分',
+        : input.endpointType === 'audio'
+          ? '音频生成消耗积分'
+          : input.endpointType === 'image'
+            ? '图片生成消耗积分'
+            : '对话消耗积分',
       metaJson: {
         endpointType: input.endpointType,
         providerId: input.providerId,
@@ -442,7 +445,7 @@ export const refundGenerationPoints = async (input: {
   pointCost: number
   sourceId: string
   associationNo: string
-  endpointType: 'chat' | 'image' | 'video'
+  endpointType: 'chat' | 'image' | 'video' | 'audio'
   providerId: string
   modelKey: string
   modelName?: string
@@ -498,9 +501,11 @@ export const refundGenerationPoints = async (input: {
       associationNo: input.associationNo,
       remark: input.endpointType === 'video'
         ? '视频生成失败，积分已退回'
-        : input.endpointType === 'image'
-          ? '图片生成失败，积分已退回'
-          : '对话失败，积分已退回',
+        : input.endpointType === 'audio'
+          ? '音频生成失败，积分已退回'
+          : input.endpointType === 'image'
+            ? '图片生成失败，积分已退回'
+            : '对话失败，积分已退回',
       metaJson: {
         endpointType: input.endpointType,
         providerId: input.providerId,

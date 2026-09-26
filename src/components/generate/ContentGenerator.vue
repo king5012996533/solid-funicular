@@ -9,7 +9,7 @@ import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 
 // 导入子组件
 import { TypeSelector, type CreationType } from './selectors'
-import { AgentToolbar, ImageToolbar, VideoToolbar, DigitalHumanToolbar } from './toolbars'
+import { AgentToolbar, ImageToolbar, VideoToolbar, AudioToolbar, DigitalHumanToolbar } from './toolbars'
 import { appendAutoLinkedTokens, mergeReferenceImages, type AutoLinkInput } from './auto-link'
 import AdvancedParamsPopover from './AdvancedParamsPopover.vue'
 import {
@@ -157,6 +157,15 @@ interface ExposedVideoToolbarInstance {
   currentResolution: string
 }
 
+interface ExposedAudioToolbarInstance {
+  currentModelVersion: string
+  currentModelLabel: string
+  currentDuration: string
+  currentFormat: string
+  /** 目录里是否有可用音频模型；false 时发送入口保持不可用 */
+  hasModel: boolean
+}
+
 interface ExposedAgentToolbarInstance {
   currentSkill: string
 }
@@ -296,7 +305,7 @@ const readStoredCreationType = (): CreationType | null => {
   if (typeof window === 'undefined') return null
 
   const rawValue = String(window.localStorage.getItem(GENERATOR_CREATION_TYPE_STORAGE_KEY) || '').trim()
-  return ['agent', 'image', 'video', 'digital-human', 'motion'].includes(rawValue)
+  return ['agent', 'image', 'video', 'audio', 'digital-human', 'motion'].includes(rawValue)
     ? rawValue as CreationType
     : null
 }
@@ -315,7 +324,7 @@ const availableModeOptions = computed(() => {
       value: String(item.value || '').trim() as CreationType,
       label: String(item.label || '').trim(),
     }))
-    .filter(item => ['agent', 'image', 'video', 'digital-human', 'motion'].includes(item.value) && item.label)
+    .filter(item => ['agent', 'image', 'video', 'audio', 'digital-human', 'motion'].includes(item.value) && item.label)
 
   return nextOptions.length
     ? nextOptions
@@ -324,7 +333,7 @@ const availableModeOptions = computed(() => {
 
 const readDefaultCreationType = () => {
   const configuredMode = String(conversationEntrySettings.value?.mode?.defaultMode || '').trim()
-  if (['agent', 'image', 'video', 'digital-human', 'motion'].includes(configuredMode)) {
+  if (['agent', 'image', 'video', 'audio', 'digital-human', 'motion'].includes(configuredMode)) {
     return configuredMode as CreationType
   }
 
@@ -357,6 +366,7 @@ const agentToolbarRef = ref<InstanceType<typeof AgentToolbar> | null>(null)
 const agentToolbarExpandRef = ref<InstanceType<typeof AgentToolbar> | null>(null)
 const imageToolbarRef = ref<InstanceType<typeof ImageToolbar> | null>(null)
 const videoToolbarRef = ref<InstanceType<typeof VideoToolbar> | null>(null)
+const audioToolbarRef = ref<InstanceType<typeof AudioToolbar> | null>(null)
 
 // 当 TypeSelector 弹窗打开时，关闭 AgentToolbar 的面板
 const handleTypeSelectorOpen = () => {
@@ -416,7 +426,7 @@ watch(
     }
 
     const normalizedValue = String(value || '').trim()
-    if (['agent', 'image', 'video', 'digital-human', 'motion'].includes(normalizedValue)) {
+    if (['agent', 'image', 'video', 'audio', 'digital-human', 'motion'].includes(normalizedValue)) {
       currentType.value = normalizedValue as CreationType
     }
   },
@@ -848,6 +858,11 @@ const handleSubmit = async () => {
     return
   }
 
+  // 音频没有可用模型时不提交：发送按钮此时已是禁用态，这里兜住 Enter 等其它入口。
+  if (currentType.value === 'audio' && !audioToolbarRef.value?.hasModel) {
+    return
+  }
+
   // 触发发送事件
   if (currentType.value === 'image') {
     const toolbar = imageToolbarRef.value
@@ -877,6 +892,14 @@ const handleSubmit = async () => {
       feature: toolbar.currentFeature,
       ...unresolvedOptions,
     })
+  } else if (currentType.value === 'audio' && audioToolbarRef.value) {
+    const toolbar = audioToolbarRef.value
+    emit('send', message, currentType.value, {
+      model: toolbar.currentModelLabel,
+      modelKey: toolbar.currentModelVersion,
+      duration: toolbar.currentDuration,
+      ...unresolvedOptions,
+    })
   } else if (currentType.value === 'agent') {
     const toolbar = agentToolbarExpandRef.value || agentToolbarRef.value
     emit('send', message, currentType.value, {
@@ -896,8 +919,11 @@ const handleSubmit = async () => {
   closeMention()
 }
 
-// 是否禁用提交按钮
-const isSubmitDisabled = computed(() => !inputValue.value.trim())
+// 是否禁用提交按钮：没有输入的常规判断，外加「音频分类没有可用模型」这一条 ——
+// 此时工具栏已是「未配置音频模型」空态，发送入口不能假装可用。
+const isSubmitDisabled = computed(() =>
+  !inputValue.value.trim() || (currentType.value === 'audio' && !audioToolbarRef.value?.hasModel),
+)
 
 const getActiveAgentToolbar = () =>
   (agentToolbarExpandRef.value || agentToolbarRef.value) as ExposedAgentToolbarInstance | null
@@ -960,6 +986,19 @@ const applyDraft = async (payload: GeneratorDraftPayload) => {
     return
   }
 
+  if (nextType === 'audio') {
+    const toolbar = audioToolbarRef.value as ExposedAudioToolbarInstance | null
+    if (toolbar) {
+      if (payload.modelKey) {
+        toolbar.currentModelVersion = payload.modelKey
+      }
+      if (payload.duration) {
+        toolbar.currentDuration = payload.duration
+      }
+    }
+    return
+  }
+
   if (nextType === 'agent' && payload.skill) {
     const toolbar = getActiveAgentToolbar()
     if (toolbar) {
@@ -1005,6 +1044,15 @@ const readToolbarParams = (): GeneratorParamsSnapshot | null => {
     }
   }
 
+  if (currentType.value === 'audio') {
+    const toolbar = audioToolbarRef.value as ExposedAudioToolbarInstance | null
+    if (!toolbar) return null
+    return {
+      modelKey: toolbar.currentModelVersion,
+      duration: toolbar.currentDuration,
+    }
+  }
+
   return null
 }
 
@@ -1047,6 +1095,18 @@ const applyInitialParams = (params?: GeneratorParamsSnapshot) => {
     if (params.feature && params.feature !== toolbar.currentFeature) {
       toolbar.currentFeature = params.feature
     }
+    return
+  }
+
+  if (currentType.value === 'audio') {
+    const toolbar = audioToolbarRef.value as ExposedAudioToolbarInstance | null
+    if (!toolbar) return
+    if (params.modelKey && params.modelKey !== toolbar.currentModelVersion) {
+      toolbar.currentModelVersion = params.modelKey
+    }
+    if (params.duration && params.duration !== toolbar.currentDuration) {
+      toolbar.currentDuration = params.duration
+    }
   }
 }
 
@@ -1056,6 +1116,7 @@ watch(
     currentType,
     () => imageToolbarRef.value,
     () => videoToolbarRef.value,
+    () => audioToolbarRef.value,
   ],
   () => {
     applyInitialParams(props.initialParams)
@@ -1100,6 +1161,8 @@ const placeholder = computed(() => {
       return '请描述你想生成的图片'
     case 'video':
       return '输入文字，描述你想创作的画面内容、运动方式等。例如：一个3D形象的小男孩，在公园滑滑板。'
+    case 'audio':
+      return '请描述你想生成的音频内容，例如：一段轻快的钢琴配乐'
     case 'digital-human':
       return '请描述数字人内容'
     case 'motion':
@@ -2011,6 +2074,9 @@ onUnmounted(() => {
 
               <!-- 视频生成工具栏 -->
               <VideoToolbar v-else-if="currentType === 'video'" ref="videoToolbarRef" :placement="popupPlacement" :icon-only="isSidebar && !verboseToolbar" />
+
+              <!-- 音频生成工具栏 -->
+              <AudioToolbar v-else-if="currentType === 'audio'" ref="audioToolbarRef" :placement="popupPlacement" :icon-only="isSidebar && !verboseToolbar" />
 
               <!-- 数字人/动作模仿工具栏 -->
               <DigitalHumanToolbar v-else :placement="popupPlacement" :icon-only="isSidebar && !verboseToolbar" />

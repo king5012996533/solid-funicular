@@ -2,7 +2,7 @@ import { buildApiUrl } from './http'
 import { readApiData } from './response'
 import type { AdminProviderItem } from './admin-providers'
 
-export type AdminModelCategory = 'CHAT' | 'IMAGE' | 'VIDEO'
+export type AdminModelCategory = 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
 
 export interface AdminProviderModelItem {
   id: string

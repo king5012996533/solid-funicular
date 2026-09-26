@@ -13,7 +13,7 @@ export interface GenerationTaskStartPayload {
   sessionId?: string;
   source?: string;
   // 服务端已补齐 video 执行策略（异步任务制），这里同步放开
-  type: "image" | "video" | "agent" | "research";
+  type: "image" | "video" | "audio" | "agent" | "research";
   requestMode?: "image-generation" | "image-edit";
   prompt: string;
   model?: string;
@@ -38,7 +38,7 @@ export interface ResolvedGenerationTaskModelInput {
   modelKey?: string;
   fallbackModelKey?: string;
   // 服务端补齐 video 策略后，视频节点也要用这条解析（原来只有 CHAT/IMAGE）
-  category: "CHAT" | "IMAGE" | "VIDEO";
+  category: "CHAT" | "IMAGE" | "VIDEO" | "AUDIO";
   missingProviderMessage?: string;
   missingModelMessage?: string;
 }

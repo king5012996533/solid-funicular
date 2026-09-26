@@ -180,6 +180,8 @@ model AiProviderConfig {
   chatEndpoint      String                  @default("/chat/completions") @map("chat_endpoint") @db.VarChar(255)
   imageEndpoint     String                  @default("/images/generations") @map("image_endpoint") @db.VarChar(255)
   videoEndpoint     String                  @default("/videos") @map("video_endpoint") @db.VarChar(255)
+  /** 音频端点：与 AiProvider 同名同义，见那边的注释 */
+  audioEndpoint     String                  @default("/audio/generations") @map("audio_endpoint") @db.VarChar(255)
   defaultChatModel  String?                 @map("default_chat_model") @db.VarChar(191)
   defaultImageModel String?                 @map("default_image_model") @db.VarChar(191)
   defaultVideoModel String?                 @map("default_video_model") @db.VarChar(191)
@@ -233,6 +235,14 @@ model AiProvider {
   imageEndpoint      String    @default("/images/generations") @map("image_endpoint") @db.VarChar(255)
   imageEditEndpoint  String    @default("/images/edits") @map("image_edit_endpoint") @db.VarChar(255)
   videoEndpoint      String    @default("/videos") @map("video_endpoint") @db.VarChar(255)
+  /**
+   * 音频/音乐生成端点（2026-09-26 新增）。
+   *
+   * 为什么要独立一列而不是复用 videoEndpoint：音频是**另一类生成**（GenerationType.AUDIO），
+   * 上游的路径与请求体形状都与视频不同（厂商的语音/音乐产品线通常单独开通）。
+   * 默认值只是占位，真实取值由后台配置决定；具体厂商的方言差异留给 extraJson。
+   */
+  audioEndpoint      String    @default("/audio/generations") @map("audio_endpoint") @db.VarChar(255)
   defaultChatModel   String?   @map("default_chat_model") @db.VarChar(191)
   supportedTypesJson Json?     @map("supported_types_json")
   isEnabled          Boolean   @default(true) @map("is_enabled")
@@ -1155,6 +1165,7 @@ enum ModelCategory {
   CHAT
   IMAGE
   VIDEO
+  AUDIO
 }
 
 /// 技能前端交互模式。
@@ -1212,6 +1223,7 @@ enum GenerationType {
   AGENT
   IMAGE
   VIDEO
+  AUDIO
   DIGITAL_HUMAN
   MOTION
 }
@@ -1227,6 +1239,7 @@ enum GenerationStatus {
 enum OutputType {
   IMAGE
   VIDEO
+  AUDIO
   TEXT
   FILE
 }

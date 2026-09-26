@@ -30,6 +30,7 @@ declare module 'vue' {
     ArtForm: typeof import('./src/components/art-design/ArtForm.vue')['default']
     AssetSelector: typeof import('./src/components/generate/common/AssetSelector.vue')['default']
     AssistantSessionList: typeof import('./src/components/canvas/AssistantSessionList.vue')['default']
+    AudioToolbar: typeof import('./src/components/generate/toolbars/AudioToolbar.vue')['default']
     BottomMenu: typeof import('./src/components/home/components/BottomMenu.vue')['default']
     CanvasAppearancePanel: typeof import('./src/components/canvas/CanvasAppearancePanel.vue')['default']
     CanvasConfigNodeShell: typeof import('./src/components/canvas/CanvasConfigNodeShell.vue')['default']

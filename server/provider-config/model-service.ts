@@ -6,7 +6,7 @@ import { ensureProviderSeedData, getAdminProviderDetail } from './service'
 import { toNullableJsonInput } from '../shared/json-input'
 
 export interface ProviderModelPayload {
-  category?: 'CHAT' | 'IMAGE' | 'VIDEO'
+  category?: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
   label?: string
   modelKey?: string
   description?: string
@@ -17,7 +17,7 @@ export interface ProviderModelPayload {
 }
 
 export interface ProviderModelBatchUpsertItemPayload {
-  category?: 'CHAT' | 'IMAGE' | 'VIDEO'
+  category?: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
   label?: string
   modelKey?: string
   description?: string
@@ -33,7 +33,7 @@ export interface ProviderModelBatchUpsertPayload {
 
 const normalizeCategory = (value: string) => {
   const normalizedValue = String(value || '').trim().toUpperCase()
-  if (normalizedValue === 'CHAT' || normalizedValue === 'IMAGE' || normalizedValue === 'VIDEO') {
+  if (normalizedValue === 'CHAT' || normalizedValue === 'IMAGE' || normalizedValue === 'VIDEO' || normalizedValue === 'AUDIO') {
     return normalizedValue as ModelCategory
   }
 

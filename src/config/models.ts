@@ -67,6 +67,13 @@ export interface VideoModel extends BaseCatalogModel {
   durs: DurationOption[]
 }
 
+export interface AudioModel extends BaseCatalogModel {
+  /** 可选时长档位（秒）；模型未声明时为空数组，由工具栏回落默认档 */
+  seconds: number[]
+  /** 可选输出格式（mp3 / wav 等）；模型未声明时为空数组，对应控件不渲染 */
+  formats: string[]
+}
+
 export interface ChatModel extends BaseCatalogModel {}
 
 export interface PublicModelCatalogItem {
@@ -75,7 +82,7 @@ export interface PublicModelCatalogItem {
   providerId: string
   providerCode: string
   providerName: string
-  category: 'CHAT' | 'IMAGE' | 'VIDEO'
+  category: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
   label: string
   modelKey: string
   description: string
@@ -98,11 +105,13 @@ export interface PublicModelCatalogResult {
     chat: PublicModelCatalogItem[]
     image: PublicModelCatalogItem[]
     video: PublicModelCatalogItem[]
+    audio: PublicModelCatalogItem[]
   }
   defaults: {
     chat: string
     image: string
     video: string
+    audio: string
   }
 }
 
@@ -136,11 +145,13 @@ const emptyCatalog: PublicModelCatalogResult = {
     chat: [],
     image: [],
     video: [],
+    audio: [],
   },
   defaults: {
     chat: '',
     image: '',
     video: '',
+    audio: '',
   },
 }
 
@@ -232,6 +243,54 @@ const toVideoModel = (item: PublicModelCatalogItem): VideoModel => {
   return model
 }
 
+/** 读取模型声明的数字档位（音频时长）：非法值丢弃、去重后升序，读不出来就是空数组 */
+const readNumberOptionList = (value: unknown): number[] => {
+  if (!Array.isArray(value)) return []
+  const numbers: number[] = []
+  for (const item of value) {
+    const parsed = Number(item)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      numbers.push(parsed)
+    }
+  }
+  return Array.from(new Set(numbers)).sort((first, second) => first - second)
+}
+
+/** 读取模型声明的字符串档位（音频格式）：去空、去重，字段缺失时当空数组 */
+const readStringOptionList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return []
+  const options: string[] = []
+  for (const item of value) {
+    const normalized = String(item ?? '').trim()
+    if (normalized && !options.includes(normalized)) {
+      options.push(normalized)
+    }
+  }
+  return options
+}
+
+const toAudioModel = (item: PublicModelCatalogItem): AudioModel => {
+  // 音频模型用 capabilityJson.seconds / formats 声明可选档位；
+  // 目录没给（或写坏）时一律当空数组，工具栏据此隐藏对应控件，不抛错。
+  const capability = (item.capabilityJson || {}) as Record<string, unknown>
+  return {
+    id: item.id,
+    key: item.selectionKey,
+    label: item.label,
+    modelKey: item.modelKey,
+    providerId: item.providerId,
+    providerCode: item.providerCode,
+    providerName: item.providerName,
+    description: item.description,
+    capabilityJson: item.capabilityJson,
+    defaultParams: item.defaultParamsJson || {},
+    sortOrder: item.sortOrder,
+    isDefault: item.isDefault,
+    seconds: readNumberOptionList(capability.seconds),
+    formats: readStringOptionList(capability.formats),
+  }
+}
+
 const toChatModel = (item: PublicModelCatalogItem): ChatModel => ({
   id: item.id,
   key: item.selectionKey,
@@ -301,26 +360,33 @@ export const getPublicModelCatalog = () => modelCatalogRef.value
 export const getAllImageModels = (): ImageModel[] => sortModels(modelCatalogRef.value.models.image.map(toImageModel))
 export const getAllVideoModels = (): VideoModel[] => sortModels(modelCatalogRef.value.models.video.map(toVideoModel))
 export const getAllChatModels = (): ChatModel[] => sortModels(modelCatalogRef.value.models.chat.map(toChatModel))
+/** 音频模型：目录缺 audio 字段（旧服务端）时当空数组，不抛错 */
+export const getAllAudioModels = (): AudioModel[] =>
+  sortModels((modelCatalogRef.value.models.audio || []).map(toAudioModel))
 
 /** 模型分类，与目录接口的 category 字段一致 */
-export type PublicModelCategory = 'CHAT' | 'IMAGE' | 'VIDEO'
+export type PublicModelCategory = 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO'
 
 // 目录里 defaults 用的键名是小写分类
-const CATALOG_DEFAULT_KEY: Record<PublicModelCategory, 'chat' | 'image' | 'video'> = {
+const CATALOG_DEFAULT_KEY: Record<PublicModelCategory, 'chat' | 'image' | 'video' | 'audio'> = {
   CHAT: 'chat',
   IMAGE: 'image',
   VIDEO: 'video',
+  AUDIO: 'audio',
 }
 
 /** 取某一分类的目录模型（原始条目，未转成组件用的 ImageModel/VideoModel） */
 export const getCatalogModelsByCategory = (category: PublicModelCategory): PublicModelCatalogItem[] => {
   if (category === 'CHAT') {
-    return modelCatalogRef.value.models.chat
+    return modelCatalogRef.value.models.chat || []
   }
   if (category === 'IMAGE') {
-    return modelCatalogRef.value.models.image
+    return modelCatalogRef.value.models.image || []
   }
-  return modelCatalogRef.value.models.video
+  if (category === 'AUDIO') {
+    return modelCatalogRef.value.models.audio || []
+  }
+  return modelCatalogRef.value.models.video || []
 }
 
 /**
@@ -340,17 +406,23 @@ export const getDefaultModelSelectionKey = (category: PublicModelCategory) => {
 
 export const getDefaultImageModelKey = () => getDefaultModelSelectionKey('IMAGE')
 export const getDefaultVideoModelKey = () => getDefaultModelSelectionKey('VIDEO')
+export const getDefaultAudioModelKey = () => getDefaultModelSelectionKey('AUDIO')
 export const getDefaultChatModelKey = () => getDefaultModelSelectionKey('CHAT')
 
-export const findCatalogModel = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO') => {
+export const findCatalogModel = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO') => {
   const normalizedKey = String(key || '').trim()
   if (!normalizedKey) {
     return null
   }
 
   const groups = category
-    ? [category === 'CHAT' ? modelCatalogRef.value.models.chat : category === 'IMAGE' ? modelCatalogRef.value.models.image : modelCatalogRef.value.models.video]
-    : [modelCatalogRef.value.models.chat, modelCatalogRef.value.models.image, modelCatalogRef.value.models.video]
+    ? [getCatalogModelsByCategory(category)]
+    : [
+        modelCatalogRef.value.models.chat || [],
+        modelCatalogRef.value.models.image || [],
+        modelCatalogRef.value.models.video || [],
+        modelCatalogRef.value.models.audio || [],
+      ]
 
   for (const group of groups) {
     const matched = group.find(item => item.selectionKey === normalizedKey || item.modelKey === normalizedKey)
@@ -362,7 +434,7 @@ export const findCatalogModel = (key: string, category?: 'CHAT' | 'IMAGE' | 'VID
   return null
 }
 
-export const resolveModelSelectionKey = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO') => {
+export const resolveModelSelectionKey = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO') => {
   const matched = findCatalogModel(key, category)
   return matched?.selectionKey || ''
 }
@@ -372,7 +444,7 @@ export const resolveModelSelectionKey = (key: string, category?: 'CHAT' | 'IMAGE
 // resolveModelSelection（快照过期会强拉、下架会回落并提示），这两个函数已无调用方，随之删除 ——
 // 留着只会再被拿来拼出「查不到就报错」的老路。
 
-export const resolveModelLabel = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO') => {
+export const resolveModelLabel = (key: string, category?: 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO') => {
   const matched = findCatalogModel(key, category)
   return matched?.label || String(key || '').trim()
 }
@@ -389,6 +461,10 @@ export const getModelByName = (key: string) => {
 
   if (matched.category === 'VIDEO') {
     return toVideoModel(matched)
+  }
+
+  if (matched.category === 'AUDIO') {
+    return toAudioModel(matched)
   }
 
   return toChatModel(matched)

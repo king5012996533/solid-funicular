@@ -1,1 +1,1 @@
-export type CreationType = 'agent' | 'image' | 'video' | 'digital-human' | 'motion'
+export type CreationType = 'agent' | 'image' | 'video' | 'audio' | 'digital-human' | 'motion'

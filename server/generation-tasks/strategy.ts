@@ -4,6 +4,7 @@ import type { GenerationTaskStartPayload } from './shared'
 export type GenerationTaskStrategyKey =
   | 'image'
   | 'video'
+  | 'audio'
   | 'agent-chat'
   | 'canvas-agent'
   | 'agent-workspace'
@@ -43,6 +44,11 @@ const strategies: GenerationTaskStrategy[] = [
     // video-upstream.ts 的适配层承载（openai 兼容 / 火山 Ark / 通用 task 网关）。
     key: 'video',
     matches: payload => String(payload.type || '').trim() === 'video',
+  },
+  {
+    // 音频/音乐：与图片一样「一次请求返回成品」，但走 audio 端点与 audio 计费类型。
+    key: 'audio',
+    matches: payload => String(payload.type || '').trim() === 'audio',
   },
   {
     key: 'research-report',

@@ -423,8 +423,8 @@ export const handleProviderConfigRequest = async (req: any, res: any) => {
         .trim()
         .toUpperCase()
       const category =
-        categoryRaw === 'CHAT' || categoryRaw === 'IMAGE' || categoryRaw === 'VIDEO'
-          ? (categoryRaw as 'CHAT' | 'IMAGE' | 'VIDEO')
+        categoryRaw === 'CHAT' || categoryRaw === 'IMAGE' || categoryRaw === 'VIDEO' || categoryRaw === 'AUDIO'
+          ? (categoryRaw as 'CHAT' | 'IMAGE' | 'VIDEO' | 'AUDIO')
           : undefined
       const data = await listModelPricingOverview({
         providerId: String(requestUrl.searchParams.get('providerId') || ''),

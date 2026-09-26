@@ -11,9 +11,12 @@ import {
 } from '../../src/shared/provider-capability'
 import {
   buildImageEditRequestFormData,
+  normalizeAudioGenerationRequestBody,
   normalizeImageGenerationRequestBody,
 } from '../../src/shared/upstream-request-normalizer'
 import {
+  extractAudioUrlsFromJsonResponse,
+  extractAudioUrlsFromText,
   extractChatTextFromJsonPayload,
   extractImageUrlsFromJsonResponse,
   extractImageUrlsFromText,
@@ -23,6 +26,8 @@ import {
 } from '../../src/shared/upstream-stream-parser'
 
 export {
+  extractAudioUrlsFromJsonResponse,
+  extractAudioUrlsFromText,
   extractChatTextFromJsonPayload,
   extractChatReasoningFromJsonPayload,
   extractImageUrlsFromJsonResponse,
@@ -116,6 +121,15 @@ type RequestImageEditInput = {
    * 带 mask 时圆内改动量是圆外的 3.9 倍，圆外基本原样保留。
    */
   mask?: string
+  onRetry?: (retryState: RetryState) => Promise<void> | void
+  fetchWithBurstRateRetry: (input: Omit<FetchWithBurstRateRetryInput, 'logGenerationTask'>) => Promise<Response>
+}
+
+type RequestAudioGenerationInput = {
+  signal: AbortSignal
+  providerId: string
+  modelKey: string
+  requestBody: Record<string, unknown>
   onRetry?: (retryState: RetryState) => Promise<void> | void
   fetchWithBurstRateRetry: (input: Omit<FetchWithBurstRateRetryInput, 'logGenerationTask'>) => Promise<Response>
 }
@@ -631,6 +645,78 @@ export const requestImageGeneration = async (input: RequestImageGenerationInput)
   return {
     upstreamUrl,
     imageUrls,
+  }
+}
+
+/**
+ * 音频生成：与图片一样是「一次请求返回成品」，但响应形状更杂（OpenAI 内联 / 任务制取件 / 纯文本），
+ * 所以这里把 body 读成文本后**先按 JSON 解析、再退回文本提取** —— 两种解析共用一次读取，
+ * 避免 response.json() 失败后 body 已被消费、纯文本路径再也读不到内容。
+ */
+export const requestAudioGeneration = async (input: RequestAudioGenerationInput) => {
+  const upstream = await resolveGatewayProviderUpstream({
+    providerId: input.providerId,
+    endpointType: 'audio',
+    modelKey: input.modelKey,
+  })
+
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+  })
+  if (upstream.apiKey) {
+    headers.set('Authorization', `Bearer ${upstream.apiKey}`)
+  }
+
+  const requestBody = normalizeAudioGenerationRequestBody({
+    requestBody: input.requestBody,
+    modelKey: input.modelKey,
+  })
+
+  const upstreamUrl = `${upstream.baseUrl.replace(/\/+$/, '')}/${upstream.endpoint.replace(/^\/+/, '')}`
+  const response = await input.fetchWithBurstRateRetry({
+    url: upstreamUrl,
+    signal: input.signal,
+    stage: 'audio_generation',
+    timeoutMs: resolveUpstreamFetchTimeoutMs(1),
+    detail: {
+      providerId: input.providerId,
+      modelKey: input.modelKey,
+      endpointType: 'audio',
+    },
+    onRetry: input.onRetry,
+    init: {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody),
+    },
+  })
+
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => '')
+    throw new Error(normalizeGenerationErrorMessage(
+      responseText,
+      `音频生成失败 (${response.status})`,
+    ))
+  }
+
+  const responseText = await response.text().catch(() => '')
+  let audioUrls: string[] = []
+  try {
+    audioUrls = extractAudioUrlsFromJsonResponse(JSON.parse(responseText))
+  } catch {
+    // 上游回的不是 JSON：交给下面的纯文本提取兜底
+  }
+  if (!audioUrls.length) {
+    audioUrls = extractAudioUrlsFromText(responseText)
+  }
+
+  if (!audioUrls.length) {
+    throw new Error('未能获取到生成的音频')
+  }
+
+  return {
+    upstreamUrl,
+    audioUrls,
   }
 }
 

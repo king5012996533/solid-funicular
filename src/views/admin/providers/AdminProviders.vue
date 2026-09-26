@@ -232,6 +232,11 @@
           </div>
 
           <div class="admin-form__field">
+            <label class="admin-form__label" for="provider-audio-endpoint">音频端点</label>
+            <input id="provider-audio-endpoint" v-model.trim="providerForm.audioEndpoint" class="admin-input" type="text" placeholder="/audio/generations">
+          </div>
+
+          <div class="admin-form__field">
             <label class="admin-form__label" for="provider-default-chat-model">默认对话模型</label>
             <input id="provider-default-chat-model" v-model.trim="providerForm.defaultChatModel" class="admin-input" type="text" placeholder="例如: gpt-4.1-mini">
           </div>
@@ -652,6 +657,7 @@ const providerTypeOptions = [
   { label: 'SPEECH2TEXT', value: 'SPEECH2TEXT' },
   { label: '图片生成', value: 'IMAGE' },
   { label: '视频生成', value: 'VIDEO' },
+  { label: '音频/音乐生成', value: 'AUDIO' },
 ]
 
 const modelCategoryOptions: Array<{ label: string; value: AdminModelCategory }> = [
@@ -735,6 +741,7 @@ const providerForm = reactive<AdminProviderPayload>({
   imageEndpoint: '/images/generations',
   imageEditEndpoint: '/images/edits',
   videoEndpoint: '/videos',
+  audioEndpoint: '/audio/generations',
   defaultChatModel: '',
   supportedTypes: ['CHAT'],
   isEnabled: true,
@@ -781,7 +788,14 @@ const buildDefaultTiersJson = (category: AdminModelCategory) =>
   JSON.stringify(
     category === 'VIDEO'
       ? [{ resolutionLabel: '每条', price: { perTask: 60 } }]
-      : [{ resolutionLabel: '每次请求', price: { perTask: 6 } }],
+      : category === 'AUDIO'
+        /*
+         * 音频的默认档位是**占位**，不是标定值：音频按次还是按秒取决于渠道，
+         * 这里给一条 perTask 让运营先能存下去，再按上游账单改成 perSecond / perImage。
+         * 不写死成"看起来像真的"的数字，免得被当成已标定。
+         */
+        ? [{ resolutionLabel: '每条（占位，请按上游账单核价）', price: { perTask: 10 } }]
+        : [{ resolutionLabel: '每次请求', price: { perTask: 6 } }],
     null,
     2,
   )
@@ -967,6 +981,7 @@ const resetProviderForm = () => {
   providerForm.imageEndpoint = '/images/generations'
   providerForm.imageEditEndpoint = '/images/edits'
   providerForm.videoEndpoint = '/videos'
+  providerForm.audioEndpoint = '/audio/generations'
   providerForm.defaultChatModel = ''
   providerForm.supportedTypes = ['CHAT']
   providerForm.isEnabled = true
@@ -989,6 +1004,7 @@ const applyProviderForm = (provider: AdminProviderDetail) => {
   providerForm.imageEndpoint = provider.imageEndpoint
   providerForm.imageEditEndpoint = provider.imageEditEndpoint
   providerForm.videoEndpoint = provider.videoEndpoint
+  providerForm.audioEndpoint = provider.audioEndpoint
   providerForm.defaultChatModel = provider.defaultChatModel || ''
   providerForm.supportedTypes = Array.isArray(provider.supportedTypes) ? [...provider.supportedTypes] : ['CHAT']
   providerForm.isEnabled = provider.isEnabled
@@ -1179,6 +1195,7 @@ const buildProviderPayload = (): AdminProviderPayload => ({
   imageEndpoint: providerForm.imageEndpoint,
   imageEditEndpoint: providerForm.imageEditEndpoint,
   videoEndpoint: providerForm.videoEndpoint,
+  audioEndpoint: providerForm.audioEndpoint,
   defaultChatModel: providerForm.defaultChatModel,
   supportedTypes: providerForm.supportedTypes,
   isEnabled: Boolean(providerForm.isEnabled),

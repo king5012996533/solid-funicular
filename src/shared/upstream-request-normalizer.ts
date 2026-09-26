@@ -95,6 +95,65 @@ export const normalizeImageGenerationRequestBody = (input: {
   return normalizedBody
 }
 
+// 清洗音频生成请求体：只保留上游认识的字段，内部字段与空值一律不透传。
+export const normalizeAudioGenerationRequestBody = (input: {
+  requestBody: Record<string, unknown>
+  modelKey: string
+}) => {
+  const normalizedBody: Record<string, unknown> = {
+    ...input.requestBody,
+    model: normalizeStringValue(input.modelKey),
+  }
+
+  delete normalizedBody.providerId
+
+  // 与图片同一套安全网：剥离所有 _ 前缀的客户端内部字段。
+  for (const key of Object.keys(normalizedBody)) {
+    if (key.startsWith('_')) {
+      delete normalizedBody[key]
+    }
+  }
+
+  const prompt = normalizeStringValue(normalizedBody.prompt)
+  if (prompt) {
+    normalizedBody.prompt = prompt
+  } else {
+    delete normalizedBody.prompt
+  }
+
+  // 时长字段保留 duration / seconds 两种写法：不同厂商认的键不同，原样交给上游，
+  // 不在这里二选一（选错就是上游静默按默认时长出片，账对不上）。
+  const duration = normalizeStringValue(normalizedBody.duration)
+  if (duration) {
+    normalizedBody.duration = duration
+  } else {
+    delete normalizedBody.duration
+  }
+
+  const seconds = normalizeStringValue(normalizedBody.seconds)
+  if (seconds) {
+    normalizedBody.seconds = seconds
+  } else {
+    delete normalizedBody.seconds
+  }
+
+  const voice = normalizeStringValue(normalizedBody.voice)
+  if (voice) {
+    normalizedBody.voice = voice
+  } else {
+    delete normalizedBody.voice
+  }
+
+  const format = normalizeStringValue(normalizedBody.format)
+  if (format) {
+    normalizedBody.format = format
+  } else {
+    delete normalizedBody.format
+  }
+
+  return normalizedBody
+}
+
 // 将参考图统一转换为上游可消费的 multipart/form-data。
 export const buildImageEditRequestFormData = async (input: {
   modelKey: string
