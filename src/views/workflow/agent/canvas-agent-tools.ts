@@ -473,6 +473,10 @@ export const executeCanvasAgentTool = async (
         items: Array.isArray(args.items)
           ? args.items.map((item) => String(item))
           : undefined,
+        // 目标节点 id 交给界面去调服务端估算；拿不到就不估算（只显示预扣说明）
+        nodeIds: Array.isArray(args.nodeIds)
+          ? args.nodeIds.map((item) => String(item)).filter(Boolean)
+          : undefined,
         costPoints: Number.isFinite(Number(args.costPoints))
           ? Number(args.costPoints)
           : undefined,
@@ -482,6 +486,18 @@ export const executeCanvasAgentTool = async (
           ? (args.riskLevel as AgentConfirmationRequest["riskLevel"])
           : "medium",
       };
+      /**
+       * 产品决策：**Agent 不参与积分计算**。模型即使按旧提示词自报了 costPoints 也不用它
+       * （确认卡的数字只认服务端估算）。这里只在开发日志留一条痕，便于观察模型是否还在自算；
+       * 不落到用户界面，也不阻断这一轮。
+       */
+      if (args.costPoints !== undefined && args.costPoints !== null && String(args.costPoints).trim() !== "") {
+        console.debug(
+          "[画布 Agent] 忽略模型自报积分：",
+          args.costPoints,
+          "（确认卡数字只认服务端估算 /api/points/estimate）",
+        );
+      }
       if (!request.summary.trim()) {
         return fail("确认事项必须写清 summary（将要做什么）");
       }

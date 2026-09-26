@@ -70,7 +70,8 @@ const CONTRACT_MARKERS = [
   '未提交节点不扣费、不会自动重试',
   '最多 2 个',
   '【推荐】',
-  '不许自己口算',
+  '不要计算或报出任何积分数字',
+  '会预扣积分，余额不足服务端会拦下，失败自动退还',
   '不要写大段散文',
   '~20 行',
 ]
@@ -113,7 +114,7 @@ console.log('\n【3】system 提示里存在输出契约与状态口径，且明
     STATUS_MARKERS.every((marker) => system.includes(marker)))
   check('system 明确「不要写大段散文」', system.includes('不要写大段散文'))
   check('system 明确数字要列表化', system.includes('一律列表化'))
-  check('system 明确积分不许自己口算', system.includes('不许自己口算'))
+  check('system 明确积分一律不许模型算', system.includes('不要计算或报出任何积分数字'))
   // 旧的散文式引导不该再出现（任何鼓励长篇展开的措辞）
   check('system 不再有任何「详细展开 / 长篇」式引导',
     !['详细展开', '长篇大论', '尽量详细描述', '充分展开叙述'].some((phrase) => system.includes(phrase)))

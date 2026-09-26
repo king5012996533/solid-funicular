@@ -69,7 +69,7 @@ export const CANVAS_AGENT_STORYBOARD_PRODUCTION_PLAYBOOK = `# 完整链路（**�
 在触发任何生成之前，调 request_confirmation，把三件事说清：
   1. 将要建多少节点、出多少张图/视频；
   2. 逐条列出要生成的提示词（或至少概括到用户能核对）；
-  3. **预计消耗多少积分**（按「每张图/每条视频」的量级估，给可靠上界）。
+  3. **会预扣积分**（不要自己算数字；余额不足服务端会拦下、失败自动退还）。
 用户同意之后才继续；拒绝就换方案或停下来问他。服务端也会硬拦没有确认的付费动作。
 
 ## 第 5 步 · 批量提交母版生成（**提交即回执，不要等出图**）
@@ -133,7 +133,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "request_confirmation",
     label: "向用户确认",
     description:
-      "【必须先调用】在执行任何**花钱**（生成图片 / 生成视频）或**交付**（定稿、覆盖已有成果、批量删除）的动作之前，用这个工具向用户展示确认卡片并等待答复。用户同意才继续，拒绝就换做法或向他说明。摘要要写清「将要发生什么 + 预计消耗多少积分」。",
+      "【必须先调用】在执行任何**花钱**（生成图片 / 生成视频）或**交付**（定稿、覆盖已有成果、批量删除）的动作之前，用这个工具向用户展示确认卡片并等待答复。用户同意才继续，拒绝就换做法或向他说明。摘要要写清「将要发生什么」；**不要自己计算积分** —— 界面会用服务端估算显示预扣积分。",
     parameters: {
       type: "object",
       properties: {
@@ -150,9 +150,14 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
           items: { type: "string" },
           description: "逐条列出涉及的节点 / 提示词 / 文件，便于用户核对",
         },
+        nodeIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选：本次动作涉及的目标节点 id（已知道就填）—— 界面据此向服务端估算预扣积分；不填就只显示预扣说明。",
+        },
         costPoints: {
           type: "number",
-          description: "预计消耗的积分总数（不确定就填可靠上界，不要留空）",
+          description: "**不要自己计算积分**。留空即可 —— 界面会用服务端估算（/api/points/estimate）显示预扣积分，余额不足由服务端拦下、失败自动退还。",
         },
         riskLevel: {
           type: "string",
@@ -366,7 +371,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "run_nodes",
     label: "批量提交生成",
     description:
-      "一次**提交**多个节点的生成任务（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。**提交即回执，不等出图** —— 回执里每个节点带提交状态（generating 表示已提交、正在生成）。会消耗积分，调用前必须先取得用户确认，并在确认里写清这一批的规模与预计消耗。同一个节点在同一轮里只会真正提交一次：重复提交会被忽略并如实说明原因。**不要用读取工具反复轮询等结果** —— 提交完就继续做下一步；确实要看某个节点出没出图时，用 get_canvas_node(id) 读一次它的 generationStatus，别原地打转。",
+      "一次**提交**多个节点的生成任务（每个节点各自起一个生成任务，跟单独 run_node 等价）。批量出分镜图/视频时用它。**提交即回执，不等出图** —— 回执里每个节点带提交状态（generating 表示已提交、正在生成）。会消耗积分，调用前必须先取得用户确认，并在确认里写清这一批的规模（**不要自己算积分**，界面会用服务端估算显示预扣）。同一个节点在同一轮里只会真正提交一次：重复提交会被忽略并如实说明原因。**不要用读取工具反复轮询等结果** —— 提交完就继续做下一步；确实要看某个节点出没出图时，用 get_canvas_node(id) 读一次它的 generationStatus，别原地打转。",
     parameters: {
       type: "object",
       properties: {
@@ -568,6 +573,14 @@ export interface AgentConfirmationRequest {
   title: string;
   summary: string;
   items?: string[];
+  /**
+   * 本次动作涉及的目标节点 id（可选）。
+   *
+   * 只用于「让界面拿服务端估算预扣积分」（/api/points/estimate）—— 与模型算不算钱无关：
+   * 数字由服务端给，模型只负责告诉界面「动哪些节点」。拿不到就不估算、只显示预扣说明。
+   */
+  nodeIds?: string[];
+  /** 兼容旧调用方与旧对话保留；**模型不该再填它，界面也不用它**（数字只认服务端估算） */
   costPoints?: number;
   riskLevel?: "low" | "medium" | "high";
 }
