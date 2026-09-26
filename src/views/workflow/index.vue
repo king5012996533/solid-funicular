@@ -61,6 +61,8 @@ import {
   NODE_TYPE_PRESENTATION,
   getNodeTypePresentation,
   suggestNodeTypes,
+  isCoherentConnection,
+  describeCoherentRefusal,
   type ConnectDirection,
 } from './config/node-suggestions'
 import type { GraphNode } from '@vue-flow/core'
@@ -637,27 +639,113 @@ const buildNodeTypeMenuItems = (
   } as ContextMenuItem
 })
 
-const isDropOnNodeElement = (event: MouseEvent | TouchEvent) => {
+/**
+ * 拖线松手时，落点是什么。
+ *
+ * 四种，处理方式各不相同（2026-09-26 改）：
+ *   handle  落在其它节点的连接点上 —— Vue Flow 自己会 emit connect，这里不用管
+ *   card    落在**卡片本体**上 —— **直接连上**（对齐 SceneFlow：卡片全身都是落点）
+ *   panel   落在卡片内的浮层（提示词面板、节点工具条）上 —— 什么都不做：
+ *           那里有自己的交互，抢过来会让人误连
+ *   blank   空白处 —— 弹候选节点菜单（原有行为）
+ *
+ * 改之前只有「handle 或 card」与「blank」两态，落在卡片上是**静默返回**：
+ * 用户拖半天松手什么都没发生，只会以为功能坏了。
+ */
+type DropKind = 'handle' | 'card' | 'panel' | 'blank'
+
+const readDropTarget = (event: MouseEvent | TouchEvent): { kind: DropKind; nodeId: string } => {
   const target = event.target as HTMLElement | null
-  if (!target?.closest) return false
-  // 落在任何 handle 或节点卡片上都算「用户本来想连这个」，不弹菜单
-  return Boolean(target.closest('.vue-flow__handle, .vue-flow__node'))
+  if (!target?.closest) return { kind: 'blank', nodeId: '' }
+  if (target.closest('.vue-flow__handle')) return { kind: 'handle', nodeId: '' }
+  // 节点内的浮层优先于卡片判定：面板盖在卡片上，先判卡片会把点面板误当成连卡片
+  if (target.closest('.video-node-prompt-panel, .image-node-prompt-panel, .canvas-node-top-toolbar, .canvas-node-hover-toolbar')) {
+    return { kind: 'panel', nodeId: '' }
+  }
+  const nodeEl = target.closest('.vue-flow__node')
+  if (!nodeEl) return { kind: 'blank', nodeId: '' }
+  return { kind: 'card', nodeId: String(nodeEl.getAttribute('data-id') || '') }
+}
+
+/**
+ * 把连线连到用户松手时压着的那张卡片上。
+ *
+ * 三道闸门，每一道都给**可读反馈**（静默是这批假交互的共同病根）：
+ *   1. 不能连自己；
+ *   2. 这两类节点之间必须真的有数据流向（复用 node-suggestions 的兼容表）；
+ *   3. 同向已经连过就不重复加。
+ */
+const connectToDroppedCard = (input: {
+  originNodeId: string
+  originHandleId: string
+  direction: ConnectDirection
+  targetNodeId: string
+}): boolean => {
+  if (!input.targetNodeId) return false
+  if (input.targetNodeId === input.originNodeId) {
+    ElMessage.info('不能连到节点自己身上')
+    return false
+  }
+
+  const isDownstream = input.direction === 'downstream'
+  const sourceId = isDownstream ? input.originNodeId : input.targetNodeId
+  const targetId = isDownstream ? input.targetNodeId : input.originNodeId
+  const sourceType = nodes.value.find(node => node.id === sourceId)?.type
+  const targetType = nodes.value.find(node => node.id === targetId)?.type
+  if (!sourceType || !targetType) return false
+
+  if (!isCoherentConnection(sourceType, targetType)) {
+    ElMessage.warning(describeCoherentRefusal(sourceType, targetType))
+    return false
+  }
+
+  if (edges.value.some(edge => edge.source === sourceId && edge.target === targetId)) {
+    ElMessage.info('这两个节点已经连过了')
+    return false
+  }
+
+  applyTypedEdgeConnection({
+    source: sourceId,
+    target: targetId,
+    sourceHandle: isDownstream ? input.originHandleId : 'right',
+    targetHandle: isDownstream ? 'left' : input.originHandleId,
+  })
+  return true
 }
 
 const onConnectEnd = (event?: MouseEvent | TouchEvent) => {
   const producedEdge = connectProducedEdge
   connectProducedEdge = false
 
-  if (producedEdge || !event) return
-  if (isDropOnNodeElement(event)) return
+  if (!event) return
 
   const startHandle = connectionStartHandle.value
-  if (!startHandle) return
+  const originNode = startHandle ? nodes.value.find(node => node.id === startHandle.nodeId) : undefined
+  const direction: ConnectDirection = startHandle?.type === 'target' ? 'upstream' : 'downstream'
+  const drop = readDropTarget(event)
 
-  const originNode = nodes.value.find(node => node.id === startHandle.nodeId)
-  if (!originNode) return
+  // 落在卡片内的浮层上：什么都不做。用户是在点面板，不是在连卡片
+  if (drop.kind === 'panel') return
 
-  const direction: ConnectDirection = startHandle.type === 'target' ? 'upstream' : 'downstream'
+  /*
+   * 落在**卡片本体**上 → 直接连（2026-09-26 改，对齐 SceneFlow 的「卡片全身是落点」）。
+   * 注意必须在 producedEdge 判断之前处理：Vue Flow 只在落到 handle 上时才 emit connect，
+   * 落到卡片身上不会有 onConnect，producedEdge 一定是 false。
+   */
+  if (!producedEdge && drop.kind === 'card' && startHandle && originNode) {
+    connectToDroppedCard({
+      originNodeId: originNode.id,
+      originHandleId: String(startHandle.id || (direction === 'downstream' ? 'right' : 'left')),
+      direction,
+      targetNodeId: drop.nodeId,
+    })
+    return
+  }
+
+  if (producedEdge) return
+  // 落在 handle 上但没连成（自我连接等）：Vue Flow 不给事件，这里也不弹菜单
+  if (drop.kind === 'handle') return
+  if (!startHandle || !originNode) return
   const candidates = suggestNodeTypes(originNode.type, direction)
   if (!candidates.length) return
 

@@ -98,6 +98,37 @@ const COHERENT_DOWNSTREAM: Record<WorkflowNodeType, WorkflowNodeType[]> = {
 export type ConnectDirection = 'downstream' | 'upstream'
 
 /**
+ * 这两类节点能不能连。
+ *
+ * 复用上面那张表 —— 判断标准只有一条：**下游真的有代码读上游的产出吗**。
+ * 为什么需要它：把连线的落点从「手柄」放宽到「整张卡片」之后（对齐 SceneFlow 的手感），
+ * 用户可以把任意两张卡片连起来；如果不在这里拦一道，就会造出一堆没人消费的边 ——
+ * `imageRole`（首帧/尾帧）就是这么变成假交互的。
+ */
+export const isCoherentConnection = (
+  sourceType: WorkflowNodeType,
+  targetType: WorkflowNodeType,
+): boolean => (COHERENT_DOWNSTREAM[sourceType] || []).includes(targetType)
+
+/**
+ * 不能连时给一句人话。
+ *
+ * 为什么要文案而不是静默：静默是这一批假交互的共同病根 ——
+ * 用户拖了半天松手，什么都没发生，只会以为功能坏了。
+ */
+export const describeCoherentRefusal = (
+  sourceType: WorkflowNodeType,
+  targetType: WorkflowNodeType,
+): string => {
+  if (sourceType === targetType && sourceType === 'video') {
+    return '视频节点的成片目前没有任何节点会读取，连过去不会生效'
+  }
+  if (sourceType === 'video') return '视频节点产出的成片目前没有任何节点会读取，连过去不会生效'
+  if (targetType === 'text') return '文本节点的内容由你自己输入或导入文件决定，它不读上游'
+  return '这两类节点之间没有可用的数据流向'
+}
+
+/**
  * 从某类节点拖线落空时，候选的新节点类型。
  *
  * @param originType 拖线的起点节点类型

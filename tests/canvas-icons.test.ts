@@ -16,7 +16,12 @@ import {
   CANVAS_ICONS,
   getCanvasIcon,
 } from '../src/components/icons/canvas-icons'
-import { NODE_TYPE_PRESENTATION } from '../src/views/workflow/config/node-suggestions'
+import {
+  NODE_TYPE_PRESENTATION,
+  isCoherentConnection,
+  describeCoherentRefusal,
+  suggestNodeTypes,
+} from '../src/views/workflow/config/node-suggestions'
 
 let passed = 0
 let failed = 0
@@ -188,6 +193,40 @@ console.log('\n【4】node-suggestions 的展示信息接上了图标模块')
     })
   check('icon 与 color 仍然是字符串',
     NODE_TYPE_PRESENTATION.every(i => typeof i.icon === 'string' && typeof i.color === 'string'), true)
+}
+
+/**
+ * 连线兼容性（2026-09-26 新增）
+ *
+ * 这套规则现在有**两个**消费者：拖线落空时给候选节点、拖到卡片上直接连时做闸门。
+ * 判断标准只有一条 —— 下游真的有代码读上游的产出吗。
+ * 抽查式地「什么都能连」会造出没人消费的边（`imageRole` 就是这么变成假交互的）。
+ */
+{
+  console.log('\n连线兼容性（下游真的会读上游吗）：')
+  check('文本 → 图片（当提示词）', isCoherentConnection('text', 'image'), true)
+  check('文本 → 视频（当提示词）', isCoherentConnection('text', 'video'), true)
+  check('图片 → 图片（当参考图）', isCoherentConnection('image', 'image'), true)
+  check('图片 → 视频（当首帧）', isCoherentConnection('image', 'video'), true)
+  check('素材 → 图片 / 视频（与图片节点同一下游）',
+    [isCoherentConnection('asset', 'image'), isCoherentConnection('asset', 'video')], [true, true])
+  check('任何节点 → 文本：故意不允许（文本不读上游）',
+    ['text', 'image', 'video', 'asset'].map(t => isCoherentConnection(t, 'text')), [false, false, false, false])
+  check('视频 → 任何节点：故意不允许（没有节点读视频产出）',
+    ['text', 'image', 'video', 'asset'].map(t => isCoherentConnection('video', t)), [false, false, false, false])
+  check('不能连时要给出人话，而不是静默',
+    [describeCoherentRefusal('video', 'image').length > 0, describeCoherentRefusal('image', 'text').length > 0], [true, true])
+  check('视频 → 视频 的拒绝文案点明「成片没人读」',
+    describeCoherentRefusal('video', 'video').includes('读'), true)
+
+  // 候选节点与兼容表必须是同一套规则：拖线落空给的候选，落卡片时也必须连得上
+  const drift = []
+  for (const origin of NODE_TYPE_PRESENTATION.map(i => i.type)) {
+    for (const candidate of suggestNodeTypes(origin, 'downstream')) {
+      if (!isCoherentConnection(origin, candidate)) drift.push(`${origin} -> ${candidate}`)
+    }
+  }
+  check('候选菜单给的每一项，都真的连得上（两处规则没有漂移）', drift, [])
 }
 
 console.log(`\n${'─'.repeat(52)}`)
