@@ -310,6 +310,23 @@ export const releaseWorkflowPipelineLock = async (workflowId: string, token: str
   })
 }
 
+export interface WorkflowPipelineLockStatus {
+  locked: boolean
+  holder: { acquiredAt: number; expiresAt: number } | null
+}
+
+/**
+ * 只读查询画布上有没有生效中的流水线锁。
+ *
+ * 首页「说完话 → 新建画布 → 自动交给 Agent」在发送前用它做占用保护：
+ * 有锁就只把话填进输入框、不发送。**只读**，不建快照、不占锁 —— 探测本身不能成为一次写入。
+ */
+export const getWorkflowPipelineLockStatus = async (workflowId: string) => {
+  return await requestWorkflowApi<WorkflowPipelineLockStatus>({
+    url: `${WORKFLOW_DEFINITIONS_PATH}/${encodeURIComponent(workflowId)}/pipeline-lock`,
+  })
+}
+
 /**
  * 强制释放自己画布上的锁（无需 token）。
  *

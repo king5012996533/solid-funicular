@@ -176,6 +176,13 @@ export interface CanvasAgentContext {
    */
   forceReleasePipelineRun?: () => Promise<{ ok: boolean; message?: string }>;
   /**
+   * 只读查询本画布当前有没有生效中的流水线锁（可选）。
+   *
+   * 给「首页说完话 → 新建画布 → 自动交给 Agent」在发送前做占用保护：
+   * 有锁就不发、只把话填进输入框。**不取锁、不留快照**，绝不能拿它绕过锁。
+   */
+  checkPipelineLock?: () => Promise<boolean>;
+  /**
    * 提交某个节点的生成任务（node 组件注册进来的「用当前参数跑一次」）。
    *
    * **返回的是「提交结果」，不是「出图结果」**：节点组件在任务建好、taskId 落进节点 data 之后

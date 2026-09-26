@@ -48,7 +48,7 @@ import {
   type WorkflowDefinitionSummary,
   updateWorkflowDefinition,
 } from '@/views/workflow/api/definitions'
-import { useAsyncAction } from '@/composables'
+import { useAsyncAction, useHomeCanvasEntry } from '@/composables'
 import './agentic-assets-canvas.css'
 
 interface GeneratorSendOptions {
@@ -64,6 +64,7 @@ interface GeneratorSendOptions {
 
 const router = useRouter()
 const route = useRoute()
+const { sendToNewCanvas } = useHomeCanvasEntry()
 const scrollContainerRef = ref<HTMLElement | null>(null)
 const workflowList = ref<WorkflowDefinitionSummary[]>([])
 const workflowListLoading = ref(false)
@@ -234,27 +235,10 @@ const handleDeleteWorkflow = async (workflow: WorkflowDefinitionSummary) => {
   await deleteWorkflowAction.run(workflow.id)
 }
 
+// 首页是创作入口：说一句话 → 新建画布（名字取自那句话）→ 进画布后自动交给 Agent。
+// 建画布失败会回退到原来的 /generate 深链（见 useHomeCanvasEntry）。
 const handleSend = (message: string, type: CreationType, options?: GeneratorSendOptions) => {
-  if (typeof window !== 'undefined') {
-    window.sessionStorage.setItem('canana:home-header:pending-send', JSON.stringify({
-      modelKey: options?.modelKey || '',
-      duration: options?.duration || '',
-      feature: options?.feature || '',
-      referenceImages: Array.isArray(options?.referenceImages) ? options.referenceImages : [],
-    }))
-  }
-
-  void router.push({
-    path: '/generate',
-    query: {
-      message,
-      type,
-      ...(options?.model && { model: options.model }),
-      ...(options?.skill && { skill: options.skill }),
-      ...(options?.ratio && { ratio: options.ratio }),
-      ...(options?.resolution && { resolution: options.resolution }),
-    },
-  })
+  void sendToNewCanvas(message, type, options)
 }
 
 onMounted(() => {

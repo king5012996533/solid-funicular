@@ -45,6 +45,12 @@ import {
   collectConfirmationNodeIds,
   resolveAgentConfirmCostDisplay,
 } from '@/components/canana/agent-confirm-cost'
+import {
+  consumeHomeCanvasAgentPending,
+  readHomeCanvasAgentPending,
+  resolveAutoSendBlockReason,
+  shouldAutoSendToAgent,
+} from '@/shared/home-canvas-entry'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -67,6 +73,11 @@ const props = defineProps({
    * 未保存的画布是空串 —— 此时刻意不切会话、也刻意不让 Agent 记忆启用（防串台）。
    */
   canvasId: { type: String, default: '' },
+  /**
+   * 画布是否已就绪（画布数据已载入、不在加载中）。
+   * 与 canvasId 配合：只有「就绪 + 会话已绑定」时才处理首页带来的自动发送。
+   */
+  canvasReady: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close', 'message-received', 'add-image-to-canvas'])
@@ -281,15 +292,21 @@ const cleanupStreams = () => {
  * 按画布反查会话代价大；跨设备续写的方案与代价见本次报告。
  */
 const boundCanvasId = ref('')
+/** 会话绑定已完成的画布 id（首页自动发送要等它，避免和组织会话/载入历史抢跑） */
+const canvasSessionReadyFor = ref('')
 
 const bindSessionToCanvas = async (rawCanvasId) => {
   const canvasId = String(rawCanvasId || '').trim()
   if (!canvasId) {
     // 未保存的画布没有 id：不动当前会话（也刻意不让 Agent 记忆启用），并允许同一画布再次进入时重绑
     boundCanvasId.value = ''
+    canvasSessionReadyFor.value = ''
     return
   }
-  if (canvasId === boundCanvasId.value) return
+  if (canvasId === boundCanvasId.value) {
+    canvasSessionReadyFor.value = canvasId
+    return
+  }
   boundCanvasId.value = canvasId
   try {
     // 先拉一次会话列表：映射里那个会话可能已在服务端被删，得用现存列表校验
@@ -316,6 +333,9 @@ const bindSessionToCanvas = async (rawCanvasId) => {
     await loadSessionHistory(sessionId)
   } catch (err) {
     console.error('[RightPanel] bind canvas session failed', err)
+  } finally {
+    // 绑定失败也标记就绪：发送路径自己会 ensureSession，不该让首页带来的那句话一直等下去
+    canvasSessionReadyFor.value = canvasId
   }
 }
 
@@ -997,18 +1017,28 @@ const forceUnlockAndRetry = async (aiMsg) => {
   }
 }
 
-const sendMessage = async () => {
-  const content = inputMessage.value.trim()
+/**
+ * 发送消息：面板唯一的发送实现。
+ *
+ * 输入框回车/按钮、画布右键的「交给 Agent」、首页带来的自动发送，全都走这一条 ——
+ * 不另写发送逻辑，否则「从这儿问」和「自动发」会得到两种不同的能力。
+ *
+ * `explicitMessage`：外部代发的文本（首页那句话 / 画布触发的消息）；不传就用输入框里的内容。
+ * `onAccepted`：用户消息已经落到对话里时回调（画布触发入口靠它清掉待发状态，时机与以前一致，
+ * 不必等整轮 Agent 跑完）。
+ */
+const sendMessage = async (explicitMessage, { onAccepted } = {}) => {
+  const content = (typeof explicitMessage === 'string' ? explicitMessage : inputMessage.value).trim()
   const refImages = uploadedImages.value.map((img) => img.src)
 
-  if (!content && !refImages.length) return
+  if (!content && !refImages.length) return false
 
   // 确保有活跃会话（首次发送会自动定位到默认会话）
   try {
     await ensureSession()
   } catch (err) {
     console.error('[RightPanel] ensureSession failed', err)
-    return
+    return false
   }
 
   hasMessages.value = true
@@ -1024,6 +1054,7 @@ const sendMessage = async () => {
   inputMessage.value = ''
   uploadedImages.value = []
   scrollToBottom()
+  if (typeof onAccepted === 'function') onAccepted()
 
   messages.value.push({
     id: userId + 1,
@@ -1036,6 +1067,7 @@ const sendMessage = async () => {
   scrollToBottom()
 
   await runCanvasAgentTurn(content || '我上传了参考图，帮我把它用起来', tailMessage(), refImages)
+  return true
 }
 
 // 回车发送
@@ -1046,43 +1078,106 @@ const handleKeydown = (e) => {
   }
 }
 
-// 监听从中间底部传来的消息（画布触发的入口）：作为文本对话发起
+// 监听从中间底部传来的消息（画布触发的入口）：走同一个发送实现
 watch(() => props.initialMessage, async (newMessage) => {
   if (!newMessage || !newMessage.trim()) return
 
-  // 确保有活跃会话再发送
-  try {
-    await ensureSession()
-  } catch (err) {
-    console.error('[RightPanel] ensureSession failed', err)
-    return
-  }
-
-  hasMessages.value = true
-  const userId = Date.now()
-  messages.value.push({
-    id: userId,
-    type: 'user',
-    content: newMessage,
-    time: userId,
-  })
-
-  emit('message-received')
-  scrollToBottom()
-
-  messages.value.push({
-    id: userId + 1,
-    type: 'ai-text',
-    content: '',
-    loading: true,
-    error: '',
-    time: userId + 1,
-  })
-  scrollToBottom()
   // 画布触发的入口也走同一个 Agent：面板只有一条对话链路，
   // 免得「从这儿问」和「在输入框问」得到两种不同的能力（一个能动画布、一个只会聊天）。
-  await runCanvasAgentTurn(newMessage, tailMessage())
+  await sendMessage(newMessage, {
+    onAccepted: () => emit('message-received'),
+  })
 })
+
+/**
+ * 首页带来的「自动交给 Agent」。
+ *
+ * 首页说一句话会先建好一张画布、写下一枚一次性标记，再跳进来；这里在**画布与会话都就绪**后
+ * 把标记消费掉并走既有的发送路径（sendMessage）—— 用户不用再点一次「交给 Agent」。
+ *
+ * 三条硬约束：
+ *   · 先清标记再发送：HMR / 重复挂载 / 刷新都不会二次触发（标记已不在，读出来就是 null）；
+ *   · 有锁不发：画布被别的流水线占用时只把话填进输入框并提示，绝不绕过锁；
+ *   · 只走既有发送路径：不在这里另写一套发送逻辑。
+ */
+const autoSendState = ref('idle')      // idle | sent | filled，非 idle 即本次挂载已处理过
+const autoSendNotice = ref('')
+let autoSendInFlight = false
+
+const prefillComposer = (message) => {
+  inputMessage.value = message
+  nextTick(() => composerInputRef.value?.focus())
+}
+
+/** 只读探测画布锁；拿不到（没注入/请求失败）就按未占用处理，真正的保护仍在 beginPipelineRun */
+const probeCanvasLock = async () => {
+  const checker = props.agentContext?.checkPipelineLock
+  if (typeof checker !== 'function') return false
+  try {
+    return Boolean(await checker())
+  } catch (err) {
+    console.warn('[RightPanel] 查询画布锁失败，按未占用处理', err)
+    return false
+  }
+}
+
+const maybeAutoSendToAgent = async () => {
+  if (autoSendInFlight || autoSendState.value !== 'idle') return
+
+  const canvasId = String(props.canvasId || '').trim()
+  // 未就绪（画布没载入 / 加载中 / 会话没绑好 / 正在跑）：先等，状态一变会再进来
+  if (!canvasId || !props.canvasReady) return
+  if (canvasSessionReadyFor.value !== canvasId) return
+  if (runningAgent.value) return
+
+  // 只读探测：没有属于这张画布的标记就什么都不做（重复挂载/刷新都会停在这里）
+  const pending = readHomeCanvasAgentPending(canvasId)
+  if (!pending) return
+
+  autoSendInFlight = true
+  try {
+    const locked = await probeCanvasLock()
+    const state = {
+      hasFlag: true,
+      canvasReady: true,
+      running: runningAgent.value,
+      locked,
+      consumed: autoSendState.value !== 'idle',
+    }
+
+    if (shouldAutoSendToAgent(state)) {
+      // 先清标记再发送：consume 是**唯一**的准入判据 —— 谁先清掉谁发送，
+      // 这一步之后任何重复挂载/刷新/HMR 都读不到标记，天然幂等。
+      const consumed = consumeHomeCanvasAgentPending(canvasId)
+      if (!consumed) return
+      autoSendState.value = 'sent'
+      const accepted = await sendMessage(consumed.message)
+      if (!accepted) {
+        // 发送路径没接受（会话没建起来等）：退回输入框，别让这句话凭空消失
+        autoSendState.value = 'filled'
+        prefillComposer(consumed.message)
+        autoSendNotice.value = '自动交给 Agent 失败，已把这句话放回输入框，可手动发送。'
+      }
+      return
+    }
+
+    if (resolveAutoSendBlockReason(state) === 'occupied') {
+      // 画布被占用：也消费标记（否则重复挂载会反复覆盖输入框），只落地输入框，绝不绕过锁
+      const consumed = consumeHomeCanvasAgentPending(canvasId)
+      if (!consumed) return
+      autoSendState.value = 'filled'
+      prefillComposer(consumed.message)
+      autoSendNotice.value = '这块画布正被另一个流水线占用，已把这句话放进输入框；等它结束后再点「交给 Agent」。'
+    }
+  } finally {
+    autoSendInFlight = false
+  }
+}
+
+watch(
+  () => [props.canvasReady, props.canvasId, canvasSessionReadyFor.value, runningAgent.value],
+  () => { void maybeAutoSendToAgent() },
+)
 
 // 计算内容生成器高度（用于任务指示器定位）
 const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
@@ -1480,6 +1575,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         所以换成一个朴素的任务输入框：交办一件事，附带图，剩下的它自己来。
       -->
       <div class="agent-composer">
+        <div v-if="autoSendNotice" class="agent-composer__notice" role="status">{{ autoSendNotice }}</div>
         <div v-if="uploadedImages.length" class="agent-composer__refs">
           <div v-for="img in uploadedImages" :key="img.id" class="agent-composer__ref">
             <img :src="img.src" :alt="img.name" @click="openPreview(img.src)" />
@@ -1543,7 +1639,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
               type="button"
               class="agent-composer__send"
               :disabled="runningAgent || (!inputMessage.trim() && !uploadedImages.length)"
-              @click="sendMessage"
+              @click="sendMessage()"
             >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
           </div>
         </div>
@@ -1645,6 +1741,16 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   border: 1px solid var(--agent-line, #24262d);
   border-radius: var(--agent-r-md, 12px);
   background: var(--agent-surface-2, #14161b);
+}
+/* 首页自动发送被占用/失败时的提示：常驻一行，别只挂在 title 上 */
+.agent-composer__notice {
+  padding: 8px 10px;
+  border: 1px solid var(--agent-warn-line, #6b4a1f);
+  border-radius: var(--agent-r-sm, 8px);
+  background: var(--agent-warn-bg, #241a0d);
+  color: var(--agent-warn-text, #f0b45a);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .agent-composer__hint {
   display: flex;

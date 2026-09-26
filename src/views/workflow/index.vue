@@ -23,7 +23,7 @@ import { WORKFLOW_TEMPLATES } from './config/workflows'
 import { decideInitialCanvasEntry } from './config/canvas-entry'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
 import type { WorkflowDefinitionSummary } from './api/definitions'
-import { acquireWorkflowPipelineLock, forceReleaseWorkflowPipelineLock, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
+import { acquireWorkflowPipelineLock, forceReleaseWorkflowPipelineLock, getWorkflowPipelineLockStatus, releaseWorkflowPipelineLock, updateWorkflowDefinition } from './api/definitions'
 import type { WorkflowCanvasPosition } from './composables/workflow-orchestrator-types'
 
 // 节点组件
@@ -138,6 +138,14 @@ const workflowDescription = ref('')
 const workflowCategory = ref('')
 const workflowListKeyword = ref('')
 const workflowLoadingByRoute = ref(false)
+
+/**
+ * 画布是否已就绪（交给助手面板判断能不能自动发送）。
+ *
+ * 就绪 = 画布数据已挂到 workflowId 上、且不在按路由加载中。
+ * 面板再叠加自己的「会话已绑定」条件，才会真正发出那句首页带来的话。
+ */
+const canvasReady = computed(() => Boolean(currentWorkflowId.value) && !workflowLoadingByRoute.value)
 const initialCanvasBaselineSnapshot = ref('')
 const selectedWorkflowVersionId = ref('')
 const selectedLibraryWorkflowId = ref('')
@@ -1563,6 +1571,23 @@ const canvasAgentContext: CanvasAgentContext = {
     const ok = await handleForceReleaseLock()
     return { ok, message: ok ? undefined : '强制释放失败：请确认当前画布已保存' }
   },
+  /**
+   * 发送前的占用保护用的只读查询（不取锁、不留快照）。
+   *
+   * 查询失败时按「未占用」返回：真正的并发保护仍在发送路径的 beginPipelineRun 里，
+   * 这里 fail-open 只是不因为一次探测失败就让首页的自动发送无谓地落空。
+   */
+  checkPipelineLock: async () => {
+    const workflowId = currentWorkflowId.value
+    if (!workflowId) return false
+    try {
+      const status = await getWorkflowPipelineLockStatus(workflowId)
+      return Boolean(status?.locked)
+    } catch (error) {
+      console.warn('[workflow] 查询画布锁状态失败，按未占用处理', error)
+      return false
+    }
+  },
   runNode: (id) => runNodeById(id),
   /**
    * 批量提交（串行）。
@@ -2323,6 +2348,7 @@ watch(canvasSnapshot, () => {
           :canvas-brief="assistantCanvasBrief"
           :agent-context="canvasAgentContext"
           :canvas-id="currentWorkflowId"
+          :canvas-ready="canvasReady"
           @close="toggleAssistantPanel"
           @message-received="pendingAssistantMessage = ''"
           @add-image-to-canvas="handleAssistantAddImage"

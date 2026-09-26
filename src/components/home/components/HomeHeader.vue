@@ -44,13 +44,13 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
 import TypeSelector from './TypeSelector.vue'
 import GenerateContentGenerator from '@/components/generate/ContentGenerator.vue'
 import TaskIndicator from './TaskIndicator.vue'
 import HomeBanner from './HomeBanner.vue'
 import { useSystemSettingsStore } from '@/stores/system-settings'
 import { useHomeLayoutConfig } from '@/composables/useHomeLayoutConfig'
+import { useHomeCanvasEntry } from '@/composables/useHomeCanvasEntry'
 import type { SystemConfigPayload, SystemHomeBannerItemConfig } from '@/api/system-config'
 import type { CreationType } from '@/components/generate/selectors'
 
@@ -77,7 +77,7 @@ const props = withDefaults(defineProps<{
   previewReadonly: false,
 })
 
-const router = useRouter()
+const { sendToNewCanvas } = useHomeCanvasEntry()
 const systemSettingsStore = useSystemSettingsStore()
 const { headerSettings, bannerSettings } = useHomeLayoutConfig()
 
@@ -146,31 +146,14 @@ const currentModeLabel = computed(() => {
   return options.find(item => item.value === defaultMode)?.label || options[0]?.label || 'Agent 模式'
 })
 
+// 首页是创作入口：说一句话 → 新建画布（名字取自那句话）→ 进画布后自动交给 Agent。
+// 建画布失败会回退到原来的 /generate 深链（见 useHomeCanvasEntry）。
 const handleSend = (message: string, type: CreationType, options?: HomeHeaderSendOptions) => {
   if (props.previewReadonly) {
     return
   }
 
-  if (typeof window !== 'undefined') {
-    window.sessionStorage.setItem('canana:home-header:pending-send', JSON.stringify({
-      modelKey: options?.modelKey || '',
-      duration: options?.duration || '',
-      feature: options?.feature || '',
-      referenceImages: Array.isArray(options?.referenceImages) ? options.referenceImages : [],
-    }))
-  }
-
-  router.push({
-    path: '/generate',
-    query: {
-      message,
-      type,
-      ...(options?.model && { model: options.model }),
-      ...(options?.skill && { skill: options.skill }),
-      ...(options?.ratio && { ratio: options.ratio }),
-      ...(options?.resolution && { resolution: options.resolution })
-    }
-  })
+  void sendToNewCanvas(message, type, options)
 }
 </script>
 

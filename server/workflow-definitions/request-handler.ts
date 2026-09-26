@@ -10,6 +10,7 @@ import {
   createWorkflowDefinitionVersion,
   deleteWorkflowDefinition,
   getWorkflowDefinitionDetail,
+  getWorkflowPipelineLockStatus,
   listWorkflowDefinitions,
   publishWorkflowDefinition,
   updateWorkflowDefinition,
@@ -190,6 +191,21 @@ export const handleWorkflowDefinitionsRequest = async (req: any, res: any) => {
         return
       }
       sendWorkflowDefinitionError(res, result.reason === 'not_found' ? 404 : 403, '无法获取画布锁')
+      return
+    }
+
+    /**
+     * 只读查询画布锁状态（不取锁、不留快照）。
+     *
+     * 给「首页说完话 → 新建画布 → 自动交给 Agent」做发送前的占用保护：
+     * 有锁就不发、只把话填进输入框。必须与取锁（POST）用同一段路径做只读分支，
+     * 而不是靠「试着取一下」探测 —— 那会平白建一份快照。
+     */
+    if (req.method === 'GET' && workflowPipelineLockMatch) {
+      const data = await getWorkflowPipelineLockStatus(workflowPipelineLockMatch.workflowId, {
+        currentUserId: currentUser.id,
+      })
+      sendJson(res, 200, { data })
       return
     }
 

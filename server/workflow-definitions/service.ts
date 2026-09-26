@@ -626,6 +626,39 @@ const ensurePipelineLockSatisfied = (workflowId: string, pipelineToken?: string)
   }
 }
 
+/**
+ * 只读查询本画布上有没有生效中的流水线锁。
+ *
+ * 首页「说一句 → 新建画布 → 自动交给 Agent」在发送前用它做占用保护：
+ * 有锁就只把话填进输入框、不发送（绝不绕过锁）。
+ * **只读**：只查进程内锁表，不建快照、不动任何状态 —— 探测本身不能变成一次写入。
+ */
+export const getWorkflowPipelineLockStatus = async (
+  workflowId: string,
+  context: WorkflowAccessContext,
+) => {
+  const workflow = await prisma.workflowDefinition.findFirst({
+    where: {
+      id: workflowId,
+      OR: [
+        { userId: context.currentUserId },
+        { userId: null },
+      ],
+    },
+    select: { id: true },
+  })
+
+  if (!workflow) {
+    throw new Error('工作流不存在')
+  }
+
+  const lock = getActivePipelineLock(workflowId)
+  return {
+    locked: Boolean(lock),
+    holder: lock ? { acquiredAt: lock.acquiredAt, expiresAt: lock.expiresAt } : null,
+  }
+}
+
 export const autosaveWorkflowDefinitionDraft = async (
   workflowId: string,
   payload: WorkflowDefinitionVersionPayload,
