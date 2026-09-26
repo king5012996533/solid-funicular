@@ -20,6 +20,10 @@ import {
   type CanvasAgentContext,
   type CanvasAgentToolResult,
 } from "./canvas-agent-tools";
+import {
+  applyAgentToolMarks,
+  resetAgentActiveNodes,
+} from "@/views/workflow/composables/useAgentActiveNodes";
 
 export interface CanvasAgentToolStep {
   index: number;
@@ -47,6 +51,9 @@ export const useCanvasAgentBridge = (options: UseCanvasAgentBridgeOptions) => {
   const reset = () => {
     stepCount = 0;
     handledCallIds.clear();
+    // 新一轮开始：把上一轮留在画布上的高亮（刚创建/生成中）清干净，
+    // 「生成中」以当前 turn 的 id 为准，绝不让上一轮的节点长亮到下一轮。
+    resetAgentActiveNodes();
   };
 
   /**
@@ -99,6 +106,12 @@ export const useCanvasAgentBridge = (options: UseCanvasAgentBridgeOptions) => {
       summary: outcome.summary,
       ok: outcome.ok,
     });
+
+    /**
+     * 画布动作可视化：从**真实回执**里取刚创建/刚提交的节点 id，点亮画布上的对应节点。
+     * 只认回执（成功项），不受 abort 影响 —— 工具确实已经执行，画布上的节点也确实变了。
+     */
+    applyAgentToolMarks(call.name, outcome.result);
 
     if (signal?.aborted) {
       // 用户已经叫停：这条回执发过去也没意义了（服务端那边同样在收口）

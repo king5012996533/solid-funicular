@@ -12,6 +12,7 @@
 
 import {
   CANVAS_AGENT_CONSOLE_PHASES,
+  type CanvasAgentConsoleCanvasActions,
   type CanvasAgentConsoleCurrent,
   type CanvasAgentConsoleLifecycle,
   type CanvasAgentConsoleLogEntry,
@@ -45,6 +46,13 @@ export interface CanvasAgentConsoleEvent {
   resultText?: string
   /** tool_start：目标节点 id（展示用，可选） */
   target?: string
+  /**
+   * Agent **明确声明过的目标总数**（批次 3 的「画布动作」计数用）。
+   *
+   * 只有 `request_confirmation` 的逐条事项里写出的目标数会走到这里（见 parseDeclaredCanvasTarget）——
+   * 声明不到就不给，界面只显示「已创建 N 个」；**绝不解析裸数字当分母**。
+   */
+  declaredTarget?: { total: number; unit: string }
   /** 工具调用 id：让同一调用的 start/end 精确配对（并发调用也不会串） */
   callId?: string
 }
@@ -124,6 +132,88 @@ const PHRASE_BY_TOOL: Record<string, string> = {
 const RUN_TOOLS = new Set(['run_node', 'run_nodes'])
 const READ_TOOLS = new Set(['get_canvas_state', 'get_canvas_overview', 'get_canvas_node'])
 
+/**
+ * 量词 → 展示单位。
+ *
+ * 「24 个镜头」在界面上要读成「已创建 8/24 **个镜头**」，而不是干巴巴的「个节点」——
+ * 单位跟着 Agent 声明的对象走，用户一眼知道在数什么。
+ */
+const UNIT_BY_CLASSIFIER: Record<string, string> = {
+  镜头: '个镜头',
+  场景: '个场景',
+  分镜: '个分镜',
+  画面: '个画面',
+  素材: '个素材',
+  节点: '个节点',
+  图片: '张图',
+  图: '张图',
+  视频: '条视频',
+}
+
+/** 数字 + 量词 + 分类词（「24 个镜头」「12 张分镜图」）；也覆盖「共 24 个镜头」这种带总数副词的写法 */
+const DECLARED_TARGET_PATTERN = /(\d{1,4})\s*(?:个|张|条|幅|段|组)?\s*(镜头|场景|分镜|画面|素材|节点|图片|图|视频)/g
+/**
+ * 过去式标记：数字前的这一小段里有「已/已经/建好/完成」等，说明是在报告**已经做了多少**，
+ * 不是在说目标 —— 不能当分母。刻意只认明确过去式（不认裸「生成/创建」，那是常见的计划措辞）。
+ */
+const PAST_TENSE_BEFORE = /(?:已|已经|刚刚|刚才|完成|建好|建了|创建了|生成了|做了)/
+
+/**
+ * 从 Agent 的**声明文本**里解析目标总数（批次 3）。
+ *
+ * 只喂 `request_confirmation` 的 items —— 那是 Agent 在花钱前写下的计划逐条，
+ * 是**唯一可信的「声明」出处**。刻意不去解析回复正文里的裸数字：
+ * 「已创建 8 个场景节点」和「目标 24 个镜头」在纯文本里长得一样，正则分不清，
+ * 一旦把前者当分母，界面就会显示「8/8」这种假完成度 —— 这正是本项目踩过的坑。
+ * 宁可少显示分母，也不编。
+ *
+ * 同一批声明里取最大数（目标只会越说越大）；解析不出返回 undefined。
+ */
+export const parseDeclaredCanvasTarget = (
+  texts: ReadonlyArray<string>,
+): { total: number; unit: string } | undefined => {
+  let best: { total: number; unit: string } | undefined
+  for (const raw of texts) {
+    const text = String(raw || '')
+    if (!text) continue
+    DECLARED_TARGET_PATTERN.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = DECLARED_TARGET_PATTERN.exec(text)) !== null) {
+      const total = Number(match[1])
+      if (!Number.isFinite(total) || total <= 0) continue
+      const before = text.slice(Math.max(0, match.index - 8), match.index)
+      if (PAST_TENSE_BEFORE.test(before)) continue
+      const unit = UNIT_BY_CLASSIFIER[match[2]] || '个节点'
+      if (!best || total > best.total) best = { total, unit }
+    }
+  }
+  return best
+}
+
+/**
+ * 从工具回执里取**真正创建成功**的节点数（add_node / add_nodes）。
+ *
+ * 只数回执里带 id 的项：add_nodes 部分失败时失败项 id 为 null，不能算进去。
+ * 其它工具一律 0（本计数专指「声明式创建节点」这两件动作）。
+ */
+const resolveCreatedNodeCount = (
+  toolName: string | undefined,
+  resultText: string | undefined,
+): number => {
+  const tool = String(toolName || '')
+  if (tool !== 'add_node' && tool !== 'add_nodes') return 0
+  let payload: Record<string, unknown>
+  try {
+    payload = JSON.parse(String(resultText || '')) as Record<string, unknown>
+  } catch {
+    return 0
+  }
+  if (!payload || typeof payload !== 'object') return 0
+  if (tool === 'add_node') return String(payload.id || '').trim() ? 1 : 0
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
+  return nodes.filter((node) => Boolean((node as { id?: unknown } | null)?.id)).length
+}
+
 /** 日志最多保留的条数：控制台是「最近发生了什么」，不是全量审计（全量在服务端日志里） */
 const CONSOLE_LOG_CAP = 20
 
@@ -146,6 +236,20 @@ interface FoldedConsole {
   log: InternalLogEntry[]
   progress?: CanvasAgentConsoleProgress
   current?: CanvasAgentConsoleCurrent
+  /** 本回合累计成功创建的节点数（add_node / add_nodes 跨批次累加） */
+  canvasCreated: number
+  /** Agent 声明过的目标总数（取最大）——没有声明就没有它，界面不给分母 */
+  canvasTarget?: { total: number; unit: string }
+}
+
+/** 目标总数只增不减：同一回合里声明多次取最大（越说越大才是目标） */
+const mergeDeclaredTarget = (
+  current: { total: number; unit: string } | undefined,
+  next: { total: number; unit: string } | undefined,
+): { total: number; unit: string } | undefined => {
+  if (!next) return current
+  if (!current || next.total > current.total) return next
+  return current
 }
 
 /** 把一条 running 的日志更新成终态：按 callId 精确配对；没有 callId 时退化为「最后一条 running」 */
@@ -211,6 +315,7 @@ const foldConsoleEvents = (
     phaseIndex: seedIndex,
     generationSubmitted: seedIndex >= PRODUCTION_INDEX,
     log: [],
+    canvasCreated: 0,
   }
 
   const advanceTo = (key?: CanvasAgentConsolePhaseKey) => {
@@ -253,6 +358,8 @@ const foldConsoleEvents = (
         folded.log = [...folded.log, { mark: 'running', text: `${phrase}…`, callId: event.callId }]
         if (RUN_TOOLS.has(tool)) folded.generationSubmitted = true
         if (READ_TOOLS.has(tool) && folded.generationSubmitted) advanceTo('qa')
+        // 声明可能在卡片弹出的那一刻（tool_start）就到；end 也会带一次，两处都并一次，取最大
+        folded.canvasTarget = mergeDeclaredTarget(folded.canvasTarget, event.declaredTarget)
         advanceTo(PHASE_BY_TOOL[tool])
         break
       }
@@ -268,7 +375,10 @@ const foldConsoleEvents = (
         if (!failed) {
           const batchProgress = resolveBatchProgress(tool, event.resultText)
           if (batchProgress) folded.progress = batchProgress
+          // 画布动作：只累计成功创建出来的节点数（失败项回执里没有 id，自然不算）
+          folded.canvasCreated += resolveCreatedNodeCount(tool, event.resultText)
         }
+        folded.canvasTarget = mergeDeclaredTarget(folded.canvasTarget, event.declaredTarget)
         if (READ_TOOLS.has(tool) && folded.generationSubmitted) advanceTo('qa')
         advanceTo(PHASE_BY_TOOL[tool])
         break
@@ -300,6 +410,17 @@ export const deriveCanvasAgentConsole = (
   const folded = foldConsoleEvents(events, input?.seed)
   const phaseIndex = clampPhaseIndex(folded.phaseIndex)
   const phase = CANVAS_AGENT_CONSOLE_PHASES[phaseIndex]
+  /**
+   * 画布动作：只在**真的创建过节点**时出现。
+   * `target` 只有 Agent 声明过才带（没有声明就只显示「已创建 N 个」）——绝不编分母。
+   */
+  const canvasActions: CanvasAgentConsoleCanvasActions | undefined = folded.canvasCreated > 0
+    ? {
+        created: folded.canvasCreated,
+        ...(folded.canvasTarget ? { target: folded.canvasTarget.total } : {}),
+        unit: folded.canvasTarget?.unit || '个节点',
+      }
+    : undefined
   const state: CanvasAgentConsoleState = {
     agent: 'director',
     project: String(input?.project || ''),
@@ -312,6 +433,7 @@ export const deriveCanvasAgentConsole = (
     },
     ...(folded.progress ? { progress: folded.progress } : {}),
     ...(folded.current ? { current: folded.current } : {}),
+    ...(canvasActions ? { canvasActions } : {}),
     log: folded.log.map((item) => ({ mark: item.mark, text: item.text })),
   }
   return { state, memory: { phase: phase.key } }

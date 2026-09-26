@@ -47,6 +47,7 @@ import {
 import {
   buildCanvasAgentConsoleStreamEvent,
   deriveCanvasAgentConsole,
+  parseDeclaredCanvasTarget,
   type CanvasAgentConsoleEvent,
 } from "./canvas-agent-console-state";
 import type { CanvasAgentConsoleSessionMemory } from "../../src/shared/canvas-agent-console";
@@ -629,11 +630,21 @@ export const executeCanvasAgentTaskFlow = async (
 
           // 控制台：工具开始（真实事件，非模型自报）——目标节点 id 只来自参数，不做推断
           const consoleTarget = resolveConsoleTarget(args);
+          /**
+           * 画布动作计数：只有 request_confirmation 的逐条事项是**可信的目标声明**出处
+           * （见 parseDeclaredCanvasTarget 注释），从这里解析出「24 个镜头」之类的目标总数。
+           */
+          const declaredTarget = definition.name === "request_confirmation"
+            ? parseDeclaredCanvasTarget(
+                Array.isArray(args.items) ? args.items.map((item) => String(item || "")) : [],
+              )
+            : undefined;
           pushConsoleEvent({
             type: "tool_start",
             toolName: definition.name,
             callId: toolCallId,
             ...(consoleTarget ? { target: consoleTarget } : {}),
+            ...(declaredTarget ? { declaredTarget } : {}),
           });
 
           if (!definition.requiresClient) {
@@ -726,6 +737,7 @@ export const executeCanvasAgentTaskFlow = async (
             ok: result.ok,
             summary: String(result.summary || ""),
             resultText: result.result,
+            ...(declaredTarget ? { declaredTarget } : {}),
           });
 
           return {

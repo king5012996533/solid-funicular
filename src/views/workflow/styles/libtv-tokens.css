@@ -37,6 +37,8 @@
   --canvas-node-bg: #262626;
   --canvas-node-border: #ffffff14;
   --canvas-node-border-selected: #a8a8a8;
+  /* Agent 画布动作高亮（批次 3）：只给节点描边用，克制的一圈强调色，不发光不放缩 */
+  --canvas-agent-active: #7c5cff;
   /* 有图节点的图片宽度：图片满宽，卡片高度按图片比例撑开 */
   --image-node-image-width: 420px;
 
@@ -92,6 +94,8 @@ body[lv-theme='light'] .workflow-container {
   --canvas-node-bg: #ffffff;
   --canvas-node-border: #00000014;
   --canvas-node-border-selected: #6b6b6b;
+  /* 浅底上紫色要压深一点才够对比，同样只用于 Agent 动作描边 */
+  --canvas-agent-active: #6a45f5;
 
   --canvas-float-block-default: #ffffffeb;
   --canvas-float-block-hover: #0000000d;

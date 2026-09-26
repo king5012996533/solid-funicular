@@ -59,6 +59,24 @@ export interface CanvasAgentConsoleCurrent {
   target?: string
 }
 
+/**
+ * 本回合的「画布动作」累计（批次 3）。
+ *
+ * 控制台里单独一行展示（例如「🖼 已创建 8/24 个镜头」）：
+ *   · `created` —— 本回合 `add_node` / `add_nodes` **成功创建**的节点数，跨批次累加；
+ *   · `target`  —— **只有 Agent 明确声明过目标总数时才出现**（声明写在 request_confirmation 的
+ *     逐条事项里）；声明不到就**没有这个字段**，界面只显示「已创建 N 个」，绝不编分母 ——
+ *     这条与 `progress` 同一条规矩（本项目在「没分母却给百分比」上踩过两次）。
+ *   · `unit`    —— 展示单位，随声明的量词变（声明「24 个镜头」→「个镜头」；没声明→「个节点」）。
+ *
+ * 与其它控制台字段一样：**只走 SSE 给界面看，不写进转录、不进模型上下文**。
+ */
+export interface CanvasAgentConsoleCanvasActions {
+  created: number
+  target?: number
+  unit: string
+}
+
 export interface CanvasAgentConsoleState {
   agent: 'director'
   /** 项目名（画布名）；服务端取 requestBody.canvasName，前端拿不到时回落到面板标题 */
@@ -67,6 +85,8 @@ export interface CanvasAgentConsoleState {
   stage: CanvasAgentConsolePhase
   progress?: CanvasAgentConsoleProgress
   current?: CanvasAgentConsoleCurrent
+  /** 本回合的画布动作累计（创建了多少、目标多少）——只在真的动过画布时出现 */
+  canvasActions?: CanvasAgentConsoleCanvasActions
   log: CanvasAgentConsoleLogEntry[]
 }
 

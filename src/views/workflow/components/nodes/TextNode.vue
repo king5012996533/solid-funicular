@@ -9,7 +9,7 @@
  *   - 选中态：只把 1px 常驻描边换成 --canvas-node-border-selected（对齐 LibTV）
  *   - 左右连接点保留 Vue Flow Handle，但视觉对齐圆形 + 图标
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVueFlow } from '@vue-flow/core'
 import {
   CopyDocument,
@@ -36,6 +36,10 @@ import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import {
+  clearAgentActiveNodesForIds,
+  useAgentActiveNodes,
+} from '../../composables/useAgentActiveNodes'
+import {
   updateNode,
   removeNode,
   duplicateNode,
@@ -61,6 +65,14 @@ const props = defineProps<{
 const isSelected = computed(() => props.selected || props.data?.selected)
 const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || 'Text')
 const { updateNodeInternals } = useVueFlow()
+
+/** Agent 画布动作高亮（批次 3）：仅 UI 的瞬时描边，不进节点数据 */
+const { isAgentCreated, isAgentGenerating, staggerDelayMs } = useAgentActiveNodes()
+const agentCreated = computed(() => isAgentCreated(props.id))
+const agentGenerating = computed(() => isAgentGenerating(props.id))
+const agentHighlightStyle = computed(() => ({
+  '--agent-stagger-delay': `${staggerDelayMs(props.id)}ms`,
+}))
 
 /** 输入框浮层：固定 660 宽 + 不随画布缩放 + 被底部工具栏挡住时自动上移（规则见 useComposerPanel.ts） */
 const composerRef = ref<HTMLElement | null>(null)
@@ -113,6 +125,11 @@ watch(
 
 onMounted(() => {
   void loadPublicModelCatalog()
+})
+
+onBeforeUnmount(() => {
+  // 组件卸载（切画布/删节点）：收掉本节点的高亮，别养着一个不再存在的 id
+  clearAgentActiveNodesForIds([props.id])
 })
 
 watch(() => props.data?.content, (v) => { if (v !== undefined) content.value = v })
@@ -351,7 +368,11 @@ watch(content, async () => {
     </div>
 
     <!-- 节点本体 -->
-    <div class="text-node-card" :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing, 'is-collapsed': collapsed }" :style="cardSizeStyle(CANVAS_TOOL_NODE_SIZE)">
+    <div
+      class="text-node-card"
+      :class="{ 'is-selected': isSelected, 'is-empty': isEmpty, 'is-polishing': isPolishing, 'is-collapsed': collapsed, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
+      :style="[cardSizeStyle(CANVAS_TOOL_NODE_SIZE), agentHighlightStyle]"
+    >
 
       <!-- 折叠态：显示正文开头，光看标题认不出哪段文本 -->
       <div v-if="collapsed" class="node-collapsed-summary">
@@ -514,6 +535,26 @@ watch(content, async () => {
 }
 .text-node-card.is-selected {
   border-color: var(--canvas-node-border-selected);
+}
+/* Agent 画布动作高亮（仅 UI 的瞬时描边，不进节点数据）：刚创建=实线渐隐，生成中=虚线脉冲 */
+.text-node-card.is-agent-created {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  animation: canvas-agent-created-fade 4s ease-out forwards;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+.text-node-card.is-agent-generating {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  border-style: dashed;
+  animation: canvas-agent-generating-pulse 1.6s ease-in-out infinite;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+@keyframes canvas-agent-created-fade {
+  0%, 70% { border-color: var(--canvas-agent-active, #7c5cff); }
+  100% { border-color: var(--canvas-node-border, #ffffff14); }
+}
+@keyframes canvas-agent-generating-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+  50% { box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.22); }
 }
 
 /* AI 润色中指示器 */

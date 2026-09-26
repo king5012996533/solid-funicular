@@ -29,6 +29,10 @@ import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { createGenerationTask, resolveGenerationTaskModel, subscribeGenerationTaskEvents, type GenerationTaskStreamEvent } from '@/api/generation-tasks'
 import { registerNodeRunner, unregisterNodeRunner } from '@/views/workflow/composables/useCanvasNodeRunner'
 import {
+  clearAgentActiveNodesForIds,
+  useAgentActiveNodes,
+} from '@/views/workflow/composables/useAgentActiveNodes'
+import {
   updateNode,
   removeNode,
   duplicateNode,
@@ -54,6 +58,22 @@ const props = defineProps<{
 const isSelected = computed(() => props.selected || props.data?.selected)
 const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || 'Video')
 const { updateNodeInternals } = useVueFlow()
+
+/** Agent 画布动作高亮（批次 3）：仅 UI 的瞬时描边，不进节点数据。详见 ImageNode 同款注释 */
+const { isAgentCreated, isAgentGenerating, staggerDelayMs } = useAgentActiveNodes()
+const agentCreated = computed(() => isAgentCreated(props.id))
+const agentGenerating = computed(() => isAgentGenerating(props.id))
+const agentHighlightStyle = computed(() => ({
+  '--agent-stagger-delay': `${staggerDelayMs(props.id)}ms`,
+}))
+
+// 生成终态（loading 落回 false）：收掉本节点的「生成中」高亮（不能用 TTL 猜生成何时结束）
+watch(
+  () => props.data?.loading,
+  (loading) => {
+    if (loading === false) clearAgentActiveNodesForIds([props.id])
+  },
+)
 
 const showActions = ref(false)
 const videoUrl = ref(props.data?.url || '')
@@ -531,6 +551,8 @@ onBeforeUnmount(() => {
   unregisterNodeRunner(props.id)
   taskStreamController?.abort()
   taskStreamController = null
+  // 组件卸载（切画布/删节点）：收掉本节点的高亮，别养着一个不再存在的 id
+  clearAgentActiveNodesForIds([props.id])
 })
 </script>
 
@@ -574,7 +596,11 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
-    <div class="video-node-card" :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }" :style="cardSizeStyle(cardSize)">
+    <div
+      class="video-node-card"
+      :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
+      :style="[cardSizeStyle(cardSize), agentHighlightStyle]"
+    >
 
       <div v-if="collapsed" class="node-collapsed-summary">
         <span class="node-collapsed-summary__text">
@@ -807,6 +833,26 @@ onBeforeUnmount(() => {
 }
 .video-node-card.is-selected {
   border-color: var(--canvas-node-border-selected);
+}
+/* Agent 画布动作高亮（仅 UI 的瞬时描边，不进节点数据）：刚创建=实线渐隐，生成中=虚线脉冲 */
+.video-node-card.is-agent-created {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  animation: canvas-agent-created-fade 4s ease-out forwards;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+.video-node-card.is-agent-generating {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  border-style: dashed;
+  animation: canvas-agent-generating-pulse 1.6s ease-in-out infinite;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+@keyframes canvas-agent-created-fade {
+  0%, 70% { border-color: var(--canvas-agent-active, #7c5cff); }
+  100% { border-color: var(--canvas-node-border, #ffffff14); }
+}
+@keyframes canvas-agent-generating-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+  50% { box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.22); }
 }
 
 .video-node-empty {

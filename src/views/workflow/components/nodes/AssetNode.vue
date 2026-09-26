@@ -10,7 +10,7 @@
  * 下游的参考图能顺着连线找到出处，而不是凭空出现在某个节点的参数里。
  */
 
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onBeforeUnmount, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Picture, Delete, Upload as UploadIcon, Search } from '@element-plus/icons-vue'
 import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/canvas/CanvasNodeHoverToolbar.vue'
@@ -18,6 +18,10 @@ import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { updateNode, removeNode, duplicateNode, type WorkflowAssetNodeData } from '../../composables/useWorkflowCanvas'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
+import {
+  clearAgentActiveNodesForIds,
+  useAgentActiveNodes,
+} from '../../composables/useAgentActiveNodes'
 import { listAssetItems, type PersistedAssetItem } from '@/api/asset-items'
 import { CANVAS_TOOL_NODE_SIZE, cardSizeStyle } from '../../config/node-size'
 
@@ -33,6 +37,14 @@ const { collapsed, toggleCollapse } = useNodeCollapse(() => props.id)
 const isSelected = computed(() => Boolean(props.selected))
 // hover 工具条的显隐：与其它节点一致，鼠标进出时切换
 const showActions = ref(false)
+
+/** Agent 画布动作高亮（批次 3）：仅 UI 的瞬时描边，不进节点数据 */
+const { isAgentCreated, isAgentGenerating, staggerDelayMs } = useAgentActiveNodes()
+const agentCreated = computed(() => isAgentCreated(props.id))
+const agentGenerating = computed(() => isAgentGenerating(props.id))
+const agentHighlightStyle = computed(() => ({
+  '--agent-stagger-delay': `${staggerDelayMs(props.id)}ms`,
+}))
 const assetUrl = computed(() => String(props.data?.url || ''))
 const assetName = computed(() => String(props.data?.name || ''))
 
@@ -133,6 +145,11 @@ onMounted(() => {
   // 已经有素材就不预加载列表，省一次请求
   if (!assetUrl.value) void loadAssets()
 })
+
+onBeforeUnmount(() => {
+  // 组件卸载（切画布/删节点）：收掉本节点的高亮，别养着一个不再存在的 id
+  clearAgentActiveNodesForIds([props.id])
+})
 </script>
 
 <template>
@@ -169,8 +186,8 @@ onMounted(() => {
 
     <div
       class="asset-node-card"
-      :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed }"
-      :style="cardSizeStyle(CANVAS_TOOL_NODE_SIZE)"
+      :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
+      :style="[cardSizeStyle(CANVAS_TOOL_NODE_SIZE), agentHighlightStyle]"
     >
       <!-- 折叠态：显示素材名，光看标题认不出是哪一个 -->
       <div v-if="collapsed" class="node-collapsed-summary">
@@ -313,6 +330,27 @@ onMounted(() => {
 
 .asset-node-card.is-selected {
   border-color: var(--canvas-node-border-selected);
+}
+
+/* Agent 画布动作高亮（仅 UI 的瞬时描边，不进节点数据）：刚创建=实线渐隐，生成中=虚线脉冲 */
+.asset-node-card.is-agent-created {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  animation: canvas-agent-created-fade 4s ease-out forwards;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+.asset-node-card.is-agent-generating {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  border-style: dashed;
+  animation: canvas-agent-generating-pulse 1.6s ease-in-out infinite;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+@keyframes canvas-agent-created-fade {
+  0%, 70% { border-color: var(--canvas-agent-active, #7c5cff); }
+  100% { border-color: var(--canvas-node-border, #ffffff14); }
+}
+@keyframes canvas-agent-generating-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+  50% { box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.22); }
 }
 
 /* 已选素材：图撑满，底部一条名称栏 */

@@ -57,6 +57,10 @@ import {
 } from '@/shared/background-delivery-poll'
 import { appendImageReferencesToRequestBody } from '@/shared/image-generation-request'
 import { registerNodeRunner, unregisterNodeRunner } from '@/views/workflow/composables/useCanvasNodeRunner'
+import {
+  clearAgentActiveNodesForIds,
+  useAgentActiveNodes,
+} from '@/views/workflow/composables/useAgentActiveNodes'
 
 const props = defineProps<{
   id: string
@@ -64,6 +68,26 @@ const props = defineProps<{
   selected?: boolean
 }>()
 const isSelected = computed(() => props.selected || props.data?.selected)
+
+/**
+ * Agent 画布动作高亮（批次 3）：仅 UI 的瞬时描边，**不是节点数据**。
+ * `is-agent-created`（刚创建，实线渐隐，TTL 自动清）与 `is-agent-generating`（生成中，虚线脉冲，
+ * 等生成终态/回合结束清）。错开延迟由 `--agent-stagger-delay` 驱动批量铺开的节奏。
+ */
+const { isAgentCreated, isAgentGenerating, staggerDelayMs } = useAgentActiveNodes()
+const agentCreated = computed(() => isAgentCreated(props.id))
+const agentGenerating = computed(() => isAgentGenerating(props.id))
+const agentHighlightStyle = computed(() => ({
+  '--agent-stagger-delay': `${staggerDelayMs(props.id)}ms`,
+}))
+
+// 生成终态（loading 落回 false）时收掉本节点的「生成中」高亮 —— 不能靠 TTL 猜生成何时结束
+watch(
+  () => props.data?.loading,
+  (loading) => {
+    if (loading === false) clearAgentActiveNodesForIds([props.id])
+  },
+)
 const { updateNodeInternals } = useVueFlow()
 const imageUrl = ref(props.data?.url || '')
 const isLoading = ref(!!props.data?.loading)
@@ -1008,6 +1032,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   unregisterNodeRunner(props.id)
+  // 组件卸载（切画布/删节点）：收掉本节点的高亮，别让状态在内存里养着一个不再存在的 id
+  clearAgentActiveNodesForIds([props.id])
 })
 
 /**
@@ -1201,7 +1227,11 @@ watch(
 
 <template>
   <div class="image-node-wrapper">
-    <div class="image-node-card" :class="{ 'is-selected': isSelected }" :style="cardSizeStyle(cardSize)">
+    <div
+      class="image-node-card"
+      :class="{ 'is-selected': isSelected, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
+      :style="[cardSizeStyle(cardSize), agentHighlightStyle]"
+    >
       <div v-if="showLoading" class="image-node-loading" aria-label="图片生成中">
         <div class="image-node-spinner" />
         <div class="image-node-loading-meta">
@@ -1308,6 +1338,28 @@ watch(
 /* 尺寸由 config/node-size.ts 算出后内联绑定（跟比例走），这里不再写死 min-width/min-height */
 .image-node-card { position: relative; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
 .image-node-card.is-selected { border-color: var(--canvas-node-border-selected); }
+/* Agent 画布动作高亮（仅 UI 的瞬时描边，不进节点数据）。
+   刚创建=实线描边渐隐；生成中=虚线脉冲。都克制：只加一圈细描边，不发光不放缩。
+   错开延迟来自内联的 --agent-stagger-delay，让批量创建的节点依次点亮。 */
+.image-node-card.is-agent-created {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  animation: canvas-agent-created-fade 4s ease-out forwards;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+.image-node-card.is-agent-generating {
+  border-color: var(--canvas-agent-active, #7c5cff);
+  border-style: dashed;
+  animation: canvas-agent-generating-pulse 1.6s ease-in-out infinite;
+  animation-delay: var(--agent-stagger-delay, 0ms);
+}
+@keyframes canvas-agent-created-fade {
+  0%, 70% { border-color: var(--canvas-agent-active, #7c5cff); }
+  100% { border-color: var(--canvas-node-border, #ffffff14); }
+}
+@keyframes canvas-agent-generating-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0); }
+  50% { box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.22); }
+}
 .image-node-loading, .image-node-error { display: grid; place-items: center; width: 100%; height: 100%; }
 .image-node-error {
   display: flex;

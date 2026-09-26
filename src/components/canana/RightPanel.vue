@@ -32,6 +32,10 @@ import {
 import { useChatSessions } from '@/composables/useChatSessions'
 import { buildAssistantChatMessages } from '@/composables/assistant-chat-history'
 import { useCanvasAgentBridge } from '@/views/workflow/agent/use-canvas-agent-bridge'
+import {
+  clearAgentGeneratingNodes,
+  resetAgentActiveNodes,
+} from '@/views/workflow/composables/useAgentActiveNodes'
 import { CANVAS_AGENT_SKILL_KEY } from '@/shared/canvas-agent-tools'
 import SelectPopup from '@/components/generate/common/SelectPopup.vue'
 import { getAgentModel, setAgentModel } from '@/api/agent'
@@ -260,6 +264,8 @@ const cleanupStreams = () => {
   if (askUserRequest.value) settleAskUser([], true)
   // 控制台状态属于「当前会话这一轮」，切会话/卸载时要一并清掉，否则会串到别的会话
   consoleState.value = null
+  // 画布动作高亮同理：切会话/切画布/卸载时全清并取消定时器，绝不把高亮留给下一张画布
+  resetAgentActiveNodes()
 }
 
 /**
@@ -947,6 +953,9 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   } finally {
     // 这一轮无论怎么结束，「执行中…」都不能留在界面上
     aiMsg.pendingLabel = ''
+    // 回合结束：收掉所有「生成中」高亮（它没有 TTL，只能在这里/节点终态清），
+    // 「刚创建」交给它自己的 4 秒 TTL 渐隐，不必提前掐断。
+    clearAgentGeneratingNodes()
     // 任务结束后还有卡片挂着（用户没答复就断了），按未答复收掉，别让它一直占着位置
     if (confirmRequest.value) settleConfirm(false)
     if (askUserRequest.value) settleAskUser([], true)
@@ -1174,6 +1183,14 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
         <!-- 进度只在真有分母时出现（服务端保证：没有分母就不带 progress 字段） -->
         <div v-if="consoleState.progress" class="agent-console__progress">
           {{ consoleState.progress.done }}/{{ consoleState.progress.total }} {{ consoleState.progress.unit }}
+        </div>
+        <!--
+          画布动作（批次 3）：本回合创建了多少节点。
+          有「/目标」时才是 Agent 声明过的总数（服务端只从 request_confirmation 的逐条事项里解析）；
+          没有声明就只显示「已创建 N 个」——不编分母。
+        -->
+        <div v-if="consoleState.canvasActions" class="agent-console__canvas-actions">
+          🖼 已创建 {{ consoleState.canvasActions.created }}<template v-if="consoleState.canvasActions.target">/{{ consoleState.canvasActions.target }}</template> {{ consoleState.canvasActions.unit }}
         </div>
         <ul v-if="consoleState.log?.length" class="agent-console__log">
           <li
@@ -1840,6 +1857,11 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-console__progress {
   margin-top: 2px;
   color: var(--agent-text-2, #9aa0a8);
+}
+/* 画布动作：与进度同层，单独一行（🖼 已创建 8/24 个镜头） */
+.agent-console__canvas-actions {
+  margin-top: 2px;
+  color: var(--agent-text, #e8eaed);
 }
 .agent-console__log {
   margin: 5px 0 0;
