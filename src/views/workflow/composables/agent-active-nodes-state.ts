@@ -252,6 +252,17 @@ export const resolveAgentNodeMarks = (
     );
     return { created: [], generating: submitted, cleared: [] };
   }
+  if (tool === "generate") {
+    // generate 是第一步收敛后的唯一生成入口：created 里的新节点点亮，submitted 的节点标生成中
+    const nodes = Array.isArray(payload?.nodes) ? (payload?.nodes as Array<Record<string, unknown>>) : [];
+    const generating = normalizeAgentNodeIds(
+      nodes.filter((item) => item?.submitted === true).map((item) => String(item?.id || "")),
+    );
+    const created = normalizeAgentNodeIds(
+      Array.isArray(payload?.created) ? (payload?.created as unknown[]).map((item) => String(item || "")) : [],
+    );
+    return { created, generating, cleared: [] };
+  }
   if (tool === "remove_node") {
     const id = String(payload?.id || "").trim();
     return id ? { created: [], generating: [], cleared: [id] } : empty;

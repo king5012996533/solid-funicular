@@ -33,7 +33,65 @@ export interface CanvasAgentToolDefinition {
   };
   /** 是否需要前端执行（画布是客户端状态；服务端 Agent 靠这个判断哪些工具要走桥） */
   requiresClient: boolean;
+  /**
+   * 是否**暴露给模型**（默认 true）。
+   *
+   * 2026-09-26 第一步「工具面收敛」加的：把 add_node(s)/run_node(s)/connect_nodes… 这些
+   * **图操作管道**从模型可见清单里摘掉（它们的活并入语义工具 `generate`），但定义与执行实现
+   * 先**留着并存**（见 CANVAS_AGENT_DISABLED_TOOL_GUIDANCE），避免一次性大爆炸；
+   * 跑一阵确认无人再调后再删代码。
+   *
+   * 关键：摘的是**可见性**（服务端不再声明、前端不再派发），不是仅改描述 —— 只改描述等于没摘。
+   */
+  modelVisible?: boolean;
 }
+
+/** 工具是否对模型可见（缺省即可见） */
+export const isCanvasAgentToolModelVisible = (tool: CanvasAgentToolDefinition): boolean =>
+  tool.modelVisible !== false;
+
+/** 模型可见的工具定义清单（服务端声明工具、前端派生 schema 都用它，防止两侧漂移） */
+export const getModelVisibleCanvasAgentTools = (): CanvasAgentToolDefinition[] =>
+  CANVAS_AGENT_TOOL_DEFINITIONS.filter(isCanvasAgentToolModelVisible);
+
+/**
+ * 已停用的图操作类工具 → 给模型的**替代指引**（2026-09-26 第一步）。
+ *
+ * 为什么留这张表而不是直接删定义：旧转录/旧提示词里仍可能出现这些名字，一旦被调用
+ * 必须回一句**可执行的替代方案**（例如「图操作已并入 generate：……」），
+ * **不能静默失败** —— 静默失败会让模型原地重试，正是这轮要治的病灶。
+ * 底层实现保留（generate 复用其中的画布操作），淘汰留到下一步。
+ */
+export const CANVAS_AGENT_DISABLED_TOOL_GUIDANCE: Record<string, string> = {
+  get_canvas_state:
+    "get_canvas_state 已停用：定位改用 get_canvas_overview（一行一个节点，只给 id/类型/状态/产物），看细节改用 get_canvas_node(id)；确需整张画布时也请用这两个工具，不要拉回整张。",
+  add_node:
+    'add_node 已停用：建节点并入 generate —— generate(target="new", spec={ kind, prompt, label, model, ratio, ... }) 会建节点、连线、挂参考并提交生成，你只描述意图。',
+  add_nodes:
+    'add_nodes 已停用：批量建节点并入 generate —— generate(target="new", nodes=[{...},{...}]) 一次建好并提交；只引用已有节点时用 target=[<id>,<id>...]。',
+  update_node:
+    "update_node 已停用：改节点并入 generate —— generate(target=<节点 id>, spec={ prompt, model, ratio, quality, label }) 会改好参数并重新生成。",
+  remove_node:
+    "remove_node 已停用：本批不再提供删除节点的工具（避免误删），需要删除请让用户自己在画布上操作。",
+  select_nodes:
+    "select_nodes 已停用：不需要单独选中 —— generate 提交后画布会自动点亮刚创建/刚提交的节点，用户自己看得到。",
+  connect_nodes:
+    "connect_nodes 已停用：连线并入 generate —— 在 spec.connectFrom 里给出要连的上游节点 id，generate 会自动连线（表达继承关系）。",
+  attach_reference_images:
+    "attach_reference_images 已停用：挂参考图并入 generate —— 在 spec.references 里给出参考图所在的节点 id，generate 会解析成该节点的出图并挂上。",
+  run_node:
+    "run_node 已停用：提交生成改用 generate(target=<节点 id>, spec={...})，提交即回执（「已提交 · 生成中」），不要在上一轮等出图。",
+  run_nodes:
+    "run_nodes 已停用：批量提交改用 generate(target=[<id>,<id>...], spec={...})，提交即回执并逐节点给提交状态。",
+  list_workflow_templates:
+    "list_workflow_templates 已停用：模板一键套用本批下线，请直接用 generate(target=\"new\", spec={...}) 把需要的节点建出来并提交。",
+  apply_workflow_template:
+    "apply_workflow_template 已停用：套用模板本批下线，请用 generate(target=\"new\", spec={...}) 逐个建节点并提交生成。",
+};
+
+/** 取某个已停用工具的替代指引；不在停用清单里返回空串 */
+export const describeDisabledCanvasAgentTool = (name: string): string =>
+  CANVAS_AGENT_DISABLED_TOOL_GUIDANCE[String(name || "").trim()] || "";
 
 /**
  * 「成片生产」的完整链路手册（第 1~10 步 + 9.5 步）。
@@ -51,14 +109,13 @@ export const CANVAS_AGENT_STORYBOARD_PRODUCTION_PLAYBOOK = `# 完整链路（**�
 ## 第 1 步 · 需要时读画布（**不是开场动作；先单节点后概览**）
 只有要动已有节点、要避免覆盖已有内容、要连谁挂谁时才读；闲聊/问答/纯新建设计不必读。
 需要细节先读单节点 get_canvas_node(id)；不够定位再用 get_canvas_overview 看清已有什么（素材/母版/分镜表），别重复造、别覆盖。
-**不要为了拿 id 或看状态去调 get_canvas_state**（它返回整张画布，又贵又慢）；确需整张画布时才用它。
 节点 id 只能来自工具返回，**不要编造**。
 
 ## 第 2 步 · 拆剧本 → 分镜表
-把用户的剧本/创意拆成**分镜表**，落到一个 text 节点上（add_node type=text），内容用 Markdown 表格，
+把用户的剧本/创意拆成**分镜表**，用 generate(target="new", spec={ kind:"text", label:"分镜表", content }) 落到一个 text 节点上，内容用 Markdown 表格，
 每条包含：镜号、画面内容、景别与运镜、台词/旁白、时长（秒）。
 镜数按内容定，一般 6~12 条；用户指定了就按他说的。
-**这一步不花钱**，做完先把分镜表讲给用户听（一两句概括 + 镜数）。
+**这一步不花钱**（text 节点不会提交生成），做完先把分镜表讲给用户听（一两句概括 + 镜数）。
 
 ## 第 3 步 · 定母版（连续性全靠这一步）
 为主要角色、关键场景各建一个 image 节点当**母版**（一般 2~4 个）。提示词里写死外观特征
@@ -70,37 +127,38 @@ export const CANVAS_AGENT_STORYBOARD_PRODUCTION_PLAYBOOK = `# 完整链路（**�
   1. 将要建多少节点、出多少张图/视频；
   2. 逐条列出要生成的提示词（或至少概括到用户能核对）；
   3. **会预扣积分**（不要自己算数字；余额不足服务端会拦下、失败自动退还）。
-用户同意之后才继续；拒绝就换方案或停下来问他。服务端也会硬拦没有确认的付费动作。
+用户同意之后才继续；拒绝就换方案或停下来问他。服务端也会硬拦没有确认的动作。
 
 ## 第 5 步 · 批量提交母版生成（**提交即回执，不要等出图**）
-用 run_nodes 一次把母版节点**提交**起来。回执是「已提交 · 生成中」，**这一轮不会等出图**（出图要几分钟）。
+用 generate(target=[母版节点 id...], spec={...}) 一次把母版节点**提交**起来。
+回执是「已提交 · 生成中」，**这一轮不会等出图**（出图要几分钟）。
 拿到回执就继续往下做，**不要为了等结果反复读画布或轮询**。确实需要某张母版图时，读一次 get_canvas_node(id)：
 generationStatus 还是 generating 就先做不依赖它的步骤（比如铺分镜表），别原地打转。
 
 ## 第 6 步 · 铺分镜节点
-用 add_nodes 一次建好分镜节点（一次不超过 12 个），每个 image 节点的提示词 =
-**母版的外观特征 + 这一镜的画面/景别/运镜**。再用 connect_nodes 的 links 参数，
-一次把母版连到对应的分镜节点（表达继承关系）。
+用 generate(target="new", nodes=[{...},{...}]) 一次建好分镜节点（一次不超过 12 个），每个 image 节点的提示词 =
+**母版的外观特征 + 这一镜的画面/景别/运镜**；在每项的 spec.connectFrom 里给母版节点 id，
+工具会自动把母版连到对应分镜节点（表达继承关系）。
 
 ## 第 7 步 · 把母版图挂给分镜（continuity 的关键动作）
-母版出图之后，用 attach_reference_images 把**母版节点实际生成出来的那张图**（get_canvas_node 里的
-data.url）挂到它的分镜节点上。挂上之后执行分镜节点会走图生图，角色才真的长得一样。
+母版出图之后，用 generate(target=[分镜节点 id...], spec={ references:[母版节点 id...] }) 让分镜挂上
+**母版节点实际生成出来的那张图**（工具会把节点 id 解析成出图地址），挂上之后那次生成会走图生图，角色才真的长得一样。
 只靠文字描述是做不到的 —— 这一步不做，出来的每一张都是不同的脸。
 若读到的 generationStatus 还是 generating（图还没出来），就先把分镜铺完、把不依赖它的活做完，
-再回来读一次挂上；**不要卡在原地反复读**。挂图失败要如实说清（例如「母版图还没出来」）。
+再回来重新 generate 一次挂上；**不要卡在原地反复读**。挂图失败要如实说清（例如「母版图还没出来」）。
 
 ## 第 8 步 · 出分镜图
-再要一次确认（如果这一批与第 4 步说的不一致，尤其规模变大了），然后用 run_nodes 批量**提交**分镜节点
+再要一次确认（如果这一批与第 4 步说的不一致，尤其规模变大了），然后用 generate(target=[分镜节点 id...], spec={...}) 批量**提交**分镜节点
 （同样是提交即回执，不等出图）。
 
 ## 第 9 步 · 分镜视频（用户要动起来的镜头才做）
-需要运动的镜头建 video 节点（提示词写清运镜与动作），同样先确认再批量执行。
+需要运动的镜头用 generate(target="new", spec={ kind:"video", prompt }) 建 video 节点（提示词写清运镜与动作），同样先确认再批量提交。
 
 ## 第 9.5 步 · 批量生成前先预校验（硬要求）
 调 preflight_check，把这一批节点过一遍：提示词、模型/画幅取值、继承链、参考图是否还能访问。
 **报告不过就不要开始生成** —— 带着空提示词或失效参考图跑，等于把用户的钱花在废图上。
 报告里的每条问题都带「哪个节点 + 怎么改」，照着修完再重跑一次 preflight_check。
-（服务端与客户端都会在 run_nodes 时复核报告是否仍然有效：过期、覆盖面不符、参考图丢失都会被拦下，
+（generate 在提交前会自己再复核一遍报告是否仍然有效：过期、覆盖面不符、参考图丢失都会被拦下，
 所以别想着跳过这一步 —— 跳过了也跑不动。）
 
 ## 第 10 步 · 汇报
@@ -234,6 +292,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       "读取整张画布的完整现状：全部节点（含提示词/模型/状态/是否已有出图）、全部连线、当前选中的节点。**上下文开销大**，**按需读取** —— 不是每轮开场动作，只在确实需要整张画布时才用 —— 定位节点用 get_canvas_overview，看某个节点的细节用 get_canvas_node(id)。判断某个节点还要不要执行时，看它的 hasImage 与 status：hasImage 为 true 或 status 为「生成中」都说明它已经有结果或正在跑，不要对它再提交生成。",
     parameters: { type: "object", properties: {}, required: [] },
     requiresClient: true,
+    // 第一步：整画布读停用（模型可见清单里移除），替代指引见 CANVAS_AGENT_DISABLED_TOOL_GUIDANCE
+    modelVisible: false,
   },
   {
     /**
@@ -298,6 +358,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["type"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "update_node",
@@ -318,6 +380,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["id"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     /**
@@ -357,6 +421,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["nodes"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     /**
@@ -370,7 +436,7 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
     name: "preflight_check",
     label: "批量预校验",
     description:
-      "批量执行（run_nodes）之前检查这批节点「能不能跑」：提示词是否为空/超长/含未替换占位符、模型与画幅取值是否合法、分镜是否真的继承了母版、参考图是否还能访问、余额是否够这一批。执行在客户端完成（读画布、探图、跑校验器），你拿到的是报告。报告不过就别开始生成 —— 带着问题跑等于白花钱。",
+      "提交生成（generate）之前检查这批节点「能不能跑」：提示词是否为空/超长/含未替换占位符、模型与画幅取值是否合法、分镜是否真的继承了母版、参考图是否还能访问、余额是否够这一批。执行在客户端完成（读画布、探图、跑校验器），你拿到的是报告。报告不过就别开始生成 —— 带着问题跑等于白花钱。",
     parameters: {
       type: "object",
       properties: {
@@ -408,6 +474,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["ids"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "connect_nodes",
@@ -435,6 +503,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: [],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "remove_node",
@@ -447,6 +517,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["id"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "select_nodes",
@@ -469,6 +541,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["ids"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     /**
@@ -495,6 +569,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["id"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "run_node",
@@ -507,6 +583,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       required: ["id"],
     },
     requiresClient: true,
+    // 第一步：图操作并入 generate
+    modelVisible: false,
   },
   {
     name: "list_workflow_templates",
@@ -515,6 +593,8 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
       "列出可一键套用的工作流模板（多角度分镜、电商全套、文生图、图生视频等）。",
     parameters: { type: "object", properties: {}, required: [] },
     requiresClient: true,
+    // 第一步：图操作并入 generate（模板一键套用本批下线）
+    modelVisible: false,
   },
   {
     name: "apply_workflow_template",
@@ -532,6 +612,77 @@ export const CANVAS_AGENT_TOOL_DEFINITIONS: CanvasAgentToolDefinition[] = [
         y: { type: "number", description: "起点纵坐标（可选）" },
       },
       required: ["templateId"],
+    },
+    requiresClient: true,
+    // 第一步：图操作并入 generate（模板一键套用本批下线）
+    modelVisible: false,
+  },
+  {
+    /**
+     * 唯一的生成入口（2026-09-26 第一步：工具面收敛）。
+     *
+     * 为什么把 add_node(s)/update_node/connect_nodes/attach_reference_images/run_node(s)
+     * 合成一个 `generate`：给模型的 15+ 个工具里有一半是**图操作管道**，实测后果是模型把整轮
+     * 预算花在「拼图 + 反复读画布」上（曾连读 39 次 get_canvas_state），而这些本就该由确定性代码做。
+     * 现在模型只说**意图**（在哪个节点/新建、要什么模型/比例/张数/参考），
+     * 建节点、连线、挂参考、提交生成全部由这一层完成 —— 底层仍复用 runNode(s) / addNode 那套。
+     */
+    name: "generate",
+    label: "生成",
+    description:
+      "【唯一的生成入口】建节点 / 改节点 / 出图出视频都用它。target 给**已有节点 id**（改参数或出变体）、**一组节点 id**（批量），或 \"new\"（新建）。spec 描述要什么：kind（text/image/video，默认 image）、prompt、content、label、model、ratio（画幅）、count（新建张数，默认 1）、references（**参考图所在的节点 id**）、connectFrom（要连的上游节点 id）。**建节点、连线、挂参考图、跑预校验、提交生成全部由这个工具完成**，你只描述意图，不要自己拼图。会消耗积分：调用前必须先 request_confirmation，同一批先跑 preflight_check。**提交即回执**（立刻返回「已提交 · 生成中」，含每节点状态），**这一轮不等出图**，也不要反复读画布轮询。同一个节点在同一轮里只会真正提交一次：重复提交会如实跳过；提交失败会如实回执（不会把「没提交成功」讲成成功）。",
+    parameters: {
+      type: "object",
+      properties: {
+        target: {
+          description: "要生成的目标：已有节点 id、\"new\"（新建），或一组节点 id（批量）。",
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        spec: {
+          type: "object",
+          description:
+            "生成规格（缺省项走默认）：kind 默认 image；count 默认 1；ratio 不填用画布/模型默认。",
+          properties: {
+            kind: {
+              type: "string",
+              enum: ["text", "image", "video", "asset"],
+              description: "新建节点的类型（默认 image）",
+            },
+            prompt: { type: "string", description: "图片/视频节点的提示词" },
+            content: { type: "string", description: "文本节点的内容" },
+            label: { type: "string", description: "节点标题，例如「镜号 03」" },
+            model: { type: "string", description: "模型 key（不填用画布默认）" },
+            ratio: { type: "string", description: "画幅/比例，如 16:9、1:1" },
+            size: { type: "string", description: "同 ratio（兼容旧写法）" },
+            quality: { type: "string", description: "画质档位，如 低/中/高" },
+            count: {
+              type: "number",
+              description: '新建节点个数（仅 target="new" 且未给 nodes 时有效；默认 1，上限 12）',
+            },
+            references: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "参考图所在的**节点 id**（自动解析成该节点的出图并挂上，走图生图）；写 \"uploaded\" 表示用户本轮上传的参考图。",
+            },
+            connectFrom: {
+              type: "array",
+              items: { type: "string" },
+              description: "要连到本次目标的**上游节点 id**（自动建连线，表达继承）",
+            },
+          },
+        },
+        nodes: {
+          type: "array",
+          description:
+            'target="new" 且一次要建多个**不同**节点时用它：每项是一份 spec（覆盖顶层 spec 的同名字段）。',
+          items: { type: "object" },
+        },
+      },
+      required: ["target"],
     },
     requiresClient: true,
   },

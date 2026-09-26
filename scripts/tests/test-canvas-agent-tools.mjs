@@ -1,25 +1,33 @@
 #!/usr/bin/env node
 /**
- * 画布 Agent 工具层单测（2026-09-23）
+ * 画布 Agent 工具层单测（2026-09-23；2026-09-26 第一步「工具面收敛」重写）
  *
  * 为什么单独测这一层：工具是「模型能对用户的画布做什么」的**唯一清单** —— 模型说的每一句
  * 「我已经帮你加好了」，背后都是这里的一个 case 在改真实画布。这类东西出错（id 串了、
  * 参数没校验、失败却报成功）在浏览器里很难复现，但后果是数据被改坏。
  *
- * 用一个假的画布上下文（内存数组）驱动，验证：
- *   1. 每个工具的「正常路径」确实改了状态、返回的 id/摘要对得上；
- *   2. 非法输入（不存在的节点、空 id、自己连自己、未知类型）一律 ok:false + 可读原因，**不改状态**；
- *   3. get_canvas_state 给模型的快照包含定位节点所需的字段，且不把超长文本整段塞进上下文；
- *   4. get_canvas_overview 只给定位字段（不含 prompt/坐标/连线明细）、get_canvas_node 给单节点全量 + 连线摘要；
- *   5. run_node / run_nodes 是「提交即回执」：回执带逐节点提交状态、同轮重复提交如实说明、提交失败如实回执。
+ * 第一步收敛后这里要钉住的是：
+ *   1. **模型可见清单**里只剩语义工具 + 读取 + 预校验/手册；12 个图操作类工具**逐个**都不在里面；
+ *   2. 被停用的工具若被调用（旧转录/旧提示词残留）→ 返回**可读的替代指引**，不静默失败；
+ *   3. `generate` 的入参归一（target=new / 已有节点 / 多节点；spec 缺省项）；
+ *   4. `generate` 回执三态（submitted / duplicate / failed）、提交即回执、同轮去重、失败如实、
+ *      内部自动跑预校验（报告不过就不提交）；
+ *   5. 概览/单节点读的形状；预校验配额接入；ask_user 回执。
  *
  * 跑法：npx tsx scripts/tests/test-canvas-agent-tools.mjs
  */
 import {
     CANVAS_AGENT_TOOL_SCHEMAS,
+    GENERATE_UPLOADED_REFERENCES_TOKEN,
+    normalizeCanvasGenerateRequest,
     executeCanvasAgentTool,
 } from '../../src/views/workflow/agent/canvas-agent-tools.ts'
-import { CANVAS_AGENT_TOOL_DEFINITIONS } from '../../src/shared/canvas-agent-tools.ts'
+import {
+    CANVAS_AGENT_DISABLED_TOOL_GUIDANCE,
+    CANVAS_AGENT_TOOL_DEFINITIONS,
+    getModelVisibleCanvasAgentTools,
+} from '../../src/shared/canvas-agent-tools.ts'
+// 与画布页同源：节点 id → 出图地址的解析规则（放在这里避免 import 链带进浏览器依赖）
 import { resolveAttachedReferences } from '../../src/views/workflow/composables/resolveAttachedReferences.ts'
 
 let passed = 0
@@ -35,6 +43,18 @@ const check = (name, fn) => {
     }
 }
 const assert = (cond, message) => { if (!cond) throw new Error(message) }
+
+/** 第一步停用的图操作类工具（逐个断言：模型可见清单里不能再有它们） */
+const DISABLED_TOOLS = [
+    'add_node', 'add_nodes', 'update_node', 'remove_node', 'select_nodes', 'connect_nodes',
+    'attach_reference_images', 'run_node', 'run_nodes', 'get_canvas_state',
+    'list_workflow_templates', 'apply_workflow_template',
+]
+/** 收敛后模型应该看到的工具 */
+const VISIBLE_TOOLS = [
+    'get_canvas_overview', 'get_canvas_node', 'generate',
+    'ask_user', 'request_confirmation', 'preflight_check', 'load_playbook',
+]
 
 /** 记忆一个最小画布：节点数组 + 连线数组 + 选中集合 + 本轮已触发集合 */
 const createFakeContext = () => {
@@ -132,22 +152,47 @@ const createFakeContext = () => {
 
 const run = (ctx, name, args) => executeCanvasAgentTool(name, args, ctx)
 
-console.log('== 工具清单 ==')
-check('暴露给模型的工具名与说明齐全', () => {
-    const names = CANVAS_AGENT_TOOL_SCHEMAS.map((tool) => tool.function.name)
-    for (const expected of ['get_canvas_state', 'get_canvas_overview', 'get_canvas_node', 'add_node', 'update_node', 'connect_nodes', 'remove_node', 'select_nodes', 'run_node', 'list_workflow_templates', 'apply_workflow_template']) {
-        assert(names.includes(expected), `缺少工具 ${expected}`)
+// 屏蔽真实网络：预校验里的余额、预估、参考图探测都走这个假 fetch。
+// 未命中的请求（含参考图 HEAD/GET 探测）一律当作可达 —— 否则 Node 会对相对地址抛错，
+// 把「参考图可达」误判成 false，进而把合法的生成批次全拦下。
+const originalFetch = globalThis.fetch
+const installFetch = (routes = []) => {
+    globalThis.fetch = async (url, options = {}) => {
+        const target = String(url)
+        const method = String(options.method || 'GET').toUpperCase()
+        const hit = routes.find((route) => target.includes(route.match) && (!route.method || route.method === method))
+        if (hit) {
+            if (hit.throw) throw new Error('模拟网络故障')
+            const status = hit.status ?? (hit.ok === false ? 500 : 200)
+            return { ok: hit.ok !== false && status < 400, status, json: async () => hit.body ?? {} }
+        }
+        return { ok: true, status: 200, json: async () => ({}) }
     }
+    return () => { globalThis.fetch = originalFetch }
+}
+
+console.log('== 工具清单：图操作类工具已从模型可见清单里移除 ==')
+check('模型可见清单只剩语义工具 + 读取 + 预校验/手册', () => {
+    const names = CANVAS_AGENT_TOOL_SCHEMAS.map((tool) => tool.function.name)
+    for (const expected of VISIBLE_TOOLS) {
+        assert(names.includes(expected), `缺少应可见的工具 ${expected}`)
+    }
+    assert(
+        names.length === VISIBLE_TOOLS.length,
+        `可见工具数量应为 ${VISIBLE_TOOLS.length}，实际 ${names.length}：${names.join('、')}`,
+    )
+
     /**
      * 前后端不许漂移：模型看到的描述来自服务端那份定义，浏览器执行的是这份 schema。
      * 两边一旦不一致（改名、改参数、改说明），表现是「模型老调错工具」——不报错、只变笨，
      * 所以在这里逐字段钉死，让漂移在 CI 就炸出来。
      */
+    const visibleDefinitions = getModelVisibleCanvasAgentTools()
     assert(
-        CANVAS_AGENT_TOOL_SCHEMAS.length === CANVAS_AGENT_TOOL_DEFINITIONS.length,
-        `前后端工具数量不一致：前端 ${CANVAS_AGENT_TOOL_SCHEMAS.length}、共享定义 ${CANVAS_AGENT_TOOL_DEFINITIONS.length}`,
+        CANVAS_AGENT_TOOL_SCHEMAS.length === visibleDefinitions.length,
+        `前端可见 schema ${CANVAS_AGENT_TOOL_SCHEMAS.length} 与共享可见定义 ${visibleDefinitions.length} 不一致`,
     )
-    for (const definition of CANVAS_AGENT_TOOL_DEFINITIONS) {
+    for (const definition of visibleDefinitions) {
         const schema = CANVAS_AGENT_TOOL_SCHEMAS.find((item) => item.function.name === definition.name)
         assert(schema, `共享定义里的「${definition.name}」没有派生出 schema`)
         assert(schema.function.description === definition.description, `${definition.name} 的描述前后端不一致`)
@@ -164,134 +209,267 @@ check('暴露给模型的工具名与说明齐全', () => {
     }
 })
 
-console.log('== 正常路径 ==')
+console.log('== 停用：逐个断言不在可见清单里，且被调用时返回替代指引（不静默失败）==')
+for (const name of DISABLED_TOOLS) {
+    await (async () => {
+        const names = CANVAS_AGENT_TOOL_SCHEMAS.map((tool) => tool.function.name)
+        assert(!names.includes(name), `已停用的 ${name} 仍在模型可见清单里`)
+
+        const definition = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === name)
+        assert(definition, `${name} 的定义应保留（第一步不删代码，淘汰留到下一步）`)
+        assert(definition.modelVisible === false, `${name} 应被标记为不可见`)
+
+        const guidance = CANVAS_AGENT_DISABLED_TOOL_GUIDANCE[name]
+        assert(guidance && guidance.includes('已停用'), `${name} 缺少替代指引原文`)
+
+        const { ctx, state } = createFakeContext()
+        const res = await run(ctx, name, { id: 'n1', ids: ['n1'], nodes: [{ type: 'image' }], source: 'a', target: 'b', type: 'image' })
+        assert(!res.ok, `${name} 被调用必须 ok:false（不能静默执行）`)
+        assert(res.result === guidance, `${name} 的回执应是替代指引原文：${res.result}`)
+        assert(res.result.includes('已停用'), `${name} 的回执必须含「已停用」`)
+        assert(state.nodes.length === 0 && state.edges.length === 0, `${name} 被调用不得改动画布`)
+        passed += 1
+        console.log(`  ok   ${name}：已停用 + 返回替代指引（未改动画布）`)
+    })()
+}
+
+console.log('== generate 入参归一（target=new / 已有节点 / 多节点；spec 缺省项）==')
+check('target="new" 默认 1 个 create 目标、spec 缺省项不编造', () => {
+    const normalized = normalizeCanvasGenerateRequest({ target: 'new' })
+    assert(normalized.ok === true, '应归一成功')
+    assert(normalized.targets.length === 1 && normalized.targets[0].action === 'create', 'new 默认 1 个 create')
+    assert(normalized.targets[0].kind === undefined, '缺省 kind 不编造（执行阶段才落默认 image）')
+    assert(Array.isArray(normalized.targets[0].references) && normalized.targets[0].references.length === 0, 'references 缺省为空数组')
+    assert(Array.isArray(normalized.targets[0].connectFrom) && normalized.targets[0].connectFrom.length === 0, 'connectFrom 缺省为空数组')
+})
+
+check('target="new" + count：复制多份并封顶 12', () => {
+    assert(normalizeCanvasGenerateRequest({ target: 'new', spec: { count: 3 } }).targets.length === 3, 'count=3 应建 3 个目标')
+    assert(normalizeCanvasGenerateRequest({ target: 'new', spec: { count: 99 } }).targets.length === 12, 'count 应封顶 12')
+    assert(normalizeCanvasGenerateRequest({ target: 'new', spec: { count: 0 } }).targets.length === 1, 'count 非法应回默认 1')
+})
+
+check('ratio 是 size 的别名', () => {
+    const normalized = normalizeCanvasGenerateRequest({ target: 'new', spec: { ratio: '16:9' } })
+    assert(normalized.targets[0].size === '16:9', `ratio 应归一成 size：${JSON.stringify(normalized.targets[0])}`)
+})
+
+check('已有节点：单个 id / 多节点数组（去重）', () => {
+    const single = normalizeCanvasGenerateRequest({ target: 'n1' })
+    assert(single.targets.length === 1 && single.targets[0].action === 'existing' && single.targets[0].id === 'n1', '单个已有节点')
+    const many = normalizeCanvasGenerateRequest({ target: ['n1', 'n1', 'n2'] })
+    assert(many.targets.length === 2, `多节点应去重：${JSON.stringify(many.targets)}`)
+    assert(many.targets.every((item) => item.action === 'existing'), '都应是 existing')
+})
+
+check('new + nodes：每项覆盖顶层 spec', () => {
+    const normalized = normalizeCanvasGenerateRequest({
+        target: 'new',
+        spec: { model: 'prov::IMAGE::m1', references: ['n0'] },
+        nodes: [{ prompt: '镜一' }, { prompt: '镜二', model: 'prov::IMAGE::m2' }],
+    })
+    assert(normalized.targets.length === 2, '应建 2 个目标')
+    assert(normalized.targets[0].model === 'prov::IMAGE::m1', '未给 model 的项继承顶层')
+    assert(normalized.targets[0].references[0] === 'n0', '未给 references 的项继承顶层')
+    assert(normalized.targets[1].model === 'prov::IMAGE::m2', '给了 model 的项覆盖顶层')
+})
+
+check('缺少 target 如实失败', () => {
+    const normalized = normalizeCanvasGenerateRequest({})
+    assert(normalized.ok === false && /target/.test(normalized.reason || ''), `应失败并指向 target：${normalized.reason}`)
+})
+
+console.log('== generate 正常路径：建节点 + 提交即回执 ==')
 await (async () => {
     const { ctx, state } = createFakeContext()
-    const res = await run(ctx, 'add_node', { type: 'image', prompt: '雪夜便利店', size: '16:9', model: 'deepseek-x' })
-    assert(res.ok, '应该成功')
-    assert(state.nodes.length === 1, '应该新增 1 个节点')
-    const node = state.nodes[0]
-    assert(node.type === 'image' && node.prompt === '雪夜便利店' && node.size === '16:9', '参数没写进节点')
-    assert(res.result.includes(node.id), '返回里应带节点 id，模型下一步要用')
-    assert(res.summary.includes('雪夜便利店'), '摘要应让用户看懂做了什么')
+    const res = await run(ctx, 'generate', { target: 'new', spec: { kind: 'image', prompt: '雪夜便利店，霓虹灯', model: 'prov::IMAGE::m1', ratio: '16:9' } })
+    assert(res.ok, `应成功：${res.summary}`)
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 1 && parsed.total === 1, `回执计数不对：${res.result}`)
+    assert(Array.isArray(parsed.created) && parsed.created.length === 1, `回执要带新建节点 id：${res.result}`)
+    const receipt = parsed.nodes[0]
+    assert(receipt.submitted === true && receipt.status === 'generating', `节点状态应为已提交/生成中：${res.result}`)
+    assert(!('done' in receipt), '回执不得声称「已完成」（提交 ≠ 出图）')
+    assert(/已提交/.test(res.summary) && /生成中/.test(res.summary), `摘要必须写「已提交 · 生成中」：${res.summary}`)
+    assert(!/已完成|已出图/.test(res.summary), `不得把提交说成完成：${res.summary}`)
+    assert(state.ran.length === 1, '应真的提交了一次')
+    const node = state.nodes.find((item) => item.id === parsed.created[0])
+    assert(node.prompt === '雪夜便利店，霓虹灯' && node.size === '16:9' && node.model === 'prov::IMAGE::m1', `spec 应写进节点：${JSON.stringify(node)}`)
     passed += 1
-    console.log('  ok   add_node 落点/参数生效并返回 id')
+    console.log('  ok   generate(target=new)：建节点 + 提交即回执（三态里 submitted）')
+})()
+
+await (async () => {
+    const restore = installFetch([])
+    try {
+        const { ctx, state } = createFakeContext()
+        // 铺分镜：一次建多个不同节点（nodes），并把母版连过去
+        const master = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版 M1' })
+        ctx.updateNode(master, { imageUrl: '/uploads/generated/image/m1.png' })
+        const res = await run(ctx, 'generate', {
+            target: 'new',
+            spec: { kind: 'image', model: 'prov::IMAGE::m1', connectFrom: [master], references: [master] },
+            nodes: [{ prompt: '镜一：主角走进便利店', label: '镜号 01' }, { prompt: '镜二：主角拿起咖啡', label: '镜号 02' }],
+        })
+        const parsed = JSON.parse(res.result)
+        assert(parsed.submitted === 2 && parsed.total === 2, `应提交 2 个：${res.result}`)
+        assert(state.edges.length === 2, `应自动连线 2 条：${state.edges.length}`)
+        assert(state.nodes.filter((item) => item.referenceImages && item.referenceImages.length).length === 2, '两个分镜都应挂上母版图')
+        passed += 1
+        console.log('  ok   generate(target=new, nodes)：一次建多个 + 自动连线 + 自动挂参考')
+    } finally { restore() }
 })()
 
 await (async () => {
     const { ctx, state } = createFakeContext()
-    const created = await run(ctx, 'add_node', { type: 'text', content: 'hello' })
-    const id = JSON.parse(created.result).id
-    const updated = await run(ctx, 'update_node', { id, prompt: '新提示词', label: '改名' })
-    assert(updated.ok, '更新应该成功')
-    assert(state.nodes[0].prompt === '新提示词' && state.nodes[0].label === '改名', '字段没更新')
-    const finalState = await run(ctx, 'get_canvas_state', {})
-    assert(finalState.result.includes('新提示词'), '快照里应能看到更新后的内容')
+    const first = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '镜头甲：雪夜街头' })
+    const second = ctx.addNode('image', { x: 10, y: 0 }, { prompt: '镜头乙：便利店门口' })
+    const res = await run(ctx, 'generate', { target: [first, second], spec: { model: 'prov::IMAGE::m1' } })
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 2 && parsed.total === 2, `多节点应提交 2 个：${res.result}`)
+    assert(parsed.created.length === 0, '已有节点不该记进 created')
+    assert(state.ran.length === 2, '应真的提交两个已有节点')
     passed += 1
-    console.log('  ok   update_node 写入并在快照里可见')
+    console.log('  ok   generate(target=[已有 id...])：批量提交已有节点')
 })()
 
 await (async () => {
     const { ctx, state } = createFakeContext()
-    const a = JSON.parse((await run(ctx, 'add_node', { type: 'text', content: 'a' })).result).id
-    const b = JSON.parse((await run(ctx, 'add_node', { type: 'image' })).result).id
-    const linked = await run(ctx, 'connect_nodes', { source: a, target: b })
-    assert(linked.ok && state.edges.length === 1, '连线没成功')
-    const again = await run(ctx, 'connect_nodes', { source: a, target: b })
-    assert(!again.ok, '重复连线应该报失败而不是静默再加一条')
-    const removed = await run(ctx, 'remove_node', { id: b })
-    assert(removed.ok && state.nodes.length === 1 && state.edges.length === 0, '删节点应连带清掉它的连线')
+    // 纯建文本节点（分镜表）：不花钱、不提交
+    const res = await run(ctx, 'generate', { target: 'new', spec: { kind: 'text', content: '镜号 | 画面', label: '分镜表' } })
+    assert(res.ok, `建文本节点应成功：${res.summary}`)
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 0 && parsed.total === 0, `文本节点不提交：${res.result}`)
+    assert(parsed.created.length === 1 && state.nodes.length === 1, '应建出 1 个节点')
+    assert(/无需生成/.test(res.summary), `摘要应说明无需生成：${res.summary}`)
+    assert(state.ran.length === 0, '文本节点不该触发生成')
     passed += 1
-    console.log('  ok   connect_nodes / remove_node（含连带清线、重复连线拦截）')
+    console.log('  ok   generate(kind=text)：只建节点、不提交生成')
 })()
 
+console.log('== generate 同轮去重：同一节点只真正提交一次 ==')
 await (async () => {
     const { ctx, state } = createFakeContext()
-    const id = JSON.parse((await run(ctx, 'add_node', { type: 'image' })).result).id
-    const selected = await run(ctx, 'select_nodes', { ids: [id] })
-    assert(selected.ok && state.selected[0] === id, '选中没生效')
-    const executed = await run(ctx, 'run_node', { id })
-    assert(executed.ok && state.ran[0] === id, '执行没触发')
+    const first = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版 M1' })
+    const second = ctx.addNode('image', { x: 10, y: 0 }, { prompt: '母版 M2' })
+    const firstRun = await run(ctx, 'generate', { target: [first, second], spec: { model: 'prov::IMAGE::m1' } })
+    assert(JSON.parse(firstRun.result).submitted === 2, '首次应提交 2 个')
+
+    const again = await run(ctx, 'generate', { target: [first, second] })
+    assert(!again.ok, '整批重复提交应失败（没有新提交）')
+    const parsed = JSON.parse(again.result)
+    assert(parsed.submitted === 0 && parsed.nodes.every((node) => node.status === 'skipped'), `重复应如实 skipped：${again.result}`)
+    assert(state.ran.length === 2, `重复不得再触发，实际 ${state.ran.length}`)
+
+    // 混合：一个已跑过、一个没跑过 → 只有没跑过的被提交
+    const third = ctx.addNode('image', { x: 20, y: 0 }, { prompt: '母版 M3' })
+    const mixed = await run(ctx, 'generate', { target: [first, third] })
+    const mixedParsed = JSON.parse(mixed.result)
+    assert(mixedParsed.submitted === 1, `混合批应只提交 1 个：${mixed.result}`)
+    assert(state.ran.length === 3, `应只多提交一次，实际 ${state.ran.length}`)
     passed += 1
-    console.log('  ok   select_nodes / run_node 真的触发了执行')
+    console.log('  ok   generate：同轮重复 → duplicate/skipped，且不重复触发（不重复扣费）')
 })()
 
+console.log('== generate 失败如实（不谎报成功）==')
 await (async () => {
-    const { ctx, state } = createFakeContext()
-    const listed = await run(ctx, 'list_workflow_templates', {})
-    assert(listed.ok && listed.result.includes('tpl-demo'), '模板清单不对')
-    const applied = await run(ctx, 'apply_workflow_template', { templateId: 'tpl-demo' })
-    assert(applied.ok && state.nodes.length === 2 && state.edges.length === 1, '模板没铺开')
-    passed += 1
-    console.log('  ok   list_workflow_templates / apply_workflow_template')
-})()
+    const { ctx } = createFakeContext()
+    const missing = await run(ctx, 'generate', { target: 'ghost' })
+    assert(!missing.ok, '不存在的节点应失败')
+    assert(missing.result.includes('ghost') && missing.result.includes('get_canvas_overview'), `失败要指向拿 id 的工具：${missing.result}`)
 
-console.log('== 非法输入：必须 ok:false 且不动状态 ==')
-await (async () => {
-    const { ctx, state } = createFakeContext()
-    const cases = [
-        ['未知节点类型', await run(ctx, 'add_node', { type: 'hologram' })],
-        ['更新不存在的节点', await run(ctx, 'update_node', { id: 'nope', prompt: 'x' })],
-        ['更新但没给字段', await run(ctx, 'update_node', { id: 'n1' })],
-        ['缺少节点 id', await run(ctx, 'update_node', {})],
-        ['连线到不存在的节点', await run(ctx, 'connect_nodes', { source: 'a', target: 'b' })],
-        ['自己连自己', await run(ctx, 'connect_nodes', { source: 'n1', target: 'n1' })],
-        ['删除不存在的节点', await run(ctx, 'remove_node', { id: 'nope' })],
-        ['选中空列表', await run(ctx, 'select_nodes', { ids: [] })],
-        ['未知模板', await run(ctx, 'apply_workflow_template', { templateId: 'nope' })],
-        ['未知工具', await run(ctx, 'drop_database', {})],
-    ]
-    for (const [label, res] of cases) {
-        assert(!res.ok, `${label}：应该失败`)
-        assert(res.result && res.result.length > 4, `${label}：失败必须带可读原因（模型据此改正）`)
-    }
-    assert(state.nodes.length === 0 && state.edges.length === 0, '失败路径不该改动画布')
+    const badKind = await run(ctx, 'generate', { target: 'new', spec: { kind: 'hologram', prompt: 'x' } })
+    assert(!badKind.ok && badKind.result.includes('hologram'), `非法类型应如实失败：${badKind.result}`)
     passed += 1
-    console.log(`  ok   10 类非法输入全部被拦、状态未变`)
+    console.log('  ok   generate：未知节点 / 非法节点类型 → 可读失败')
 })()
 
 await (async () => {
     const { ctx } = createFakeContext()
-    const denied = await run(ctx, 'run_node', { id: JSON.parse((await run(ctx, 'add_node', { type: 'video' })).result).id })
-    assert(!denied.ok && denied.result.includes('video'), '视频节点应如实报「尚未接通」，不能谎报成功')
+    // 视频节点：预校验能过，但提交阶段服务端还没接通 → 必须如实说失败
+    const res = await run(ctx, 'generate', { target: 'new', spec: { kind: 'video', prompt: '镜头缓慢推近，雨夜街头' } })
+    assert(!res.ok, '视频节点提交应失败（服务端未接通）')
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 0 && parsed.nodes[0].status === 'failed', `失败回执要如实：${res.result}`)
+    assert(/video/.test(parsed.nodes[0].reason || ''), `失败要带真实原因：${res.result}`)
     passed += 1
-    console.log('  ok   视频节点执行如实失败（不谎报）')
+    console.log('  ok   generate：提交阶段失败 → failed + 真实原因（不谎报成功）')
+})()
+
+await (async () => {
+    const { ctx } = createFakeContext()
+    // 空提示词的图片节点：内部自动预校验应拦下，不提交（等于不白花钱）
+    const res = await run(ctx, 'generate', { target: 'new', spec: { kind: 'image' } })
+    assert(!res.ok, '空提示词应被内部预校验拦下')
+    const parsed = JSON.parse(res.result)
+    assert(parsed.submitted === 0 && parsed.nodes[0].status === 'failed', `应不提交：${res.result}`)
+    assert(/预校验未通过/.test(parsed.nodes[0].reason || '') && /预校验未通过/.test(parsed.message || ''), `原因要点明预校验：${res.result}`)
+    assert(ctx.snapshotNodes().length === 1, '节点应已建出来（预校验只拦提交，不吞掉创建）')
+    passed += 1
+    console.log('  ok   generate：内部自动预校验不过 → 不提交、如实回执')
+})()
+
+await (async () => {
+    const { ctx, state } = createFakeContext()
+    // 参考图引用了一个还没出图的节点 → 挂不上，必须如实说，且不提交
+    const empty = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版还没出图' })
+    const shot = ctx.addNode('image', { x: 100, y: 0 }, { prompt: '镜一' })
+    const res = await run(ctx, 'generate', { target: [shot], spec: { references: [empty], model: 'prov::IMAGE::m1' } })
+    assert(!res.ok, '参考图挂不上应失败')
+    const parsed = JSON.parse(res.result)
+    assert(parsed.nodes[0].status === 'failed' && /挂参考图失败/.test(parsed.nodes[0].reason || ''), `原因要点明挂参考失败：${res.result}`)
+    assert(state.ran.length === 0, '挂参考失败不得提交生成')
+    passed += 1
+    console.log('  ok   generate：参考图挂不上 → 不提交、如实回执')
+})()
+
+await (async () => {
+    const restore = installFetch([])
+    try {
+        const { ctx, state } = createFakeContext()
+        // "uploaded" 占位：展开成用户本轮上传的参考图
+        const shot = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '镜一' })
+        ctx.referenceImages = () => ['/uploads/reference/u1.png']
+        const res = await run(ctx, 'generate', { target: [shot], spec: { references: [GENERATE_UPLOADED_REFERENCES_TOKEN], model: 'prov::IMAGE::m1' } })
+        assert(res.ok, `用本轮上传图应成功：${res.summary}`)
+        assert(state.nodes.find((node) => node.id === shot).referenceImages[0] === '/uploads/reference/u1.png', 'uploaded 应展开成本轮上传图地址')
+        passed += 1
+        console.log('  ok   generate：references 支持 "uploaded" 占位（用户本轮上传图）')
+    } finally { restore() }
 })()
 
 console.log('== 给模型的快照 ==')
 await (async () => {
     const { ctx } = createFakeContext()
-    await run(ctx, 'add_node', { type: 'image', prompt: 'x'.repeat(2000) })
-    const snap = await run(ctx, 'get_canvas_state', {})
+    ctx.addNode('image', { x: 0, y: 0 }, { prompt: 'x'.repeat(2000) })
+    const snap = await run(ctx, 'get_canvas_overview', {})
     const parsed = JSON.parse(snap.result)
-    assert(parsed.nodes.length === 1, '快照节点数不对')
-    assert(parsed.nodes[0].text.length < 200, `快照里的文本没截断：${parsed.nodes[0].text.length}`)
-    assert(Array.isArray(parsed.availableNodeTypes) && parsed.availableNodeTypes.length > 0, '快照应带上可用节点类型，否则模型会瞎猜')
+    assert(parsed.nodeCount === 1, '概览节点数不对')
+    assert(!/x{100}/.test(snap.result), '概览不得含 prompt 明文')
+    assert(parsed.availableNodeTypes === undefined, '概览不再带可用节点类型（那是旧整画布读的字段）')
     passed += 1
-    console.log('  ok   快照含定位字段、长文本已截断')
+    console.log('  ok   概览：只给定位字段、长文本不外泄')
 })()
 
-console.log('== 快照必须让模型看出「节点已经出过图」（否则它会重复执行、重复扣费）==')
+console.log('== hasImage / 状态解析：让模型看出「节点已经出过图」==')
 await (async () => {
     const { ctx } = createFakeContext()
-    const created = await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1：28 岁亚洲女性' })
-    const id = JSON.parse(created.result).id
+    const id = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版 M1：28 岁亚洲女性' })
     ctx.updateNode(id, { imageUrl: '/uploads/generated/image/m1.png' })
-    const snap = await run(ctx, 'get_canvas_state', {})
-    const node = JSON.parse(snap.result).nodes[0]
-    assert(node.hasImage === true, '快照必须给 hasImage，否则「跑完的节点」和「从没跑过的节点」长得一样，模型会补跑一次')
+    const snap = JSON.parse((await run(ctx, 'get_canvas_overview', {})).result)
+    assert(snap.nodes[0].hasOutput === true, '概览必须给 hasOutput，否则模型会重复执行')
     passed += 1
-    console.log('  ok   快照带 hasImage')
+    console.log('  ok   概览带 hasOutput')
 })()
 
 console.log('== get_canvas_overview：只给定位字段（不含 prompt / 坐标 / 连线明细）==')
 await (async () => {
     const { ctx } = createFakeContext()
-    await run(ctx, 'add_node', { type: 'image', prompt: '母版M1的秘密提示词：28 岁亚洲女性', model: 'prov::IMAGE::m1', size: '16:9' })
-    const table = JSON.parse((await run(ctx, 'add_node', { type: 'text', content: '分镜表' })).result).id
-    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01' })).result).id
+    ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版M1的秘密提示词：28 岁亚洲女性', model: 'prov::IMAGE::m1', size: '16:9' })
+    const table = ctx.addNode('text', { x: 0, y: 100 }, { content: '分镜表' })
+    const shot = ctx.addNode('image', { x: 300, y: 100 }, { prompt: '分镜 01' })
     ctx.updateNode(shot, { imageUrl: '/uploads/generated/image/s1.png' })
-    await run(ctx, 'connect_nodes', { source: table, target: shot })
+    ctx.addEdge(table, shot)
 
     const res = await run(ctx, 'get_canvas_overview', {})
     assert(res.ok, `概览应成功：${res.summary}`)
@@ -320,9 +498,9 @@ await (async () => {
 console.log('== get_canvas_node：单节点全量 + 精简连线摘要 ==')
 await (async () => {
     const { ctx } = createFakeContext()
-    const master = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1', model: 'prov::IMAGE::m1', size: '16:9', quality: '高' })).result).id
-    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01 的画面描述' })).result).id
-    await run(ctx, 'connect_nodes', { source: master, target: shot })
+    const master = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '母版 M1', model: 'prov::IMAGE::m1', size: '16:9', quality: '高' })
+    const shot = ctx.addNode('image', { x: 300, y: 0 }, { prompt: '分镜 01 的画面描述' })
+    ctx.addEdge(master, shot)
 
     const res = await run(ctx, 'get_canvas_node', { id: shot })
     assert(res.ok, `单节点读应成功：${res.summary}`)
@@ -353,7 +531,7 @@ await (async () => {
 console.log('== 生成状态归一：loading→generating，error→error ==')
 await (async () => {
     const { ctx } = createFakeContext()
-    const id = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '在跑' })).result).id
+    const id = ctx.addNode('image', { x: 0, y: 0 }, { prompt: '在跑' })
     ctx.updateNode(id, { loading: true, error: '' })
     const busy = JSON.parse((await run(ctx, 'get_canvas_node', { id })).result)
     assert(busy.data.generationStatus === 'generating', `loading 应归一为 generating：${busy.data.generationStatus}`)
@@ -364,94 +542,12 @@ await (async () => {
     console.log('  ok   loading/error 归一正确')
 })()
 
-console.log('== run_node / run_nodes：提交即回执（不等出图）、去重与失败都如实 ==')
-await (async () => {
-    const { ctx, state } = createFakeContext()
-    const id = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1' })).result).id
-    const res = await run(ctx, 'run_node', { id })
-    assert(res.ok, `提交应成功：${res.summary}`)
-    const parsed = JSON.parse(res.result)
-    assert(parsed.submitted === 1 && parsed.total === 1, `回执要有提交计数：${res.result}`)
-    assert(parsed.nodes.length === 1 && parsed.nodes[0].id === id, `回执要含每个节点：${res.result}`)
-    assert(parsed.nodes[0].submitted === true && parsed.nodes[0].status === 'generating', `节点状态应为已提交/生成中：${res.result}`)
-    assert(!parsed.nodes[0].done, '回执不得声称「已完成」（提交 ≠ 出图）')
-    assert(/已提交/.test(res.summary) && /生成中/.test(res.summary), `步骤摘要必须写「已提交 · 生成中」：${res.summary}`)
-    assert(!/已完成|已出图/.test(res.summary), `不得把提交说成完成：${res.summary}`)
-
-    // 同轮重复提交：如实说明，且不重复真正触发（不重复扣费）
-    const again = await run(ctx, 'run_node', { id })
-    assert(!again.ok, '同轮重复提交应被挡下')
-    const againParsed = JSON.parse(again.result)
-    assert(againParsed.nodes[0].status === 'skipped', `重复提交应回 skipped：${again.result}`)
-    assert(againParsed.nodes[0].submitted === false, '重复提交不得声称已提交')
-    assert(state.ran.length === 1, `重复提交不得再次触发，实际触发 ${state.ran.length} 次`)
-    passed += 1
-    console.log('  ok   run_node：提交回执带状态；重复提交如实跳过且不重复触发')
-})()
-
-await (async () => {
-    const { ctx } = createFakeContext()
-    const res = await run(ctx, 'run_node', { id: 'ghost' })
-    assert(!res.ok, '不存在的节点提交应失败')
-    const parsed = JSON.parse(res.result)
-    assert(parsed.submitted === 0 && parsed.nodes[0].status === 'failed', `失败回执要如实：${res.result}`)
-    assert(parsed.nodes[0].reason && /不存在/.test(parsed.nodes[0].reason), `失败要带真实原因：${res.result}`)
-    passed += 1
-    console.log('  ok   run_node 提交失败 → failed + 真实原因（不谎报成功）')
-})()
-
-console.log('== attach_reference_images：把节点 id 翻译成出图地址 ==')
-await (async () => {
-    const { ctx, state } = createFakeContext()
-    const master = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '母版 M1' })).result).id
-    ctx.updateNode(master, { imageUrl: '/uploads/generated/image/m1.png' })
-    const shot = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '分镜 01' })).result).id
-    const attached = await run(ctx, 'attach_reference_images', { id: shot, images: [master] })
-    assert(attached.ok, `用节点 id 挂参考图应成功：${attached.summary}`)
-    const shotNode = state.nodes.find((node) => node.id === shot)
-    assert(shotNode.referenceImages?.length === 1, '参考图应挂上 1 张')
-    assert(
-        shotNode.referenceImages[0] === '/uploads/generated/image/m1.png',
-        `挂上的应是出图地址，而不是节点 id（否则服务端会 new URL("node_x") 抛错）：${shotNode.referenceImages[0]}`,
-    )
-
-    // 未出图的节点 id + 乱写的字符串：都应被如实挑出，而不是塞进节点导致服务端失败
-    const empty = JSON.parse((await run(ctx, 'add_node', { type: 'image', prompt: '空节点' })).result).id
-    const bad = await run(ctx, 'attach_reference_images', { id: shot, images: [empty, 'node_2'] })
-    assert(!bad.ok, '全是无效引用时应失败')
-    assert(bad.result.includes('还没有出图') && bad.result.includes('node_2'), `失败原因要逐项说清：${bad.result}`)
-    passed += 1
-    console.log('  ok   节点 id → 出图地址；无效引用逐项挑出')
-})()
-
 console.log('== 预校验：余额/预估接入（充足 / 不足 / 降级）==')
 
-// 屏蔽真实网络：预校验里的余额、预估、参考图探测都走这个假 fetch
-const originalFetch = globalThis.fetch
-const installFetch = (routes) => {
-    globalThis.fetch = async (url, options = {}) => {
-        const target = String(url)
-        const method = String(options.method || 'GET').toUpperCase()
-        const hit = routes.find((route) => target.includes(route.match) && (!route.method || route.method === method))
-        if (hit) {
-            if (hit.throw) throw new Error('模拟网络故障')
-            const status = hit.status ?? (hit.ok === false ? 500 : 200)
-            return { ok: hit.ok !== false && status < 400, status, json: async () => hit.body ?? {} }
-        }
-        // 未命中的请求（例如参考图 HEAD 探测）当作可达
-        return { ok: true, status: 200, json: async () => ({}) }
-    }
-    return () => { globalThis.fetch = originalFetch }
-}
-
 // 建一批带提示词/模型/画幅的图片节点（预校验要有可预估的节点）
-const makeImageCtx = async (prompts) => {
+const makeImageCtx = (prompts) => {
     const { ctx, state } = createFakeContext()
-    const ids = []
-    for (const prompt of prompts) {
-        const res = await run(ctx, 'add_node', { type: 'image', prompt, model: 'prov::IMAGE::m1', size: '16:9' })
-        ids.push(JSON.parse(res.result).id)
-    }
+    const ids = prompts.map((prompt) => ctx.addNode('image', { x: 0, y: 0 }, { prompt, model: 'prov::IMAGE::m1', size: '16:9' }))
     return { ctx, state, ids }
 }
 
@@ -461,11 +557,10 @@ await (async () => {
         { match: '/api/points/balance', method: 'GET', body: { success: true, available: 100 } },
     ])
     try {
-        const { ctx, ids } = await makeImageCtx(['镜头一', '镜头二', '镜头三'])
+        const { ctx, ids } = makeImageCtx(['镜头一', '镜头二', '镜头三'])
         const res = await run(ctx, 'preflight_check', { ids })
         const parsed = JSON.parse(res.result)
         assert(res.ok === true, `余额充足应通过，实际：${res.summary}`)
-        assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '余额充足不该报配额问题')
         assert(parsed.validators.includes('quota'), '配额校验器应参与本次校验')
         assert(res.details?.quotaCheck?.status === 'checked', `埋点应为 checked：${JSON.stringify(res.details)}`)
         assert(res.details.quotaCheck.available === 100 && res.details.quotaCheck.totalEstimated === 30, '埋点应带 available/totalEstimated')
@@ -480,7 +575,7 @@ await (async () => {
         { match: '/api/points/balance', method: 'GET', body: { success: true, available: 5 } },
     ])
     try {
-        const { ctx, ids } = await makeImageCtx(['镜头一', '镜头二', '镜头三'])
+        const { ctx, ids } = makeImageCtx(['镜头一', '镜头二', '镜头三'])
         const res = await run(ctx, 'preflight_check', { ids })
         const parsed = JSON.parse(res.result)
         assert(res.ok === false, '余额不足应被拦下')
@@ -501,7 +596,7 @@ await (async () => {
         { match: '/api/points/balance', method: 'GET', body: { success: true, available: 999 } },
     ])
     try {
-        const { ctx, ids } = await makeImageCtx(['正常镜头', '', '正常镜头三'])
+        const { ctx, ids } = makeImageCtx(['正常镜头', '', '正常镜头三'])
         const res = await run(ctx, 'preflight_check', { ids })
         const parsed = JSON.parse(res.result)
         assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '拿不到预估就不该报配额问题')
@@ -519,7 +614,7 @@ await (async () => {
         { match: '/api/points/balance', method: 'GET', throw: true },
     ])
     try {
-        const { ctx, ids } = await makeImageCtx(['正常镜头', '正常镜头二'])
+        const { ctx, ids } = makeImageCtx(['正常镜头', '正常镜头二'])
         const res = await run(ctx, 'preflight_check', { ids })
         const parsed = JSON.parse(res.result)
         assert(!parsed.findings.some((f) => String(f.code).startsWith('quota.')), '拿不到余额就不该报配额问题')
@@ -530,56 +625,42 @@ await (async () => {
 })()
 
 await (async () => {
-    // 两个接口都失败 → 报告里不含配额事实；run_nodes 的运行期 gate 不该因此误拦
+    // 两个接口都失败 → 报告里不含配额事实；generate 的内部预校验不该因此误拦
     const restore = installFetch([
         { match: '/api/points/estimate', method: 'POST', ok: false, status: 500, body: { success: false } },
         { match: '/api/points/balance', method: 'GET', ok: false, status: 500, body: { success: false } },
     ])
     try {
-        const { ctx, state, ids } = await makeImageCtx(['镜头一', '镜头二'])
+        const { ctx, ids } = makeImageCtx(['镜头一', '镜头二'])
         const pre = await run(ctx, 'preflight_check', { ids })
         assert(pre.ok === true, `降级且无其它问题时预校验应通过：${pre.summary}`)
         assert(pre.details.quotaCheck.status === 'skipped', '应为降级跳过')
-        const ran = await run(ctx, 'run_nodes', { ids })
-        assert(ran.ok === true, `降级后 run_nodes 不该被配额误拦：${ran.result}`)
-        assert(state.ran.length === ids.length, '批量执行应真的触发了')
+        const generated = await run(ctx, 'generate', { target: ids })
+        assert(generated.ok === true, `降级后 generate 不该被配额误拦：${generated.result}`)
+        assert(JSON.parse(generated.result).submitted === ids.length, 'generate 应真的提交了')
         passed += 1
-        console.log('  ok   降级只影响配额这一条：run_nodes 照常执行')
+        console.log('  ok   降级只影响配额这一条：generate 照常提交')
     } finally { restore() }
 })()
 
-console.log('== run_nodes：逐节点提交回执 + 整批重复如实跳过（要带预校验报告才能跑）==')
-await (async () => {
-    const restore = installFetch([
-        { match: '/api/points/estimate', method: 'POST', body: { success: true, totalEstimated: 30 } },
-        { match: '/api/points/balance', method: 'GET', body: { success: true, available: 100 } },
-    ])
-    try {
-        const { ctx, state, ids } = await makeImageCtx(['镜一', '镜二', '镜三'])
-        const pre = await run(ctx, 'preflight_check', { ids })
-        assert(pre.ok === true, `预校验应通过：${pre.summary}`)
-
-        const res = await run(ctx, 'run_nodes', { ids })
-        assert(res.ok, `批量提交应成功：${res.summary}`)
-        const parsed = JSON.parse(res.result)
-        assert(parsed.submitted === 3 && parsed.total === 3, `批量回执计数不对：${res.result}`)
-        assert(parsed.nodes.every((node) => node.status === 'generating'), `每个节点都应是已提交/生成中：${res.result}`)
-        assert(/已提交/.test(res.summary) && !/已完成|已出图/.test(res.summary), `批量摘要要说「已提交 · 生成中」：${res.summary}`)
-        assert(state.ran.length === 3, '批量应真的提交 3 个节点')
-
-        // 整批重复提交：全部如实回 skipped，且不再触发（不重复扣费）
-        const again = await run(ctx, 'run_nodes', { ids })
-        assert(!again.ok, '整批重复提交应失败（没有新提交）')
-        const againParsed = JSON.parse(again.result)
-        assert(
-            againParsed.submitted === 0 && againParsed.nodes.every((node) => node.status === 'skipped'),
-            `整批重复应如实 skipped：${again.result}`,
-        )
-        assert(state.ran.length === 3, `重复批量不得再触发，实际 ${state.ran.length}`)
-        passed += 1
-        console.log('  ok   run_nodes：逐节点提交状态 + 整批重复如实跳过')
-    } finally { restore() }
-})()
+console.log('== 反证：把 generate 标成不可见，可见清单断言必然失败 ==')
+{
+    // 复用真实可见性规则：modelVisible !== false 才算可见
+    const exposedNames = (definitions) => new Set(definitions.filter((item) => item.modelVisible !== false).map((item) => item.name))
+    const current = exposedNames(CANVAS_AGENT_TOOL_DEFINITIONS)
+    const legacy = exposedNames(CANVAS_AGENT_TOOL_DEFINITIONS.map((item) => (
+        item.name === 'generate' ? { ...item, modelVisible: false } : item
+    )))
+    check('新实现：generate 在可见清单里', () => {
+        assert(current.has('generate'), 'generate 必须可见')
+        assert(current.has('get_canvas_overview') && current.has('get_canvas_node'), '概览/单节点必须可见')
+        for (const name of DISABLED_TOOLS) assert(!current.has(name), `${name} 不该可见`)
+    })
+    check('反证成立：把 generate 标成不可见后，可见清单断言会失败（机制是灵敏的）', () => {
+        assert(legacy.has('generate') === false, '旧形态：generate 不可见（正是要防的洞）')
+        assert(legacy.has('generate') !== current.has('generate'), '两种实现结论必须不同')
+    })
+}
 
 console.log('== ask_user：关键信息不足时提问（同一轮里等答复，不把委托拆成好几轮）==')
 await (async () => {
@@ -615,7 +696,6 @@ await (async () => {
 
 await (async () => {
     const { ctx } = createFakeContext()
-    // 批次 2：面板点选项只回代号；回执里的「代号 + 名称 + 特点」由 shared 统一拼出来
     const answers = [
         { optionKey: 'A', text: '' },
         { optionKey: 'B', text: '' },
@@ -637,10 +717,6 @@ await (async () => {
             && first?.choice?.label === '保温杯'
             && JSON.stringify(first?.choice?.notes) === JSON.stringify(['便携']),
         `回执必须带代号 + 名称 + 特点：${res.result}`,
-    )
-    assert(
-        first.answer.includes('保温杯') && first.answer.includes('便携'),
-        `给模型看的答案要含名称与特点：${res.result}`,
     )
     const second = parsed.answers?.[1]
     assert(

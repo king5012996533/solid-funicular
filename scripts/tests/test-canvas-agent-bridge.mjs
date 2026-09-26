@@ -33,6 +33,7 @@ import {
   CANVAS_AGENT_SKILL_KEY,
   CANVAS_AGENT_TOOL_DEFINITIONS,
   describeConfirmationDecision,
+  getModelVisibleCanvasAgentTools,
 } from '../../src/shared/canvas-agent-tools.ts'
 
 let passed = 0
@@ -219,8 +220,19 @@ await check('技能键与工具定义是唯一真源，且确认工具在清单�
   const confirmation = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === 'request_confirmation')
   assert(confirmation, '确认工具必须存在于共享定义里')
   assert(confirmation.requiresClient, '确认要走前端——由浏览器弹卡片给用户')
-  const paidTool = CANVAS_AGENT_TOOL_DEFINITIONS.find((tool) => tool.name === 'run_node')
-  assert(paidTool, 'run_node 必须在清单里（服务端按它判断要不要拦）')
+  /**
+   * 第一步收敛：服务端声明给模型的工具不再是「定义数组全集」，而是**可见子集**。
+   * generate 必须在可见子集里（否则模型根本没有生成入口），图操作类工具必须不在（逐个断言）。
+   */
+  const visibleNames = getModelVisibleCanvasAgentTools().map((tool) => tool.name)
+  assert(visibleNames.includes('generate'), 'generate 必须在模型可见工具清单里')
+  for (const name of [
+    'add_node', 'add_nodes', 'update_node', 'remove_node', 'select_nodes', 'connect_nodes',
+    'attach_reference_images', 'run_node', 'run_nodes', 'get_canvas_state',
+    'list_workflow_templates', 'apply_workflow_template',
+  ]) {
+    assert(!visibleNames.includes(name), `已停用的 ${name} 不该出现在模型可见清单里`)
+  }
 })
 
 await check('工具描述不再教模型轮询整画布，且默认读取路径指向概览/单节点', () => {
@@ -277,6 +289,34 @@ await check('批量生成（run_nodes）与单个一样被拦 —— 这是 2026
   assert(decision.blocked === true, 'run_nodes 在未确认时必须被拦')
   assert(/request_confirmation/.test(decision.reason || ''), 'run_nodes 被拦也要指向 request_confirmation')
   assert(/积分/.test(decision.reason || ''), 'run_nodes 被拦也要说清会花钱')
+})
+
+await check('generate 是第一步收敛后的唯一生成入口，未确认同样被硬拦', () => {
+  /**
+   * 第一步把 add_node(s)/run_node(s)/connect_nodes… 收进 generate —— 而 generate 一次调用会
+   * **建节点 + 连线 + 挂参考 + 提交生成**，会真的花钱。它必须在付费清单里，否则收敛反而
+   * 造出一个新的绕行洞（模型不用确认就能刷一整套分镜的钱）。
+   */
+  assert(PAID_CANVAS_AGENT_TOOLS.has('generate'), 'generate 必须在花钱清单里（否则收敛后生成绕过硬拦）')
+  const guard = createSpendGuard()
+  const decision = guard.check('generate')
+  assert(decision.blocked === true, 'generate 在未确认时必须被拦')
+  assert(/request_confirmation/.test(decision.reason || ''), 'generate 被拦要指向 request_confirmation')
+  assert(/积分/.test(decision.reason || ''), 'generate 被拦要说清会花钱')
+  guard.markApproved('call_confirm_generate')
+  assert(guard.check('generate').blocked === false, '同意后 generate 应放行（与 run_node(s) 同一道确认）')
+})
+
+await check('反证：把 generate 从付费清单里去掉，闸门就不再拦它（正是要防的洞）', () => {
+  // 用可注入清单的 guard 复刻「漏配 generate」的旧形态：证明这条断言是灵敏的，不是空转
+  const withoutGenerate = new Set([...PAID_CANVAS_AGENT_TOOLS].filter((name) => name !== 'generate'))
+  const leaked = createSpendGuard(withoutGenerate)
+  assert(leaked.check('generate').blocked === false, '旧形态：漏配 generate 时它不被拦（洞）')
+  assert(createSpendGuard().check('generate').blocked === true, '新形态：generate 被拦')
+  assert(
+    leaked.check('generate').blocked !== createSpendGuard().check('generate').blocked,
+    '反证成立：两种清单下结论不同，付费闸门覆盖 generate 的断言是灵敏的',
+  )
 })
 
 await check('一次确认同时解锁单节点与批量（批量不必再确认一次，也不能绕过）', () => {

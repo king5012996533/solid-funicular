@@ -6,9 +6,9 @@ import type { GenerationRecordPayload } from "../generation-records/shared";
 import type { RuntimeManagedTask } from "./task-runtime-governor";
 import {
   CANVAS_AGENT_SKILL_KEY,
-  CANVAS_AGENT_TOOL_DEFINITIONS,
   describeConfirmationDecision,
   findCanvasAgentTool,
+  getModelVisibleCanvasAgentTools,
   resolveCanvasAgentPlaybook,
   type AgentConfirmationDecision,
   type AgentConfirmationRequest,
@@ -97,7 +97,18 @@ const TASK_WALL_CLOCK_MS = 25 * 60_000;
  */
 const resolveConsoleTarget = (args: Record<string, unknown>): string => {
   const raw = args.id ?? args.node_id ?? args.nodeId;
-  return typeof raw === "string" ? raw.trim() : "";
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  // generate 用 target 表达目标：已有节点 id / "new" / 一组 id。只取「第一个明确的已有节点 id」做展示，
+  // "new" 与空数组不给 target（不猜）。
+  const target = args.target;
+  if (typeof target === "string" && target.trim() && target.trim().toLowerCase() !== "new") {
+    return target.trim();
+  }
+  if (Array.isArray(target)) {
+    const first = target.find((item) => typeof item === "string" && String(item).trim());
+    if (first) return String(first).trim();
+  }
+  return "";
 };
 
 interface PersistState {
@@ -333,11 +344,12 @@ ${summarySection}
 
 # 纪律
 - **一轮里连续做完，不要中途停下来汇报**：成片生产的第 1~10 步是**同一轮里的顺序动作**，不是 10 轮对话；只有 ① 等用户点 request_confirmation、② 等用户答 ask_user、③ 确实做不下去才可以中断。「先报个进度」对用户没有价值 —— 他点一次委托是想要成品。
-- **付费 / 交付动作必须先取得同意**：触发任何生成（run_node / run_nodes）或覆盖、定稿、批量删除前**先调 \`request_confirmation\`**（写清规模；会预扣积分，**不要自己算积分**）；用户同意才继续，拒绝就换方案。服务端会硬拦没有确认的付费动作。
+- **付费 / 交付动作必须先取得同意**：触发任何生成（\`generate\`）或覆盖、定稿、批量删除前**先调 \`request_confirmation\`**（写清规模；会预扣积分，**不要自己算积分**）；同意才继续，拒绝就换方案。服务端会硬拦没有确认的动作。
+- **建节点 / 改节点 / 连线 / 挂参考 / 出图出视频一律用 \`generate\`**：按 target+spec 描述意图即可，它会把图拼好并提交生成 —— 不要自己拼图。
 - **付费确认前先跑 \`preflight_check\`（同一批节点）**：确认卡靠它才有服务端预估显示「本批将预扣 N 分」.
-- **生成类工具是「提交即回执」**（run_node / run_nodes）：提交成功立刻返回「已提交 · 生成中」，**不在这一轮等**。**不要用读取工具反复轮询等结果**；看节点结果就读一次 get_canvas_node(id)：generating 先做别的，error 如实汇报原文。
-- 批量工具的上限：add_nodes ≤ 12 个/次、run_nodes ≤ 12 个/次、connect_nodes 的 links ≤ 40 条；要铺更多就分批，且**每一批都在确认里说清**。
-- **不要用 get_canvas_state 代替 get_canvas_overview/get_canvas_node**：定位用概览、看细节读单节点，整张只在确需时读（贵且塞上下文）。
+- **生成是「提交即回执」**：\`generate\` 提交成功立刻返回「已提交 · 生成中」，**不在这一轮等**。**不要用读取工具反复轮询**；看结果读一次 get_canvas_node(id)：generating 先做别的，error 如实汇报原文。
+- 批量上限：\`generate\` 一次不超过 12 个节点；铺更多就分批，**每批都在确认里说清**。
+- **读画布按需**：定位用 get_canvas_overview、看细节用 get_canvas_node(id)，别为拿 id 反复读。
 - 工具返回失败时读清原因：能改参数就改，改不了就如实告诉用户，**不要把失败讲成成功**；同一个失败调用不要反复重试（没有确认被拦下就去调 \`request_confirmation\`）。
 - **会话历史以系统提示里的「会话摘要（较早内容）」为准**：较早的对话已被压缩进那一段（可能不在转录里）。用户问起之前定过的设定/做过的事/待办时，**必须依据摘要回答，绝不要说「我看不到更早的对话记录」**—— 信息明明在，看到摘要就直接用它回答。
 
@@ -361,8 +373,8 @@ const buildReferenceNotice = (
     : []
   return referenceImages.length
     ? `\n\n【用户本轮附了 ${referenceImages.length} 张参考图】`
-      + "需要用到它们时，用 attach_reference_images 把图挂到对应的图片节点上（默认就是取这几张），"
-      + "再用 run_node 执行该节点 —— 挂上图之后那次生成会走图生图。不要假装用了图。"
+      + '需要用到它们时，用 generate 出图，并在 spec.references 里写 "uploaded"（表示用用户本轮上传的这几张）；'
+      + "挂上之后那次生成会走图生图。不要假装用了图。"
     : ""
 }
 
@@ -407,9 +419,10 @@ export const buildPromptWithExecutionDemand = (
     + "而工具问会在同一轮里等到答复继续做。"
     + "风格/画幅/张数这类有常识默认值的偏好不要问，用默认值做并在最后汇报里说明你选了哪些默认值。"
     + "除了 ask_user 与 request_confirmation 这两种自带等待的工具，以及确实做不下去（工具持续失败），不要中途停下来汇报；做完再一次性汇报。"
-    + "**生成类是「提交即回执」**：run_node/run_nodes 提交成功就返回（回执写「已提交 · 生成中」），出图要几分钟，"
+    + "**生成是「提交即回执」**：generate 提交成功就返回（回执写「已提交 · 生成中」），出图要几分钟，"
     + "**不要用读取工具反复轮询等结果** —— 提交完继续做下一步；要看结果就读一次单节点（get_canvas_node），"
-    + "还是 generating 就先做别的。读画布按需：需要时先单节点 get_canvas_node，再概览 get_canvas_overview，别用 get_canvas_state 整张读。"
+    + "还是 generating 就先做别的。**建节点 / 改节点 / 连线 / 挂参考 / 出图出视频一律用 generate**（描述意图即可）；"
+    + "读画布按需：需要时先单节点 get_canvas_node，再概览 get_canvas_overview。"
 
   return `${prompt}${referenceNotice}${canvasStateNotice}${executionDemand}`;
 };
@@ -593,7 +606,9 @@ export const executeCanvasAgentTaskFlow = async (
 
   /** 把共享定义包成 Pi 的 AgentTool：参数直接用共享 JSON Schema（Type.Unsafe 不做运行时校验，避免两套 schema 打架） */
   const buildAgentTools = (): AgentTool[] =>
-    CANVAS_AGENT_TOOL_DEFINITIONS.map((definition) => {
+    // 第一步「工具面收敛」：只声明**模型可见**的工具 —— 图操作类（add_node(s)/run_node(s)/connect_nodes…）
+    // 从清单里移除（不是改描述），它们的活并入 generate。定义与执行实现仍保留（见共享文件的停用指引）。
+    getModelVisibleCanvasAgentTools().map((definition) => {
       const timeoutMs =
         // 这两个工具都在等人（用户读分镜表、离开一会儿都可能）—— 用默认的 60 秒会把
         // 「还在思考的用户」误判成超时，于是任务早早收口，用户点提交时已经没人收答复了。

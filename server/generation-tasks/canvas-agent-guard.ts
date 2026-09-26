@@ -30,8 +30,15 @@
  * 一次 `run_nodes` 是**一次调用、一次确认**。批量要花多少由模型在 request_confirmation 的
  * `costPoints` / `summary` 里自己算清楚（那是给用户看的账），闸门不替它做乘法 ——
  * 单槽解锁（`approvedCallId`）的语义因此对两者完全一致，不需要额外的「批量子项」状态。
+ *
+ * `generate` 是第一步工具面收敛后的**唯一生成入口**，必须在这里（2026-09-26 补）。
+ *
+ * 为什么：`generate` 一次调用会建节点、连线、挂参考并提交生成 —— 会真的花钱。它若不在清单里，
+ * 模型不用确认就能刷一整套分镜的钱。只允许**新增覆盖**（把新入口纳入），绝不允许缩面；
+ * `run_node` / `run_nodes` 仍留在清单里：它们虽已从模型可见清单移除（改用 generate），
+ * 但旧转录/旧提示词残留仍可能调到，留着这道拦阻是纵深防御。
  */
-export const PAID_CANVAS_AGENT_TOOLS = new Set<string>(["run_node", "run_nodes"]);
+export const PAID_CANVAS_AGENT_TOOLS = new Set<string>(["run_node", "run_nodes", "generate"]);
 
 export interface SpendGuardDecision {
   blocked: boolean;
@@ -48,7 +55,15 @@ export interface SpendGuard {
   check: (toolName: string) => SpendGuardDecision;
 }
 
-export const createSpendGuard = (): SpendGuard => {
+export const createSpendGuard = (
+  /**
+   * 参与拦阻的付费工具集合（缺省即 PAID_CANVAS_AGENT_TOOLS）。
+   *
+   * 允许注入**只用于测试**：反证用例要能构造「清单里漏了 generate」的旧形态，证明漏掉时闸门
+   * 确实不再拦它（而不是让断言空转）。生产调用一律不传，语义与行为零变化。
+   */
+  paidTools: ReadonlySet<string> = PAID_CANVAS_AGENT_TOOLS,
+): SpendGuard => {
   let approvedConfirmationId = "";
 
   return {
@@ -59,7 +74,7 @@ export const createSpendGuard = (): SpendGuard => {
       return approvedConfirmationId;
     },
     check(toolName: string): SpendGuardDecision {
-      if (!PAID_CANVAS_AGENT_TOOLS.has(toolName)) {
+      if (!paidTools.has(toolName)) {
         return { blocked: false };
       }
       if (approvedConfirmationId) {

@@ -89,6 +89,8 @@ const PHASE_BY_TOOL: Record<string, CanvasAgentConsolePhaseKey> = {
   apply_workflow_template: 'storyboard',
   run_node: 'production',
   run_nodes: 'production',
+  // 第一步工具面收敛后的唯一生成入口：同样落在「生成执行」阶段
+  generate: 'production',
   preflight_check: 'production',
   request_confirmation: 'production',
 }
@@ -113,6 +115,7 @@ const LIFECYCLE_BY_TOOL: Record<string, CanvasAgentConsoleLifecycle> = {
   preflight_check: 'verifying',
   run_node: 'generating',
   run_nodes: 'generating',
+  generate: 'generating',
 }
 
 /** 工具 → 中文短语（日志与「当前任务」都用它，不暴露英文工具名） */
@@ -131,13 +134,14 @@ const PHRASE_BY_TOOL: Record<string, string> = {
   preflight_check: '批量预校验',
   run_node: '提交节点生成',
   run_nodes: '批量提交生成',
+  generate: '提交生成',
   attach_reference_images: '挂参考图',
   list_workflow_templates: '列出模板',
   apply_workflow_template: '套用模板',
   load_playbook: '加载工作手册',
 }
 
-const RUN_TOOLS = new Set(['run_node', 'run_nodes'])
+const RUN_TOOLS = new Set(['run_node', 'run_nodes', 'generate'])
 const READ_TOOLS = new Set(['get_canvas_state', 'get_canvas_overview', 'get_canvas_node'])
 
 /**
@@ -209,7 +213,7 @@ const resolveCreatedNodeCount = (
   resultText: string | undefined,
 ): number => {
   const tool = String(toolName || '')
-  if (tool !== 'add_node' && tool !== 'add_nodes') return 0
+  if (tool !== 'add_node' && tool !== 'add_nodes' && tool !== 'generate') return 0
   let payload: Record<string, unknown>
   try {
     payload = JSON.parse(String(resultText || '')) as Record<string, unknown>
@@ -217,6 +221,11 @@ const resolveCreatedNodeCount = (
     return 0
   }
   if (!payload || typeof payload !== 'object') return 0
+  if (tool === 'generate') {
+    // generate 的回执带 created（本次真正建出来的节点 id，含 text 节点）
+    const created = Array.isArray(payload.created) ? payload.created : []
+    return created.filter((id) => String(id || '').trim()).length
+  }
   if (tool === 'add_node') return String(payload.id || '').trim() ? 1 : 0
   const nodes = Array.isArray(payload.nodes) ? payload.nodes : []
   return nodes.filter((node) => Boolean((node as { id?: unknown } | null)?.id)).length
@@ -354,9 +363,10 @@ const settleRunningLog = (
 /**
  * 从批量回执里取真实分母。
  *
- * 只认这两种工具的回执（形状见 src/views/workflow/agent/canvas-agent-tools.ts）：
+ * 只认这几种工具的回执（形状见 src/views/workflow/agent/canvas-agent-tools.ts）：
  *   · add_nodes → `{ nodes: [{ id, ... }] }`：done = 真的建出来的节点数，total = 请求的节点数；
- *   · run_nodes → `{ submitted, total, nodes }`：done = 真正提交的节点数，total = 这一批的节点数。
+ *   · run_nodes → `{ submitted, total, nodes }`：done = 真正提交的节点数，total = 这一批的节点数；
+ *   · generate  → `{ submitted, total, created, nodes }`：与 run_nodes 同一套计数（total = 这一批要生成的节点数）。
  * 解析不出来（非 JSON / 字段缺失 / 分母为 0）一律返回 undefined —— **没有分母就不显示进度**。
  */
 const resolveBatchProgress = (
@@ -364,7 +374,7 @@ const resolveBatchProgress = (
   resultText: string | undefined,
 ): CanvasAgentConsoleProgress | undefined => {
   const tool = String(toolName || '')
-  if (tool !== 'add_nodes' && tool !== 'run_nodes') return undefined
+  if (tool !== 'add_nodes' && tool !== 'run_nodes' && tool !== 'generate') return undefined
   let payload: Record<string, unknown>
   try {
     payload = JSON.parse(String(resultText || '')) as Record<string, unknown>

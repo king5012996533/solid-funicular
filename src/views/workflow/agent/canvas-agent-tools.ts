@@ -21,6 +21,8 @@ import {
   CANVAS_AGENT_TOOL_DEFINITIONS,
   buildAgentAskUserReceipt,
   describeConfirmationDecision,
+  describeDisabledCanvasAgentTool,
+  isCanvasAgentToolModelVisible,
   normalizeAgentAskUserOptions,
   type AgentAskUserAnswer,
   type AgentConfirmationDecision,
@@ -197,6 +199,14 @@ export interface CanvasAgentContext {
    * 分镜图是「一批一起出」的活，合成一次调用能让执行记录更干净。
    */
   runNodes?: (ids: string[]) => Promise<Array<{ id: string } & CanvasNodeSubmitOutcome>>;
+  /**
+   * 等新建的节点挂载就绪（可选）。
+   *
+   * `generate` 会在**同一次调用**里「建节点 → 提交生成」，而节点的执行器是组件挂载时才注册进来的
+   * （`useCanvasNodeRunner.registerNodeRunner`）—— 不等就提交，刚建出来的节点必然报「未挂载」。
+   * 返回仍在等待、尚未就绪的节点 id（超时也算未就绪）。没注入时工具层跳过等待。
+   */
+  waitForNodesReady?: (ids: string[], timeoutMs: number) => Promise<string[]>;
   /** 套用一个工作流模板，返回创建出的节点/连线数量 */
   applyTemplate: (
     templateId: string,
@@ -343,6 +353,165 @@ const buildSubmitPayload = (
 });
 
 /**
+ * `generate` 归一后的一个目标。
+ *
+ * 一个 `generate` 可以同时是「建若干个新节点」「改若干已有节点」——统一成这个形状后，
+ * 执行阶段就能按同一套流程跑（建/改 → 连线 → 挂参考 → 预校验 → 提交）。
+ */
+export interface CanvasAgentGenerateTarget {
+  /** create = 新建节点；existing = 已有节点（改参数或出变体） */
+  action: "create" | "existing";
+  /** existing 时是节点 id */
+  id?: string;
+  kind?: string;
+  label?: string;
+  prompt?: string;
+  content?: string;
+  model?: string;
+  size?: string;
+  quality?: string;
+  /** 参考图所在的节点 id（交给画布页解析成出图地址） */
+  references: string[];
+  /** 要连到本次目标的上游节点 id */
+  connectFrom: string[];
+}
+
+export interface CanvasGenerateNormalization {
+  ok: boolean;
+  reason?: string;
+  targets: CanvasAgentGenerateTarget[];
+  /** 归一过程中的如实说明（count 被截断 / 对已有节点忽略 count 等） */
+  notes: string[];
+}
+
+const readOptionalString = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+/** 字符串数组去空、去重（同一节点写两遍只算一次） */
+const readStringList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    const text = String(item ?? "").trim();
+    if (text && !out.includes(text)) out.push(text);
+  }
+  return out;
+};
+
+/** 从一份 spec（或 nodes 数组里的一项）读出一个目标的字段；缺省项不写（继承上层或走默认） */
+const readGenerateSpec = (
+  raw: unknown,
+): Omit<CanvasAgentGenerateTarget, "action" | "id"> => {
+  const spec = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const result: Omit<CanvasAgentGenerateTarget, "action" | "id"> = {
+    references: readStringList(spec.references),
+    connectFrom: readStringList(spec.connectFrom),
+  };
+  const kind = readOptionalString(spec.kind);
+  if (kind) result.kind = kind;
+  const label = readOptionalString(spec.label);
+  if (label) result.label = label;
+  const prompt = readOptionalString(spec.prompt);
+  if (prompt) result.prompt = prompt;
+  const content = readOptionalString(spec.content);
+  if (content) result.content = content;
+  const model = readOptionalString(spec.model);
+  if (model) result.model = model;
+  const size = readOptionalString(spec.ratio) || readOptionalString(spec.size);
+  if (size) result.size = size;
+  const quality = readOptionalString(spec.quality);
+  if (quality) result.quality = quality;
+  return result;
+};
+
+/** 顶层 spec 与单项 spec 合并：单项给了就用单项，没给就继承顶层 */
+const mergeGenerateSpec = (
+  base: Omit<CanvasAgentGenerateTarget, "action" | "id">,
+  item: Omit<CanvasAgentGenerateTarget, "action" | "id">,
+): Omit<CanvasAgentGenerateTarget, "action" | "id"> => ({
+  ...base,
+  ...item,
+  references: item.references.length ? item.references : base.references,
+  connectFrom: item.connectFrom.length ? item.connectFrom : base.connectFrom,
+});
+
+/**
+ * `generate` 入参归一（纯函数，可单测）。
+ *
+ * 三种 target：`"new"`（新建，可用 spec.count 复制多份、或用 nodes 给多份不同 spec）、
+ * 单个已有节点 id、一组已有节点 id。spec 的缺省项一律走默认（kind=image、count=1），
+ * 不在这里编造值 —— 拿不到就交给执行阶段用画布/模型默认。
+ */
+export const normalizeCanvasGenerateRequest = (
+  args: Record<string, unknown>,
+): CanvasGenerateNormalization => {
+  const base = readGenerateSpec(args.spec);
+  const rawNodes = Array.isArray(args.nodes) ? args.nodes : [];
+  const specRecord = args.spec && typeof args.spec === "object"
+    ? (args.spec as Record<string, unknown>)
+    : {};
+  const rawCount = Number(specRecord.count);
+  const count = Number.isFinite(rawCount) && rawCount > 0
+    ? Math.min(Math.floor(rawCount), MAX_BATCH_NODES)
+    : 1;
+  const rawTarget = args.target;
+
+  if (typeof rawTarget === "string" && rawTarget.trim().toLowerCase() === "new") {
+    const notes: string[] = [];
+    if (rawNodes.length) {
+      if (rawNodes.length > MAX_BATCH_NODES) {
+        notes.push(`一次最多建 ${MAX_BATCH_NODES} 个节点（收到 ${rawNodes.length} 个），只处理前 ${MAX_BATCH_NODES} 个`);
+      }
+      if (count > 1) notes.push("已给出 nodes，忽略 count");
+      const targets = rawNodes.slice(0, MAX_BATCH_NODES).map((item) => ({
+        action: "create" as const,
+        ...mergeGenerateSpec(base, readGenerateSpec(item)),
+      }));
+      return { ok: true, targets, notes };
+    }
+    const targets: CanvasAgentGenerateTarget[] = [];
+    for (let index = 0; index < count; index += 1) {
+      targets.push({ action: "create", ...base });
+    }
+    return { ok: true, targets, notes };
+  }
+
+  const rawIds = Array.isArray(rawTarget)
+    ? rawTarget
+    : typeof rawTarget === "string"
+      ? [rawTarget]
+      : [];
+  const ids = readStringList(rawIds);
+  if (!ids.length) {
+    return {
+      ok: false,
+      reason:
+        'generate 缺少 target：给已有节点 id、"new"，或一组节点 id（可先用 get_canvas_overview 拿 id）',
+      targets: [],
+      notes: [],
+    };
+  }
+  const notes: string[] = [];
+  if (count > 1 && !rawNodes.length) {
+    notes.push('count 只用于 target="new" 新建节点；对已有节点忽略');
+  }
+  return {
+    ok: true,
+    targets: ids.map((id) => ({ action: "existing", id, ...base })),
+    notes,
+  };
+};
+
+/** 等新建节点挂载的上限：给 Vue 渲染与组件注册执行器留时间，但不至于把一次工具调用拖太久 */
+const GENERATE_NODE_READY_TIMEOUT_MS = 4000;
+
+/** `generate` 的 spec.references 里表示「用户本轮上传的参考图」的占位 */
+export const GENERATE_UPLOADED_REFERENCES_TOKEN = "uploaded";
+
+/**
  * 给一次网络请求套上超时：到点就 abort。
  *
  * 用 AbortController 而不是 Promise.race —— race 只是「结果不要了」，底层请求还在跑；
@@ -466,6 +635,119 @@ const collectPreflightQuota = async (
   };
 };
 
+/**
+ * 跑一遍预校验（工具层内部共用）。
+ *
+ * 抽出来是因为它现在有**两个调用方**：`preflight_check` 工具本身，以及 `generate`
+ * （提交前**自动**再跑一遍，需求：预校验/配额不许绕开）。两处必须走同一条实现 ——
+ * 尤其价格键补全（`toEstimateModelKey`）与配额降级语义，重写一份必然漂移。
+ */
+const runPreflightPass = async (
+  ctx: CanvasAgentContext,
+  targets: CanvasAgentNodeSnapshot[],
+): Promise<CanvasAgentToolResult> => {
+  const allNodes = ctx.snapshotNodes();
+  const edges = ctx.snapshotEdges();
+
+  // 参考图可达性：这一步必须在客户端做（只有浏览器这边能直接探本地托管的图）
+  const refUrls = [...new Set(targets.flatMap((node) => node.referenceImages || []))];
+  const reachability: Record<string, boolean> = {};
+  await Promise.all(refUrls.map(async (url) => {
+    /**
+     * 探测单个地址：先 HEAD，**失败再用 GET 复核**。
+     *
+     * 为什么必须复核：有些服务端/CDN 对 HEAD 只回 404，而那并不代表图取不到
+     * （我们自己的 `/uploads` 就曾如此，见 `server/index.ts` 的 handleUploadsRequest）。
+     * 仅凭 HEAD 判定会误报「参考图不可达」→ Agent 认定**已生成好的母版链接过期**、
+     * 要求重跑 6 张（实测白花 60 积分）。GET 只等响应头、拿到就立刻 cancel，
+     * 不把整张图下下来。
+     */
+    const probe = async (method: "HEAD" | "GET") => {
+      const res = await fetch(url, { method });
+      if (method === "GET") {
+        try {
+          await res.body?.cancel();
+        } catch {
+          // 取消失败不影响结论
+        }
+      }
+      return res.ok;
+    };
+    try {
+      reachability[url] = (await probe("HEAD")) || (await probe("GET"));
+    } catch {
+      try {
+        reachability[url] = await probe("GET");
+      } catch {
+        reachability[url] = false;
+      }
+    }
+  }));
+
+  /**
+   * 配额：这一批要花多少、现在有多少。
+   *
+   * 这两个数字（`/api/points/estimate`、`/api/points/balance`）此前**没有任何调用方**，
+   * 于是配额校验器直接短路 —— 后果是「余额不足」要跑到真扣费才炸（那时图已经在生成了）。
+   * 这里把它接上：能拿到就注入，预校验就能提前拦下；拿不到就降级（见 collectPreflightQuota），
+   * 不阻断其余规则的发现。
+   */
+  const estimatable = targets.filter((node) => node.type === "image" || node.type === "video");
+  const quota = await collectPreflightQuota(estimatable);
+  /**
+   * 把这一批的服务端数字缓存下来，供**确认卡**直接取用（键 = 目标节点集合）。
+   *
+   * 这是「让确认卡稳定显示服务端估算」的正路：确认卡不再自己重算/重打一次接口
+   * （那条弱路径常因拿不到整批而降级）。缓存只在真有服务端总额时写入；
+   * 余额缺失照写（卡片届时只显示估算，不显示余额）。缓存与报告一样按 TTL 判新旧。
+   */
+  rememberPreflightEstimate({
+    nodeIds: estimatable.map((node) => node.id),
+    estimatedCostTotal: quota.estimatedCostTotal,
+    availablePoints: quota.availablePoints,
+  });
+  const context: CanvasValidationContext = { referenceReachability: reachability };
+  if (typeof quota.availablePoints === "number") context.availablePoints = quota.availablePoints;
+  if (typeof quota.estimatedCostPerUnit === "number") context.estimatedCostPerUnit = quota.estimatedCostPerUnit;
+
+  const report = runCanvasPipelineValidation({
+    targets,
+    allNodes,
+    edges,
+    context,
+  });
+
+  lastPreflightReport = {
+    reportId: `pf_${Date.now().toString(36)}`,
+    workflowId: "",
+    nodeIds: targets.map((node) => node.id),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + PREFLIGHT_REPORT_TTL_MS,
+    facts: {
+      reachableReferences: refUrls.filter((url) => reachability[url]),
+      // 只有真查过配额才记这两个事实：没查过却记上，运行期复核会误以为「当时够钱」
+      ...(typeof quota.availablePoints === "number" && typeof quota.estimatedCostTotal === "number"
+        ? { availablePoints: quota.availablePoints, estimatedCost: quota.estimatedCostTotal }
+        : {}),
+    },
+  };
+
+  // 报告要能驱动修复：每个问题都带上「哪个节点 + 怎么改」，而不只是「被拦下了」
+  const lines = report.findings.map((item) => {
+    const where = item.nodeId ? `节点 ${item.nodeId}` : "整批";
+    return `- [${item.level === "error" ? "必须修" : "建议"}] ${where}：${item.message}${item.hint ? ` → ${item.hint}` : ""}`;
+  });
+  return {
+    ok: report.runnable,
+    result: JSON.stringify({ runnable: report.runnable, blockedNodeIds: report.blockedNodeIds, findings: report.findings, validators: report.validators }),
+    // 配额检查结论走 details 回执给服务端埋点（浏览器 console 服务端看不到）
+    details: { quotaCheck: quota.quotaCheck },
+    summary: report.runnable
+      ? `预校验通过（${report.checkedNodes} 个节点）`
+      : `预校验未通过：${report.blockedNodeIds.length} 个节点有必须修的问题\n${lines.join("\n")}`,
+  };
+};
+
 /** 工具清单：这是「Agent 能对画布做什么」的唯一来源，模型看到的描述也来自这里 */
 /**
  * 工具清单：**从共享真源派生**，不再手写一份。
@@ -476,15 +758,18 @@ const collectPreflightQuota = async (
  * 现在两边都从共享定义派生，改一处两边同时生效，漂移在结构上不可能发生。
  */
 export const CANVAS_AGENT_TOOL_SCHEMAS: CanvasAgentToolSchema[] =
-  CANVAS_AGENT_TOOL_DEFINITIONS.map((definition) => ({
-    type: "function",
-    function: {
-      name: definition.name,
-      label: definition.label,
-      description: definition.description,
-      parameters: definition.parameters,
-    },
-  }));
+  CANVAS_AGENT_TOOL_DEFINITIONS
+    // 第一步「工具面收敛」：模型可见清单里去掉已停用的图操作类工具（定义仍保留，删代码留到下一步）
+    .filter(isCanvasAgentToolModelVisible)
+    .map((definition) => ({
+      type: "function",
+      function: {
+        name: definition.name,
+        label: definition.label,
+        description: definition.description,
+        parameters: definition.parameters,
+      },
+    }));
 
 /**
  * 执行一个工具调用。未知工具、参数缺失、节点不存在都返回 ok:false + 明确原因，
@@ -500,6 +785,18 @@ export const executeCanvasAgentTool = async (
     result,
     summary,
   });
+
+  /**
+   * 已停用的图操作类工具：**返回可读的替代指引，不执行**（2026-09-26 第一步）。
+   *
+   * 这些名字已从模型可见清单里摘掉，但旧转录/旧提示词残留仍可能调进来。若静默失败，
+   * 模型会原地重试；这里把「改用 generate / 概览 / 单节点读」的路指清楚。
+   * 底层实现（下面的 switch case）保留 —— generate 复用它，删代码留到下一步。
+   */
+  const disabledGuidance = describeDisabledCanvasAgentTool(name);
+  if (disabledGuidance) {
+    return fail(disabledGuidance, `${name} 已停用：改用 generate / 概览 / 单节点读`);
+  }
 
   switch (name) {
     case "request_confirmation": {
@@ -824,109 +1121,196 @@ export const executeCanvasAgentTool = async (
     case "preflight_check": {
       const asked = (Array.isArray(args.ids) ? args.ids : []).map((id) => String(id || "").trim()).filter(Boolean);
       const allNodes = ctx.snapshotNodes();
-      const edges = ctx.snapshotEdges();
       const targets = asked.length
         ? allNodes.filter((node) => asked.includes(node.id))
         : allNodes.filter((node) => node.type === "image" || node.type === "video");
       if (!targets.length) return fail("没有可校验的节点（画布上没有图片/视频节点）");
+      // 与 generate 内部自动预校验走同一条实现（价格键补全、配额降级语义只有一份）
+      return runPreflightPass(ctx, targets);
+    }
+    case "generate": {
+      /**
+       * 唯一的生成入口（2026-09-26 第一步）。
+       *
+       * 一次调用里按顺序做完：**归一 target/spec → 建/改节点 → 连线 → 挂参考 →
+       * 等新节点挂载 → 自动预校验+配额 → 提交生成 → 结算回执**。
+       * 模型只说意图，图操作全由这里做 —— 它不再需要 add_nodes / connect_nodes / run_nodes 那套。
+       * 提交即回执（不等出图），逐节点给 submitted/duplicate/failed 三态，失败带真实原因。
+       */
+      const normalized = normalizeCanvasGenerateRequest(args);
+      if (!normalized.ok || !normalized.targets.length) {
+        return fail(normalized.reason || "generate 缺少可用的目标");
+      }
+      const notes = [...normalized.notes];
+      const allowedKinds = ctx.nodeTypeHints().map((item) => item.type);
+      const base = ctx.defaultPosition();
+      const known = new Set(ctx.snapshotNodes().map((node) => node.id));
 
-      // 参考图可达性：这一步必须在客户端做（只有浏览器这边能直接探本地托管的图）
-      const refUrls = [...new Set(targets.flatMap((node) => node.referenceImages || []))];
-      const reachability: Record<string, boolean> = {};
-      await Promise.all(refUrls.map(async (url) => {
-        /**
-         * 探测单个地址：先 HEAD，**失败再用 GET 复核**。
-         *
-         * 为什么必须复核：有些服务端/CDN 对 HEAD 只回 404，而那并不代表图取不到
-         * （我们自己的 `/uploads` 就曾如此，见 `server/index.ts` 的 handleUploadsRequest）。
-         * 仅凭 HEAD 判定会误报「参考图不可达」→ Agent 认定**已生成好的母版链接过期**、
-         * 要求重跑 6 张（实测白花 60 积分）。GET 只等响应头、拿到就立刻 cancel，
-         * 不把整张图下下来。
-         */
-        const probe = async (method: "HEAD" | "GET") => {
-          const res = await fetch(url, { method });
-          if (method === "GET") {
-            try {
-              await res.body?.cancel();
-            } catch {
-              // 取消失败不影响结论
-            }
-          }
-          return res.ok;
+      interface ResolvedGenerateTarget {
+        target: CanvasAgentGenerateTarget;
+        id: string;
+        kind: string;
+      }
+
+      const resolved: ResolvedGenerateTarget[] = [];
+      const createdIds: string[] = [];
+      const createFailures: string[] = [];
+      let createIndex = 0;
+
+      // 先整批校验，再动手建/改：避免「建了几个才发现某个 target 非法」留下半成品
+      const missingExisting = normalized.targets
+        .filter((target) => target.action === "existing")
+        .map((target) => String(target.id || "").trim())
+        .filter((id) => id && !known.has(id));
+      if (missingExisting.length) {
+        return fail(`这些节点不存在：${missingExisting.join("、")}（先用 get_canvas_overview 拿 id）`);
+      }
+      const badKindTarget = normalized.targets.find(
+        (target) => target.action === "create" && !allowedKinds.includes(String(target.kind || "image")),
+      );
+      if (badKindTarget) {
+        const badKind = String(badKindTarget.kind || "image");
+        return fail(`不支持的节点类型「${badKind}」，可用：${allowedKinds.join(" / ")}`);
+      }
+
+      for (const target of normalized.targets) {
+        if (target.action === "existing") {
+          const id = String(target.id || "").trim();
+          const patch: Record<string, unknown> = {};
+          if (target.label) patch.label = target.label;
+          if (target.content) patch.content = target.content;
+          if (target.prompt) patch.prompt = target.prompt;
+          if (target.model) patch.model = target.model;
+          if (target.size) patch.size = target.size;
+          if (target.quality) patch.quality = target.quality;
+          if (Object.keys(patch).length) ctx.updateNode(id, patch);
+          const node = ctx.snapshotNodes().find((item) => item.id === id);
+          resolved.push({ target, id, kind: node?.type || "image" });
+          continue;
+        }
+
+        const kind = String(target.kind || "image");
+        const position = {
+          x: base.x + (createIndex % MAX_BATCH_COLUMNS) * 320,
+          y: base.y + Math.floor(createIndex / MAX_BATCH_COLUMNS) * 260,
         };
-        try {
-          reachability[url] = (await probe("HEAD")) || (await probe("GET"));
-        } catch {
-          try {
-            reachability[url] = await probe("GET");
-          } catch {
-            reachability[url] = false;
+        createIndex += 1;
+        const data: Record<string, unknown> = {};
+        if (target.label) data.label = target.label;
+        if (target.content) data.content = target.content;
+        if (target.prompt) data.prompt = target.prompt;
+        if (target.model) data.model = target.model;
+        if (target.size) data.size = target.size;
+        if (target.quality) data.quality = target.quality;
+        const id = ctx.addNode(kind, position, data);
+        if (!id) {
+          createFailures.push(`${target.label || target.kind || "新节点"} 没能创建（画布拒绝了这个类型或数据）`);
+          continue;
+        }
+        createdIds.push(id);
+        known.add(id);
+        resolved.push({ target, id, kind });
+      }
+
+      /** 参考图挂不上（例如母版还没出图）就不提交该节点：宁可如实失败，也不花冤枉钱出一张对不上的图 */
+      const blockedReasons = new Map<string, string>();
+
+      for (const item of resolved) {
+        for (const source of item.target.connectFrom) {
+          if (!known.has(source)) {
+            notes.push(`连线跳过：找不到上游节点 ${source}`);
+            continue;
+          }
+          if (!ctx.addEdge(source, item.id)) {
+            notes.push(`连线未建立：${source} → ${item.id}（可能已存在）`);
           }
         }
-      }));
+        if (!item.target.references.length) continue;
+        if (!ctx.attachReferenceImages) {
+          notes.push(`节点 ${item.id} 未挂参考图：当前环境不支持挂参考图`);
+          continue;
+        }
+        // "uploaded" 是「用户本轮上传的参考图」的占位：画布页只在面板里拿得到这几张，
+        // 这里展开成地址再交给它解析（节点 id 仍原样传入，由画布页解析成出图）。
+        const images = item.target.references.flatMap((ref) =>
+          ref === GENERATE_UPLOADED_REFERENCES_TOKEN ? (ctx.referenceImages?.() || []) : [ref],
+        );
+        if (!images.length) {
+          notes.push(`节点 ${item.id} 未挂参考图：用户本轮没有上传参考图`);
+          continue;
+        }
+        const attached = ctx.attachReferenceImages(item.id, images);
+        if (!attached.ok) {
+          notes.push(`节点 ${item.id} 挂参考图失败：${attached.reason || "没有可用的参考图"}`);
+          blockedReasons.set(item.id, `挂参考图失败：${attached.reason || "没有可用的参考图"}`);
+        }
+      }
 
-      /**
-       * 配额：这一批要花多少、现在有多少。
-       *
-       * 这两个数字（`/api/points/estimate`、`/api/points/balance`）此前**没有任何调用方**，
-       * 于是配额校验器直接短路 —— 后果是「余额不足」要跑到真扣费才炸（那时图已经在生成了）。
-       * 这里把它接上：能拿到就注入，预校验就能提前拦下；拿不到就降级（见 collectPreflightQuota），
-       * 不阻断其余规则的发现。
-       */
-      const estimatable = targets.filter((node) => node.type === "image" || node.type === "video");
-      const quota = await collectPreflightQuota(estimatable);
-      /**
-       * 把这一批的服务端数字缓存下来，供**确认卡**直接取用（键 = 目标节点集合）。
-       *
-       * 这是「让确认卡稳定显示服务端估算」的正路：确认卡不再自己重算/重打一次接口
-       * （那条弱路径常因拿不到整批而降级）。缓存只在真有服务端总额时写入；
-       * 余额缺失照写（卡片届时只显示估算，不显示余额）。缓存与报告一样按 TTL 判新旧。
-       */
-      rememberPreflightEstimate({
-        nodeIds: estimatable.map((node) => node.id),
-        estimatedCostTotal: quota.estimatedCostTotal,
-        availablePoints: quota.availablePoints,
+      const executable = resolved.filter((item) => item.kind === "image" || item.kind === "video");
+      for (const item of resolved) {
+        if (item.kind !== "image" && item.kind !== "video") {
+          notes.push(`节点 ${item.id}（${item.kind}）无需生成，已建好`);
+        }
+      }
+      const toSubmit = executable
+        .map((item) => item.id)
+        .filter((id) => !blockedReasons.has(id));
+
+      // 新建的节点要等组件挂载（执行器这时才注册）：不等就提交必然报「未挂载」
+      const createdToSubmit = toSubmit.filter((id) => createdIds.includes(id));
+      if (createdToSubmit.length && ctx.waitForNodesReady) {
+        const notReady = await ctx.waitForNodesReady(createdToSubmit, GENERATE_NODE_READY_TIMEOUT_MS);
+        for (const id of notReady) notes.push(`节点 ${id} 尚未挂载就绪，提交可能失败`);
+      }
+
+      const receipts = new Map<string, ReturnType<typeof toSubmitReceipt>>();
+      if (toSubmit.length) {
+        const snapshots = ctx.snapshotNodes().filter((node) => toSubmit.includes(node.id));
+        const preflight = await runPreflightPass(ctx, snapshots);
+        if (!preflight.ok) {
+          notes.push(`预校验未通过，未提交任何节点：${preflight.summary}`);
+          for (const id of toSubmit) blockedReasons.set(id, "预校验未通过，未提交");
+        } else {
+          const outcomes = ctx.runNodes
+            ? await ctx.runNodes(toSubmit)
+            : await Promise.all(toSubmit.map(async (id) => ({ id, ...(await ctx.runNode(id)) })));
+          for (const outcome of outcomes) {
+            receipts.set(outcome.id, toSubmitReceipt(outcome.id, outcome));
+          }
+        }
+      }
+
+      const ordered = executable.map((item) => {
+        const receipt = receipts.get(item.id);
+        if (receipt) return receipt;
+        return {
+          id: item.id,
+          submitted: false,
+          status: "failed" as const,
+          reason: blockedReasons.get(item.id) || "未提交",
+        };
       });
-      const context: CanvasValidationContext = { referenceReachability: reachability };
-      if (typeof quota.availablePoints === "number") context.availablePoints = quota.availablePoints;
-      if (typeof quota.estimatedCostPerUnit === "number") context.estimatedCostPerUnit = quota.estimatedCostPerUnit;
-
-      const report = runCanvasPipelineValidation({
-        targets,
-        allNodes,
-        edges,
-        context,
+      const submitted = ordered.filter((item) => item.submitted).length;
+      const failureNotes = [
+        ...createFailures,
+        ...ordered.filter((item) => item.status === "failed").map((item) => `${item.id}: ${item.reason || "未提交"}`),
+      ];
+      const message = [...notes, ...(failureNotes.length ? [`失败项：${failureNotes.join("；")}`] : [])].join("；");
+      const result = JSON.stringify({
+        submitted,
+        total: ordered.length,
+        created: createdIds,
+        ...(message ? { message } : {}),
+        nodes: ordered,
       });
-
-      lastPreflightReport = {
-        reportId: `pf_${Date.now().toString(36)}`,
-        workflowId: "",
-        nodeIds: targets.map((node) => node.id),
-        createdAt: Date.now(),
-        expiresAt: Date.now() + PREFLIGHT_REPORT_TTL_MS,
-        facts: {
-          reachableReferences: refUrls.filter((url) => reachability[url]),
-          // 只有真查过配额才记这两个事实：没查过却记上，运行期复核会误以为「当时够钱」
-          ...(typeof quota.availablePoints === "number" && typeof quota.estimatedCostTotal === "number"
-            ? { availablePoints: quota.availablePoints, estimatedCost: quota.estimatedCostTotal }
-            : {}),
-        },
-      };
-
-      // 报告要能驱动修复：每个问题都带上「哪个节点 + 怎么改」，而不只是「被拦下了」
-      const lines = report.findings.map((item) => {
-        const where = item.nodeId ? `节点 ${item.nodeId}` : "整批";
-        return `- [${item.level === "error" ? "必须修" : "建议"}] ${where}：${item.message}${item.hint ? ` → ${item.hint}` : ""}`;
-      });
-      return {
-        ok: report.runnable,
-        result: JSON.stringify({ runnable: report.runnable, blockedNodeIds: report.blockedNodeIds, findings: report.findings, validators: report.validators }),
-        // 配额检查结论走 details 回执给服务端埋点（浏览器 console 服务端看不到）
-        details: { quotaCheck: quota.quotaCheck },
-        summary: report.runnable
-          ? `预校验通过（${report.checkedNodes} 个节点）`
-          : `预校验未通过：${report.blockedNodeIds.length} 个节点有必须修的问题\n${lines.join("\n")}`,
-      };
+      const createdOnly = ordered.length === 0 && createdIds.length > 0;
+      const ok = submitted > 0 || createdOnly;
+      const summary = submitted > 0
+        ? `已提交 · 生成中：${submitted} 个节点（新建 ${createdIds.length} 个）${message ? `（${message}）` : ""}`
+        : createdOnly
+          ? `已创建 ${createdIds.length} 个节点（无需生成）${message ? `（${message}）` : ""}`
+          : `没有任何节点被提交${message ? `：${message}` : ""}`;
+      return { ok, result, summary };
     }
     case "run_nodes": {
       // 去重：同一个 id 在参数里出现多次只执行一次（模型偶尔会把同一个节点写两遍）

@@ -134,6 +134,25 @@ console.log('\n【3】进度只在真有分母时出现（add_nodes / run_nodes 
   check('分母为 0 不显示进度', zeroTotal.progress, undefined)
 }
 
+console.log('\n【3.1】generate（第一步收敛后的唯一生成入口）：阶段/生命周期/进度')
+{
+  const start = stateAt([toolStart('generate')])
+  check('generate → generating', start.lifecycle, 'generating')
+  check('generate → 生成执行阶段', start.stage.phase, 'production')
+  check('当前任务用中文短语，不暴露工具名', start.current, { title: '正在提交生成' })
+
+  const progressed = stateAt([
+    toolEnd('generate', { summary: '已提交 · 生成中：8 个节点（新建 8 个）', resultText: JSON.stringify({ submitted: 8, total: 24, created: ['a', 'b'] }) }),
+  ])
+  check('generate：done=已提交、total=这一批（真分母）', progressed.progress, { done: 8, total: 24, unit: '个节点' })
+  check('generate：新建节点计入画布动作', progressed.canvasActions, { created: 2, unit: '个节点' })
+
+  const createdOnly = stateAt([
+    toolEnd('generate', { summary: '已创建 1 个节点（无需生成）', resultText: JSON.stringify({ submitted: 0, total: 0, created: ['t1'], nodes: [] }) }),
+  ])
+  check('generate 只建文本节点：不计入生成进度、但计入已创建节点数', [createdOnly.progress, createdOnly.canvasActions], [undefined, { created: 1, unit: '个节点' }])
+}
+
 console.log('\n【4】执行日志：running → done/failed，按 callId 配对')
 {
   const done = stateAt([

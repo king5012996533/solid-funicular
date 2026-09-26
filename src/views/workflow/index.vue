@@ -65,7 +65,7 @@ import {
 } from './config/node-suggestions'
 import type { GraphNode } from '@vue-flow/core'
 import type { CanvasAgentContext } from './agent/canvas-agent-tools'
-import { runNodeById, beginAgentRunRound } from './composables/useCanvasNodeRunner'
+import { runNodeById, beginAgentRunRound, hasNodeRunner } from './composables/useCanvasNodeRunner'
 import { resolveAttachedReferences } from './composables/resolveAttachedReferences'
 import type { ContextMenuItem, ContextMenuPosition } from '@/types/canvas-interaction'
 import { resolveModelSelectionKey, getAllImageModels, getAllVideoModels, getAllChatModels } from '@/config/models'
@@ -1603,6 +1603,24 @@ const canvasAgentContext: CanvasAgentContext = {
       outcomes.push({ id, ...result })
     }
     return outcomes
+  },
+  /**
+   * 等新建节点挂载就绪。
+   *
+   * generate 会在同一次调用里「建节点 → 提交生成」，而节点的执行器是组件 onMounted 时才注册的
+   * （registerNodeRunner）—— 刚建出来的节点此刻还没注册，不等就提交必然报「未挂载」。
+   * 这里轮询 runner 注册表（30ms 一次），超时把仍未就绪的 id 交回工具层如实说明。
+   */
+  waitForNodesReady: async (ids, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs
+    const pending = new Set(ids.filter((id) => Boolean(id)))
+    while (pending.size && Date.now() < deadline) {
+      for (const id of [...pending]) {
+        if (hasNodeRunner(id)) pending.delete(id)
+      }
+      if (pending.size) await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    return [...pending]
   },
   /**
    * 把参考图挂到图片节点上。
