@@ -477,17 +477,17 @@ watch(content, async () => {
   bottom: 100%;
   left: 0;
   right: 0;
-  margin-bottom: 8px;
+  margin-bottom: var(--canvas-node-title-gap);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 22px;
+  gap: 4px;
+  min-height: var(--canvas-node-title-line);
   padding: 0 8px 0 2px;
   border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 22px;
+  color: var(--canvas-node-title-fg);
+  font-size: var(--canvas-node-title-size);
+  font-weight: var(--canvas-node-title-weight);
+  line-height: var(--canvas-node-title-line);
   letter-spacing: 0.2px;
   cursor: pointer;
   user-select: none;
@@ -498,8 +498,8 @@ watch(content, async () => {
   color: var(--text-primary);
 }
 .text-node-title-icon {
-  font-size: 16px;
-  color: var(--text-tertiary);
+  font-size: var(--canvas-node-title-icon);
+  color: var(--canvas-node-title-fg);
 }
 .text-node-title-input {
   flex: 1 1 0;
@@ -510,9 +510,9 @@ watch(content, async () => {
   border-radius: 4px;
   padding: 1px 6px;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 22px;
+  line-height: 20px;
   outline: none;
   box-sizing: border-box;
 }

@@ -23,6 +23,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import CanvasNodeHoverToolbar, { type NodeToolbarAction } from '@/components/canvas/CanvasNodeHoverToolbar.vue'
+import CanvasNodeTopToolbar, { type NodeTopToolbarItem } from '@/components/canvas/CanvasNodeTopToolbar.vue'
 import ContentGenerator, { type GeneratorParamsSnapshot } from '@/components/generate/ContentGenerator.vue'
 import CanvasNodeAddHandle from '@/components/canvas/CanvasNodeAddHandle.vue'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
@@ -36,11 +37,15 @@ import {
   updateNode,
   removeNode,
   duplicateNode,
+  addNode,
+  addEdge,
+  nodes,
   type WorkflowVideoNodeData,
 } from '../../composables/useWorkflowCanvas'
 import { uploadStorageFile } from '@/api/storage'
+import { resolveFrameTimestamp, buildFrameFileName, type FramePosition } from '@/shared/video-frame-capture'
 import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type VideoModel } from '@/config/models'
-import { describeAspectRatio, pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
+import { pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
@@ -49,6 +54,7 @@ import { collectReferenceableAssets } from '../../composables/reference-resolver
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
 import { parseAspectRatio } from '@/config/model-params'
 import { useComposerPanel } from '../../composables/useComposerPanel'
+import { useNodeToolbar } from '../../composables/useNodeToolbar'
 
 const props = defineProps<{
   id: string
@@ -83,6 +89,8 @@ const errorMsg = ref(props.data?.error || '')
 const progressText = ref('')
 let taskStreamController: AbortController | null = null
 const fileInputRef = ref<HTMLInputElement | null>(null)
+/** 本节点的 <video> 元素：抽帧时从它上面取画面（canvas.drawImage 的源） */
+const videoEl = ref<HTMLVideoElement | null>(null)
 
 watch(
   [() => props.data?.url, () => props.data?.loading, () => props.data?.error],
@@ -215,26 +223,6 @@ const handleParamsChange = (params: GeneratorParamsSnapshot) => {
   updateNode(props.id, next)
 }
 
-/** 卡片参数 chip：模型 · 比例 · 时长 · 分辨率 */
-const paramChips = computed(() => {
-  const chips: string[] = []
-  const modelKey = appliedParams.value.modelKey
-  if (modelKey) {
-    const model = getModelByName(modelKey) as { label?: string } | null
-    chips.push(model?.label || modelKey)
-  }
-  if (appliedParams.value.ratio) chips.push(describeAspectRatio(appliedParams.value.ratio))
-  if (appliedParams.value.duration) chips.push(`${appliedParams.value.duration} 秒`)
-  if (appliedParams.value.resolution) {
-    // 分辨率优先用模型声明里的可读文案（如 1080P），没有就原样大写显示
-    const matched = resolvedSchema.value.resolutions.find(
-      (item) => item.key === appliedParams.value.resolution,
-    )
-    chips.push(matched?.label || String(appliedParams.value.resolution).toUpperCase())
-  }
-  return chips
-})
-
 const showLoading = computed(() => isLoading.value)
 const showError = computed(() => !isLoading.value && !!errorMsg.value)
 /**
@@ -297,6 +285,199 @@ const handleDuplicate = () => {
   const newId = duplicateNode(props.id)
   if (newId) setTimeout(() => updateNodeInternals([newId]), 50)
 }
+
+/**
+ * 抽帧（LibTV 动作条里的「截取当前帧 / 首帧 / 尾帧」）。
+ *
+ * 纯本地截图：`<video>` → canvas → JPEG Blob，**不扣积分、不调生成接口**。
+ * 帧走与图片节点上传同一条通道（uploadStorageFile）入库，再落到视频节点右侧的新图片节点，
+ * 并连一条 video → image 的边，形成「视频 → 图片」的往返闭环。
+ */
+const FRAME_POSITION_LABELS: Record<FramePosition, string> = {
+  current: '当前帧',
+  first: '首帧',
+  last: '尾帧',
+}
+
+/** video.readyState 达到这个值才有当前帧可画（HTMLMediaElement.HAVE_CURRENT_DATA） */
+const FRAME_READY_STATE = 2
+/** JPEG 编码质量：肉眼无损又不至于太占存储 */
+const FRAME_JPEG_QUALITY = 0.92
+/** 等 seek 完成的兜底时长：到点还没有 seeked 事件就判失败，不能无限等 */
+const FRAME_SEEK_TIMEOUT_MS = 5000
+
+/** 跳转到指定秒数并等 seek 完成；超时 / 失败都 reject（由调用方转成可读提示） */
+const seekVideoTo = (video: HTMLVideoElement, timestamp: number): Promise<void> =>
+  new Promise((resolve, reject) => {
+    // 已经在目标点附近就不用再 seek：多数浏览器 seek 到同一位置不会发 seeked 事件
+    if (video.readyState >= FRAME_READY_STATE && Math.abs(video.currentTime - timestamp) < 0.01) {
+      resolve()
+      return
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    function cleanup() {
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      if (timer) clearTimeout(timer)
+    }
+    function onSeeked() {
+      cleanup()
+      resolve()
+    }
+    function onError() {
+      cleanup()
+      reject(new Error('视频跳转到该时间点失败，这段可能还不允许定位'))
+    }
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+    timer = setTimeout(() => {
+      cleanup()
+      reject(new Error('视频跳转超时，请稍后重试'))
+    }, FRAME_SEEK_TIMEOUT_MS)
+    try {
+      video.currentTime = timestamp
+    } catch {
+      cleanup()
+      reject(new Error('视频跳转到该时间点失败'))
+    }
+  })
+
+/**
+ * 把 video 当前帧画到 canvas 再编码成 JPEG。
+ * canvas 尺寸取 videoWidth/videoHeight（**不是** CSS 尺寸 —— 用 CSS 尺寸会截成低分辨率）。
+ */
+const drawVideoFrameToJpeg = (video: HTMLVideoElement): Promise<Blob> => {
+  const width = video.videoWidth
+  const height = video.videoHeight
+  if (!width || !height) {
+    return Promise.reject(new Error('拿不到视频画面尺寸，暂时无法抽帧'))
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return Promise.reject(new Error('当前浏览器不支持画布取帧'))
+  }
+  context.drawImage(video, 0, 0, width, height)
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob)
+        else reject(new Error('画面编码失败，无法生成图片'))
+      },
+      'image/jpeg',
+      FRAME_JPEG_QUALITY,
+    )
+  })
+}
+
+/**
+ * 取帧 → 编码。首帧 / 尾帧会移动播放头，取完恢复原位。
+ * 恢复失败（部分流媒体 seekable 范围不含原点）只影响观感，帧已经拿到，故忽略。
+ */
+const captureFrame = async (
+  video: HTMLVideoElement,
+  timestamp: number,
+  restoreTo: number | null,
+): Promise<Blob> => {
+  try {
+    await seekVideoTo(video, timestamp)
+    return await drawVideoFrameToJpeg(video)
+  } finally {
+    if (restoreTo !== null) {
+      try {
+        video.currentTime = restoreTo
+      } catch {
+        // 恢复播放头失败不影响已取到的帧
+      }
+    }
+  }
+}
+
+const handleExtractFrame = async (position: FramePosition) => {
+  const video = videoEl.value
+  if (!video) {
+    ElMessage.error('找不到该节点的视频元素，无法抽帧')
+    return
+  }
+  if (video.readyState < FRAME_READY_STATE) {
+    ElMessage.error('视频还没加载好（没有可用画面），请稍后重试')
+    return
+  }
+  const sourceNode = nodes.value.find((item) => item.id === props.id)
+  if (!sourceNode) {
+    ElMessage.error('找不到该视频节点，无法放置抽帧结果')
+    return
+  }
+  // 取哪一秒全部交给纯逻辑（边界见 src/shared/video-frame-capture.ts）
+  const timestamp = resolveFrameTimestamp(position, video.currentTime, video.duration)
+  const originalTime = Number.isFinite(video.currentTime) ? video.currentTime : null
+  const restoreTo = position === 'current' ? null : originalTime
+
+  let frameBlob: Blob | null = null
+  try {
+    frameBlob = await captureFrame(video, timestamp, restoreTo)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '抽帧失败')
+    return
+  }
+  if (!frameBlob) return
+
+  const file = new File([frameBlob], buildFrameFileName(position, timestamp), { type: 'image/jpeg' })
+  // 先建节点（loading 占位）再上传：与图片节点的裁剪同款做法，点下去立刻能看到结果节点
+  const targetId = addNode('image', { x: sourceNode.position.x + 640, y: sourceNode.position.y }, {
+    label: `${FRAME_POSITION_LABELS[position]} · ${timestamp.toFixed(2)}s`,
+    loading: true,
+  })
+  addEdge({
+    source: props.id,
+    target: targetId,
+    sourceHandle: 'right',
+    targetHandle: 'left',
+    type: 'imageOrder',
+    data: { imageOrder: 1 },
+  })
+  try {
+    const uploaded = await uploadStorageFile(file, 'asset')
+    if (!uploaded) throw new Error('抽帧结果上传失败')
+    updateNode(targetId, { url: uploaded.publicUrl, loading: false, error: '' })
+    ElMessage.success('已抽帧并生成图片节点')
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '抽帧结果上传失败'
+    ElMessage.error(message)
+    updateNode(targetId, { loading: false, error: message })
+  } finally {
+    setTimeout(() => updateNodeInternals([targetId]), 50)
+  }
+}
+
+/** 节点动作条：固定屏幕尺寸 + 贴边收敛（与图片节点同一套 composable） */
+const toolbarRef = ref<HTMLElement | null>(null)
+const { style: toolbarStyle } = useNodeToolbar({
+  el: toolbarRef,
+  nodeId: () => props.id,
+  cardWidth: () => cardSize.value.width,
+})
+
+/**
+ * 视频节点的动作条：**只上有真实实现的**（对齐图片节点纪律 —— 宁可少放，也不摆「接入中」的假入口）。
+ * 目前唯一一项是抽帧：完全本地可做（<video> + canvas），且是「视频 → 图片」闭环的关键一步。
+ * 结果落到视频节点右侧的新图片节点，不覆盖原视频。
+ */
+const toolbarItems = computed<NodeTopToolbarItem[]>(() => [
+  {
+    id: 'extract-frame',
+    label: '抽帧',
+    icon: Film,
+    hasDropdown: true,
+    dropdownItems: [
+      { id: 'current', label: '截取当前帧', description: '保存播放头所在画面为新图片节点', onClick: () => { void handleExtractFrame('current') } },
+      { id: 'first', label: '截取首帧', description: '保存视频第一帧为新图片节点', onClick: () => { void handleExtractFrame('first') } },
+      { id: 'last', label: '截取尾帧', description: '保存视频最后一帧为新图片节点', onClick: () => { void handleExtractFrame('last') } },
+    ],
+  },
+])
 
 const hoverActions = computed<NodeToolbarAction[]>(() => {
   const list: NodeToolbarAction[] = [
@@ -588,14 +769,6 @@ onBeforeUnmount(() => {
       <span v-if="outputResolutionLabel" class="video-node-title-resolution">{{ outputResolutionLabel }}</span>
     </div>
 
-    <!-- 参数 chip：模型 · 比例 · 时长 · 分辨率，由工具栏写入节点 data -->
-    <div v-if="paramChips.length" class="video-node-params" :title="paramChips.join(' · ')">
-      <span v-for="(chip, index) in paramChips" :key="chip" class="video-node-param-chip">
-        <span v-if="index > 0" class="video-node-param-divider" aria-hidden="true"></span>
-        {{ chip }}
-      </span>
-    </div>
-
     <div
       class="video-node-card"
       :class="{ 'is-selected': isSelected, 'is-collapsed': collapsed, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
@@ -667,6 +840,7 @@ onBeforeUnmount(() => {
       </div>
       <video
         v-else
+        ref="videoEl"
         :src="videoUrl"
         controls
         class="video-node-player nodrag nopan"
@@ -682,6 +856,14 @@ onBeforeUnmount(() => {
         @change="handleFileChange"
       />
       </template>
+    </div>
+
+    <!-- 节点动作条：只在「选中 + 有视频产出」时出现（对齐图片节点规则 —— 空节点给的是卡内「尝试」列表）。
+         定位复用图片节点那一套锚点 + 贴边收敛写法（见 useNodeToolbar），两个生成节点保持一致。 -->
+    <div class="video-node-toolbar-anchor">
+      <div ref="toolbarRef" class="video-node-toolbar-box" :style="toolbarStyle">
+        <CanvasNodeTopToolbar :visible="isSelected && showVideo && !isLoading" :items="toolbarItems" />
+      </div>
     </div>
 
     <CanvasNodeAddHandle side="left" :visible="isSelected" />
@@ -729,46 +911,11 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
-/* 参数 chip 行：夹在标题和卡片之间 */
-.video-node-params {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  margin-bottom: 30px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 20px;
-  overflow: hidden;
-  white-space: nowrap;
-  pointer-events: none;
-  user-select: none;
-}
-.video-node-param-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  line-height: 20px;
-  color: var(--text-tertiary, rgba(224, 245, 255, 0.55));
-  flex-shrink: 0;
-}
-.video-node-param-divider {
-  width: 1px;
-  height: 10px;
-  background: var(--stroke-tertiary, rgba(255, 255, 255, 0.14));
-}
-.video-node-param-chip:first-child {
-  color: var(--text-secondary, rgba(224, 245, 255, 0.72));
-  font-weight: 500;
-}
-
 .video-node-title-resolution {
   /* 贴到标题行最右（对齐 LibTV：名字在左、输出尺寸在右） */
   margin-left: auto;
-  color: var(--text-tertiary);
-  font-size: 12px;
+  color: var(--canvas-node-meta-fg);
+  font-size: var(--canvas-node-meta-size);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -778,17 +925,17 @@ onBeforeUnmount(() => {
   bottom: 100%;
   left: 0;
   right: 0;
-  margin-bottom: 8px;
+  margin-bottom: var(--canvas-node-title-gap);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 22px;
+  gap: 4px;
+  min-height: var(--canvas-node-title-line);
   padding: 0 8px 0 2px;
   border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 15px;
-  font-weight: 500;
-  line-height: 22px;
+  color: var(--canvas-node-title-fg);
+  font-size: var(--canvas-node-title-size);
+  font-weight: var(--canvas-node-title-weight);
+  line-height: var(--canvas-node-title-line);
   cursor: pointer;
   user-select: none;
   transition: background-color 0.2s, color 0.2s;
@@ -798,8 +945,8 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
 }
 .video-node-title-icon {
-  font-size: 16px;
-  color: var(--text-tertiary);
+  font-size: var(--canvas-node-title-icon);
+  color: var(--canvas-node-title-fg);
 }
 .video-node-title-input {
   flex: 1 1 0;
@@ -810,9 +957,9 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   padding: 1px 6px;
   color: var(--text-primary);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 500;
-  line-height: 22px;
+  line-height: 20px;
   outline: none;
   box-sizing: border-box;
 }
@@ -1042,6 +1189,17 @@ onBeforeUnmount(() => {
 }
 .video-node-add-btn:hover { color: var(--text-primary); }
 .video-node-add-btn:active { transform: translateY(-50%) scale(0.95); }
+
+/* 动作条锚点：盖住卡片范围但不吃事件；工具栏本体（toolbar-box）再由 useNodeToolbar 贴到卡片上方并做屏幕空间收敛 */
+.video-node-toolbar-anchor { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+.video-node-toolbar-box { position: absolute; bottom: 100%; left: 50%; display: inline-flex; pointer-events: auto; }
+/* 工具栏组件自带一套「浮在卡片上方」的定位，这里由外层盒子接管，把它退回普通流 */
+.video-node-toolbar-box :deep(.canvas-node-top-toolbar) {
+  position: static;
+  bottom: auto;
+  left: auto;
+  transform: none;
+}
 
 /* 宽 660、不随画布缩放 —— 都由内联 style 给（见 useComposerPanel），这里只负责挂到卡片正下方 */
 .video-node-prompt-panel {

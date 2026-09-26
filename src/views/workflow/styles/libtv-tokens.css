@@ -37,6 +37,24 @@
   --canvas-node-bg: #262626;
   --canvas-node-border: #ffffff14;
   --canvas-node-border-selected: #a8a8a8;
+
+  /* —— 节点标题行（2026-09-26 真机复测）——
+     LibTV 的标题行比我们原来小一号、弱一档：
+       字号 13px / 字重 400（我们原来是 15px / 500）
+       颜色 #919191 —— **不透明灰**，不是半透明白（他们 UI 层的三级文字是实色阶梯
+       #f7f7f7 / #a8a8a8 / #919191 / #525252，只有叠在素材上的文字才用 alpha 白）
+       行高 20（原来 22）
+       与卡片的间隙只有 2px（原来 8px + 参数行 30px 两段留白）
+       类型图标 14px（原来 16px）
+     右侧的「宽 × 高」用 11px + tabular-nums（数字等宽，缩放时不会左右抖）。 */
+  --canvas-node-title-fg: #919191;
+  --canvas-node-meta-fg: #919191;
+  --canvas-node-title-size: 13px;
+  --canvas-node-title-weight: 400;
+  --canvas-node-title-line: 20px;
+  --canvas-node-title-gap: 2px;
+  --canvas-node-title-icon: 14px;
+  --canvas-node-meta-size: 11px;
   /* Agent 画布动作高亮（批次 3）：只给节点描边用，克制的一圈强调色，不发光不放缩 */
   --canvas-agent-active: #7c5cff;
   /* 有图节点的图片宽度：图片满宽，卡片高度按图片比例撑开 */
@@ -72,8 +90,15 @@
   --text-tertiary: #ffffff4d;
   --text-disabled: #ffffff4d;
 
-  /* —— 品牌色 —— */
+  /* —— 品牌色 ——
+     LibTV 的三档（线上实测命名是 `--nt-bg-brand` / `-hover` / `-active`）：
+     #13d5ff / #5ddcff / #05a3c5。我们只抄了第一档，hover 与按下一直在走字面兜底值。
+     另外 `workflow.css` 里用的是 `--brand-main-active`（全局只定义了 `--brand-main-pressed`），
+     这个名字以前从没被定义过 —— 这里一并补上，两个名字指向同一个值。 */
   --brand-main-default: #13d5ff;
+  --brand-main-hover: #5ddcff;
+  --brand-main-pressed: #05a3c5;
+  --brand-main-active: #05a3c5;
   /* 节点类型分色：图片/视频用全局已有的 --brand-image / --brand-video。
      LLM 没有专属品牌色，而 --brand-bright-* 会被运行时主题接管
      （theme-runtime.ts 会按后台配置的 primary 覆盖它），
@@ -94,6 +119,9 @@ body[lv-theme='light'] .workflow-container {
   --canvas-node-bg: #ffffff;
   --canvas-node-border: #00000014;
   --canvas-node-border-selected: #6b6b6b;
+  /* 浅底上 #919191 对比不够，压深一档（对应他们的 --character-studio-text-secondary: #0009） */
+  --canvas-node-title-fg: #6b6b6b;
+  --canvas-node-meta-fg: #6b6b6b;
   /* 浅底上紫色要压深一点才够对比，同样只用于 Agent 动作描边 */
   --canvas-agent-active: #6a45f5;
 
@@ -121,6 +149,10 @@ body[lv-theme='light'] .workflow-container {
   --text-disabled: #1616164d;
 
   --brand-main-default: #05a3c5;
+  /* 浅底上 hover 提亮、按下压深，方向与深色主题一致（深色是变亮，因为底更暗） */
+  --brand-main-hover: #04b8dd;
+  --brand-main-pressed: #04889f;
+  --brand-main-active: #04889f;
   --brand-llm: #8b3dff;
   --canvas-selection-border: #6b6b6b;
 }

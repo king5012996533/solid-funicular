@@ -242,6 +242,27 @@ const getContentTypeByFilePath = (filePath: string) => {
       return "font/woff2";
     case ".txt":
       return "text/plain; charset=utf-8";
+    /*
+     * 视频 / 音频必须有正确的 Content-Type —— 2026-09-26 真机发现：
+     * 这里原来没有 `.mp4` 分支，落到 `application/octet-stream`，于是浏览器里的
+     * `<video src="/uploads/xxx.mp4">` **直接拒绝解码**（实测 Chrome 报
+     * `DEMUXER_ERROR_COULD_NOT_OPEN`，readyState 停在 0）—— 表现就是「生成的视频播不了」。
+     * 图片一直没事，所以这个问题只在视频节点上暴露。
+     * 注意 Content-Type 不是「对下载有用」而已：`<video>` 的加载是**强类型检查**的。
+     */
+    case ".mp4":
+    case ".m4v":
+      return "video/mp4";
+    case ".webm":
+      return "video/webm";
+    case ".mov":
+      return "video/quicktime";
+    case ".mp3":
+      return "audio/mpeg";
+    case ".m4a":
+      return "audio/mp4";
+    case ".wav":
+      return "audio/wav";
     default:
       return "application/octet-stream";
   }

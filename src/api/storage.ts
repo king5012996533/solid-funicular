@@ -25,6 +25,16 @@ export const uploadStorageFile = async (
   // 以原始二进制方式发给后端，避免额外 multipart 依赖。
   const response = await fetch(buildApiUrl('/api/storage/upload'), {
     method: 'POST',
+    /*
+     * `credentials: 'include'` 是必须的，2026-09-26 真机踩到：
+     * `buildApiUrl` 在配了 `VITE_API_BASE_URL` 时会产出**跨源绝对地址**
+     * （开发环境是 http://localhost:5409，而页面在 5010），而 fetch 默认是
+     * `same-origin` —— 跨源时**不带 cookie**，于是上传稳定 401，
+     * 界面上表现为新节点显示「当前未登录或登录已失效」。
+     * 影响面：上传参考图、裁剪生成新节点、视频抽帧等**所有走本接口的素材上传**。
+     * 同类接口（points / auth / asset-items …）本来就都带这个字段，这里属于漏写。
+     */
+    credentials: 'include',
     headers: {
       'Content-Type': file.type || 'application/octet-stream',
       'x-upload-filename': encodeURIComponent(file.name || 'file'),

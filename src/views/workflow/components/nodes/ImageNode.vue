@@ -38,6 +38,7 @@ import {
 import { cardSizeStyle, resolveGenerationCardSize } from '../../config/node-size'
 import { useComposerPanel } from '../../composables/useComposerPanel'
 import { useNodeToolbar } from '../../composables/useNodeToolbar'
+import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
 import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -68,6 +69,25 @@ const props = defineProps<{
   selected?: boolean
 }>()
 const isSelected = computed(() => props.selected || props.data?.selected)
+/** 标题行双击改名（composable 见 @/composables/useNodeTitleEdit） */
+const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || '图片')
+/**
+ * 标题行右侧的产出信息（LibTV 是「1456 × 816 · 4张」）。
+ *
+ * 这里只放**拿得到真值**的那部分：数量取自节点 data 的批量生图组 —— 只有组首挂
+ * `batchChildren`，里面的每一项就是本节点实际产出的图（含主图），长度即产出张数。
+ *
+ * 产出图的**真实宽高拿不到**：节点 data 与组件状态里没有任何字段承载产物像素
+ * （`data.size` 是用户选的「计划尺寸」，不是产物尺寸；batchChildren 也只存 {id, url}），
+ * 所以这一段不显示 —— 宁缺毋滥，绝不拿计划尺寸或写死数字冒充。
+ */
+const outputMeta = computed(() => {
+  const children = props.data?.batchChildren
+  if (props.data?.isBatchRoot && Array.isArray(children) && children.length > 1) {
+    return `${children.length}张`
+  }
+  return ''
+})
 
 /**
  * Agent 画布动作高亮（批次 3）：仅 UI 的瞬时描边，**不是节点数据**。
@@ -1227,6 +1247,25 @@ watch(
 
 <template>
   <div class="image-node-wrapper">
+    <!-- 标题行（卡外，位于卡片上方）：双击改名。无折叠按钮 —— 图片节点没有 collapsed 态 -->
+    <div class="image-node-title" :title="titleEdit.editing.value ? '' : '双击编辑名称'" @dblclick.stop="titleEdit.start">
+      <el-icon class="image-node-title-icon"><Picture /></el-icon>
+      <input
+        v-if="titleEdit.editing.value"
+        :ref="titleEdit.setInputRef"
+        v-model="titleEdit.draft.value"
+        class="image-node-title-input nodrag"
+        :maxlength="40"
+        @blur="titleEdit.commit"
+        @keydown.enter.prevent="titleEdit.commit"
+        @keydown.esc.prevent="titleEdit.cancel"
+        @mousedown.stop
+        @click.stop
+      />
+      <span v-else>{{ data?.label || '图片' }}</span>
+      <span v-if="outputMeta" class="image-node-title-meta">{{ outputMeta }}</span>
+    </div>
+
     <div
       class="image-node-card"
       :class="{ 'is-selected': isSelected, 'is-agent-created': agentCreated, 'is-agent-generating': agentGenerating }"
@@ -1335,6 +1374,50 @@ watch(
 
 <style scoped>
 .image-node-wrapper { position: relative; width: 100%; height: 100%; }
+/* 标题行：位于卡片上方（bottom:100% 相对 .image-node-wrapper 定位）。
+   样式与 video/text 节点同构，只少了折叠按钮。色值一律走 token，不写死。 */
+.image-node-title {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: var(--canvas-node-title-gap);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--canvas-node-title-fg);
+  font-size: var(--canvas-node-title-size);
+  font-weight: var(--canvas-node-title-weight);
+  line-height: var(--canvas-node-title-line);
+  cursor: pointer;
+  user-select: none;
+}
+.image-node-title-icon {
+  font-size: var(--canvas-node-title-icon);
+  color: var(--canvas-node-title-fg);
+}
+.image-node-title-input {
+  flex: 1 1 0;
+  min-width: 80px;
+  max-width: 220px;
+  background: transparent;
+  border: 1px solid var(--brand-main-default);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  outline: none;
+  box-sizing: border-box;
+}
+.image-node-title-meta {
+  margin-left: auto;
+  font-size: var(--canvas-node-meta-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--canvas-node-meta-fg);
+  white-space: nowrap;
+}
 /* 尺寸由 config/node-size.ts 算出后内联绑定（跟比例走），这里不再写死 min-width/min-height */
 .image-node-card { position: relative; overflow: hidden; border: 1px solid var(--canvas-node-border); border-radius: 12px; box-sizing: border-box; background: var(--canvas-node-bg); }
 .image-node-card.is-selected { border-color: var(--canvas-node-border-selected); }

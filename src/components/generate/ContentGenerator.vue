@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useLoginModalStore } from '@/stores/login-modal'
 import { useSystemSettingsStore } from '@/stores/system-settings'
-import { getModelByName } from '@/config/models'
+import { useComposerCostEstimate } from '@/composables/useComposerCostEstimate'
 import type { ModelCapabilityFlags } from '@/shared/provider-capability'
 
 // 导入子组件
@@ -1122,37 +1122,39 @@ const promptControlHeight = computed(() => {
   return isCollapsed.value ? '42px' : '96px'
 })
 
-// 判断是否显示价格信息
-const showPrice = computed(() => {
-  return !isCollapsed.value && (currentType.value === 'image' || currentType.value === 'video')
+/**
+ * 页脚「本次预估积分」：**只认服务端估算，不在客户端算钱**。
+ *
+ * 改这里的理由（2026-09-26 对齐 LibTV 时发现的真问题）：
+ * 原来是 `model.defaultParams.billingRule.power` —— 客户端抄的一份单位价，
+ * 图片渲染成 `6 / 张`（单位价，不是这一单要花多少），视频更糟，只渲染一个裸的 `6`，
+ * 连单位都没有，用户根本看不懂。LibTV 在同一位置显示的是**本次提交的预估总额**。
+ *
+ * 视频那一档故意返回空 modelKey（= 这一档不估）：估算接口的入参只有「模型 / 规格 / 数量」，
+ * **不收时长**，而视频定价里确实存在按秒计费的渠道（`perSecond`，见 `model-pricing-rules.ts`）。
+ * 漏掉时长会算出一个偏低的数字 —— 宁可不说，也不说错的。
+ * 要显示视频预估，得先让估算接口收 `seconds`（服务端的事，见 `server/points/estimate-core.ts`）。
+ */
+const composerCost = useComposerCostEstimate({
+  modelKey: () => (currentType.value === 'video'
+    ? ''
+    : String(imageToolbarRef.value?.currentModelVersion || '')),
+  category: () => (currentType.value === 'video' ? 'video' : 'image'),
+  count: () => Number(currentType.value === 'image'
+    ? imageToolbarRef.value?.currentCount
+    : videoToolbarRef.value?.currentCount) || 1,
+  size: () => String(currentType.value === 'image'
+    ? imageToolbarRef.value?.currentSize
+    : videoToolbarRef.value?.currentSize) || '',
 })
 
-// 获取价格文本
-const readCurrentModelPointCost = () => {
-  const currentModelKey = currentType.value === 'image'
-    ? imageToolbarRef.value?.currentModelVersion
-    : currentType.value === 'video'
-      ? videoToolbarRef.value?.currentModelVersion
-      : ''
+// 有数字才显示这一块：拿不到估算就整块不出现（**不显示 0**，0 是「不花钱」的意思，会误导）
+const showPrice = computed(() => !isCollapsed.value && composerCost.displayText.value.length > 0)
 
-  if (!currentModelKey) return 0
+// 文案与配色都由服务端估算 + 余额推导，前端不参与算钱
+const priceText = computed(() => composerCost.displayText.value)
+const priceGapClass = computed(() => `is-gap-${composerCost.gapLevel.value}`)
 
-  const model = getModelByName(currentModelKey) as { defaultParams?: Record<string, any> } | null
-  return Math.max(0, Number(model?.defaultParams?.billingRule?.power || 0))
-}
-
-const priceText = computed(() => {
-  const pointCost = readCurrentModelPointCost()
-
-  switch (currentType.value) {
-    case 'image':
-      return `${pointCost || 0} / 张`
-    case 'video':
-      return String(pointCost || 0)
-    default:
-      return ''
-  }
-})
 
 // 外层容器布局类名
 const layoutClass = computed(() =>
@@ -1866,7 +1868,7 @@ onUnmounted(() => {
           :class="[submitButtonContainerClass, { 'collapsed-WjKggt collapsed-HnZBhi': isCollapsed, [hasReferencesClass]: hasReferences }]"
         >
           <!-- 根据创作类型显示价格信息（仅图片和视频类型显示） -->
-          <div v-if="showPrice" class="commercial-button-content commercial-button-content-jVIddd">
+          <div v-if="showPrice" class="commercial-button-content commercial-button-content-jVIddd" :class="priceGapClass">
             <svg fill="none" height="1em" preserveAspectRatio="xMidYMid meet"
                  role="presentation" viewBox="0 0 25 24"
                  width="1em" xmlns="http://www.w3.org/2000/svg">
@@ -2042,7 +2044,7 @@ onUnmounted(() => {
         <!-- 提交按钮区域 -->
         <div class="toolbar-actions-DsJHmQ toolbar-actions-pDJQS6">
           <!-- 根据创作类型显示价格信息（仅图片和视频类型显示） -->
-          <div v-if="showPrice" class="commercial-button-content commercial-button-content-jVIddd">
+          <div v-if="showPrice" class="commercial-button-content commercial-button-content-jVIddd" :class="priceGapClass">
             <svg fill="none" height="1em" preserveAspectRatio="xMidYMid meet"
                  role="presentation" viewBox="0 0 25 24"
                  width="1em" xmlns="http://www.w3.org/2000/svg">
@@ -2402,6 +2404,29 @@ onUnmounted(() => {
   transition: opacity var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function),
     transform var(--content-generator-collapse-transition-duration) var(--content-generator-collapse-transition-timing-function);
   will-change: opacity, transform;
+}
+
+/*
+ * 「本次预估积分」与余额比较后的配色（2026-09-26）。
+ *
+ * 选择器里把 `.commercial-button-content` 写两遍（权级 0,3,0）是有意的：
+ * `generate.css` 与本文件各有一条 `color` 声明，权级同为 (0,2,0)，
+ * 谁生效取决于两个样式块谁先注入 —— 那不稳定，不能靠顺序。
+ * 多写一遍同名 class 把权级抬到 (0,3,0)，才能稳定压过那两条旧声明。
+ *
+ * `is-gap-unknown`（拿不到余额，见 `shared/composer-cost-display.ts`）**故意没有规则**：
+ * 沿用页面默认的中性文字色 —— 既不说「充足」，也不报警。
+ */
+.commercial-button-content.commercial-button-content.is-gap-ok {
+  color: var(--credit-gap-none);
+}
+
+.commercial-button-content.commercial-button-content.is-gap-medium {
+  color: var(--credit-gap-medium);
+}
+
+.commercial-button-content.commercial-button-content.is-gap-strong {
+  color: var(--credit-gap-strong);
 }
 
 .dimension-layout-FUl4Nj .generator-reference-preview-image {

@@ -607,6 +607,13 @@ body [data-lv-theme-force=dark],body [lv-theme=dark],body body[lv-theme-version=
     --brand-main-default: #00cae0;
     --brand-main-hover: #0ad4ea;
     --brand-main-pressed: #00cae0;
+    /* 积分缺口三级色（对齐 LibTV 线上实测的 --credit-gap-none / -medium / -strong）。
+       用途：本次预估积分与实际余额的比较结果显示 —— 充足 / 快不够 / 已不够。
+       放在全局而不是画布作用域：显示积分的地方既有画布节点面板，也有 /generate 等页面。 */
+    --credit-gap-none: #5ddcff;
+    --credit-gap-medium: #ff7d00;
+    --credit-gap-strong: #f53f3f;
+    --credit-gap-track: #525252;
     --brand-bright-default: #00cae0;
     --brand-bright-hover: #0ad4ea;
     --brand-bright-pressed: #00cae0;
@@ -779,6 +786,11 @@ body body[lv-theme-version="2.0"][lv-theme=light],html body[lv-theme-version="2.
     --brand-main-default: #00a1c2;
     --brand-main-hover: #0996b2;
     --brand-main-pressed: #00a1c2;
+    /* 积分缺口三级色（浅色对位：同样保证在浅底上可达对比度） */
+    --credit-gap-none: #05a3c5;
+    --credit-gap-medium: #e06c00;
+    --credit-gap-strong: #d92d2d;
+    --credit-gap-track: #d4d4d4;
     --brand-bright-default: #00b8cc;
     --brand-bright-hover: #00afc2;
     --brand-bright-pressed: #00b8cc;
