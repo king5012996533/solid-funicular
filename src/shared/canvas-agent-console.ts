@@ -77,6 +77,49 @@ export interface CanvasAgentConsoleCanvasActions {
   unit: string
 }
 
+/** 工作流卡片的输入项键：只列本回合**真实发生过**的那几类输入（模型 / 读画布 / 挂参考图 / 取手册） */
+export type CanvasAgentConsoleWorkflowInputKey =
+  | 'model'
+  | 'canvas_nodes'
+  | 'reference_images'
+  | 'playbook'
+
+/**
+ * 工作流卡片的一条输入。
+ *
+ * `value` **只来自本回合的真实事件与工具回执**（模型键来自运行时、节点数/参考图数来自工具回执、
+ * 手册名来自 load_playbook 的入参）；拿不到就不构造这一项，界面显示「—」。绝不写死示例值。
+ */
+export interface CanvasAgentConsoleWorkflowInput {
+  key: CanvasAgentConsoleWorkflowInputKey
+  label: string
+  value: string
+}
+
+/**
+ * 工作流卡片的产出（批次 4）。
+ *
+ * `done` 是本回合**真实产出**的数量（工具回执累计：已创建节点数，或已提交生成数）；
+ * `target` **只有 Agent 明确声明过目标总数时才出现**（沿用 parseDeclaredCanvasTarget），
+ * 没声明就只显示已产出数 —— 绝不编分母（本项目在「没分母却给百分比」上踩过两次）。
+ */
+export interface CanvasAgentConsoleWorkflowOutput {
+  done: number
+  target?: number
+  unit: string
+}
+
+/**
+ * 工作流卡片（批次 4）：「当前在跑的那件事」。
+ *
+ * 标题与状态由 `stage` / `lifecycle` 推导（前端渲染时加 🎬）；这里只给**输入与产出**的数据，
+ * 全部来自真实事件，缺就整项缺席（界面显示「—」）。
+ */
+export interface CanvasAgentConsoleWorkflow {
+  inputs: CanvasAgentConsoleWorkflowInput[]
+  output?: CanvasAgentConsoleWorkflowOutput
+}
+
 export interface CanvasAgentConsoleState {
   agent: 'director'
   /** 项目名（画布名）；服务端取 requestBody.canvasName，前端拿不到时回落到面板标题 */
@@ -87,6 +130,8 @@ export interface CanvasAgentConsoleState {
   current?: CanvasAgentConsoleCurrent
   /** 本回合的画布动作累计（创建了多少、目标多少）——只在真的动过画布时出现 */
   canvasActions?: CanvasAgentConsoleCanvasActions
+  /** 工作流卡片的输入与产出（批次 4）——只在真有真实输入/产出时出现 */
+  workflow?: CanvasAgentConsoleWorkflow
   log: CanvasAgentConsoleLogEntry[]
 }
 

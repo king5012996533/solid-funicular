@@ -21,6 +21,9 @@ import {
   type CanvasAgentConsoleProgress,
   type CanvasAgentConsoleSessionMemory,
   type CanvasAgentConsoleState,
+  type CanvasAgentConsoleWorkflow,
+  type CanvasAgentConsoleWorkflowInput,
+  type CanvasAgentConsoleWorkflowOutput,
 } from '../../src/shared/canvas-agent-console'
 import type { GenerationTaskStreamEvent } from './shared'
 
@@ -55,6 +58,11 @@ export interface CanvasAgentConsoleEvent {
   declaredTarget?: { total: number; unit: string }
   /** 工具调用 id：让同一调用的 start/end 精确配对（并发调用也不会串） */
   callId?: string
+  /**
+   * tool_start：这次 load_playbook 取的**哪本手册**（值来自工具入参、默认 storyboard-production）。
+   * 只给工作流卡片的「输入」用 —— 与其它控制台字段一样，只走 SSE、不进模型上下文。
+   */
+  playbookName?: string
 }
 
 /**
@@ -214,6 +222,78 @@ const resolveCreatedNodeCount = (
   return nodes.filter((node) => Boolean((node as { id?: unknown } | null)?.id)).length
 }
 
+/**
+ * 从「读画布」回执里取**真实读到的节点数**（工作流卡片的输入事实）。
+ *
+ * get_canvas_state 回执 `{ nodes: [...] }` 数数组长度；get_canvas_overview 回执 `{ nodeCount }`。
+ * 其它工具 / 解析不出来 → undefined（这一项输入就不出现，界面显示「—」，绝不猜）。
+ */
+const resolveReadNodeCount = (
+  toolName: string | undefined,
+  resultText: string | undefined,
+): number | undefined => {
+  const tool = String(toolName || '')
+  if (tool !== 'get_canvas_state' && tool !== 'get_canvas_overview') return undefined
+  let payload: Record<string, unknown>
+  try {
+    payload = JSON.parse(String(resultText || '')) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  if (!payload || typeof payload !== 'object') return undefined
+  if (tool === 'get_canvas_overview') {
+    const count = Number(payload.nodeCount)
+    return Number.isFinite(count) && count >= 0 ? count : undefined
+  }
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : null
+  return nodes ? nodes.length : undefined
+}
+
+/** 从 attach_reference_images 回执取**真实挂上的参考图张数**（`{ referenceImageCount }`） */
+const resolveAttachedReferenceCount = (
+  toolName: string | undefined,
+  resultText: string | undefined,
+): number | undefined => {
+  if (String(toolName || '') !== 'attach_reference_images') return undefined
+  let payload: Record<string, unknown>
+  try {
+    payload = JSON.parse(String(resultText || '')) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  const count = Number(payload?.referenceImageCount)
+  return Number.isFinite(count) && count > 0 ? count : undefined
+}
+
+/** 本回合可观察到的「真实输入事实」——缺的项保持 undefined，界面显示「—」 */
+interface ConsoleInputFacts {
+  model?: string
+  canvasNodes?: number
+  referenceImages?: number
+  playbook?: string
+}
+
+/**
+ * 输入事实 → 工作流卡片的输入列表。
+ *
+ * 顺序固定（模型 → 画布 → 参考图 → 手册），但**只列真实存在的那几项**：没读到画布就没有
+ * 「画布」这一项，界面显示「—」。值一律照实（模型键、N 个节点、N 张、手册名），不美化、不编。
+ */
+const buildWorkflowInputs = (facts: ConsoleInputFacts): CanvasAgentConsoleWorkflowInput[] => {
+  const inputs: CanvasAgentConsoleWorkflowInput[] = []
+  const model = String(facts.model || '').trim()
+  if (model) inputs.push({ key: 'model', label: '模型', value: model })
+  if (typeof facts.canvasNodes === 'number') {
+    inputs.push({ key: 'canvas_nodes', label: '画布', value: `${facts.canvasNodes} 个节点` })
+  }
+  if (typeof facts.referenceImages === 'number') {
+    inputs.push({ key: 'reference_images', label: '参考图', value: `${facts.referenceImages} 张` })
+  }
+  const playbook = String(facts.playbook || '').trim()
+  if (playbook) inputs.push({ key: 'playbook', label: '手册', value: playbook })
+  return inputs
+}
+
 /** 日志最多保留的条数：控制台是「最近发生了什么」，不是全量审计（全量在服务端日志里） */
 const CONSOLE_LOG_CAP = 20
 
@@ -240,6 +320,8 @@ interface FoldedConsole {
   canvasCreated: number
   /** Agent 声明过的目标总数（取最大）——没有声明就没有它，界面不给分母 */
   canvasTarget?: { total: number; unit: string }
+  /** 本回合真实发生过的输入事实（工作流卡片用）——缺的项保持 undefined */
+  inputs: ConsoleInputFacts
 }
 
 /** 目标总数只增不减：同一回合里声明多次取最大（越说越大才是目标） */
@@ -308,6 +390,7 @@ const resolveBatchProgress = (
 const foldConsoleEvents = (
   events: ReadonlyArray<CanvasAgentConsoleEvent>,
   seed?: CanvasAgentConsoleSessionMemory,
+  model?: string,
 ): FoldedConsole => {
   const seedIndex = seed ? clampPhaseIndex(phaseIndexOf(seed.phase)) : 0
   const folded: FoldedConsole = {
@@ -316,6 +399,8 @@ const foldConsoleEvents = (
     generationSubmitted: seedIndex >= PRODUCTION_INDEX,
     log: [],
     canvasCreated: 0,
+    // 模型是本轮的运行时事实（不是模型自报）：启动时就已知，作为「输入」的一项
+    inputs: model ? { model } : {},
   }
 
   const advanceTo = (key?: CanvasAgentConsolePhaseKey) => {
@@ -360,6 +445,11 @@ const foldConsoleEvents = (
         if (READ_TOOLS.has(tool) && folded.generationSubmitted) advanceTo('qa')
         // 声明可能在卡片弹出的那一刻（tool_start）就到；end 也会带一次，两处都并一次，取最大
         folded.canvasTarget = mergeDeclaredTarget(folded.canvasTarget, event.declaredTarget)
+        // 手册名来自 load_playbook 的入参（tool_start 时就已知）：作为「输入」的一项
+        if (tool === 'load_playbook') {
+          const name = String(event.playbookName || '').trim()
+          if (name) folded.inputs = { ...folded.inputs, playbook: name }
+        }
         advanceTo(PHASE_BY_TOOL[tool])
         break
       }
@@ -377,6 +467,15 @@ const foldConsoleEvents = (
           if (batchProgress) folded.progress = batchProgress
           // 画布动作：只累计成功创建出来的节点数（失败项回执里没有 id，自然不算）
           folded.canvasCreated += resolveCreatedNodeCount(tool, event.resultText)
+          // 输入事实：读到的节点数 / 挂上的参考图张数（都取自真实回执；解析不出就不给这一项）
+          const readNodeCount = resolveReadNodeCount(tool, event.resultText)
+          if (typeof readNodeCount === 'number') {
+            folded.inputs = { ...folded.inputs, canvasNodes: readNodeCount }
+          }
+          const attachedRefs = resolveAttachedReferenceCount(tool, event.resultText)
+          if (typeof attachedRefs === 'number') {
+            folded.inputs = { ...folded.inputs, referenceImages: attachedRefs }
+          }
         }
         folded.canvasTarget = mergeDeclaredTarget(folded.canvasTarget, event.declaredTarget)
         if (READ_TOOLS.has(tool) && folded.generationSubmitted) advanceTo('qa')
@@ -405,9 +504,9 @@ export interface CanvasAgentConsoleDerivation {
  */
 export const deriveCanvasAgentConsole = (
   events: ReadonlyArray<CanvasAgentConsoleEvent>,
-  input?: { project?: string; seed?: CanvasAgentConsoleSessionMemory },
+  input?: { project?: string; model?: string; seed?: CanvasAgentConsoleSessionMemory },
 ): CanvasAgentConsoleDerivation => {
-  const folded = foldConsoleEvents(events, input?.seed)
+  const folded = foldConsoleEvents(events, input?.seed, input?.model)
   const phaseIndex = clampPhaseIndex(folded.phaseIndex)
   const phase = CANVAS_AGENT_CONSOLE_PHASES[phaseIndex]
   /**
@@ -419,6 +518,26 @@ export const deriveCanvasAgentConsole = (
         created: folded.canvasCreated,
         ...(folded.canvasTarget ? { target: folded.canvasTarget.total } : {}),
         unit: folded.canvasTarget?.unit || '个节点',
+      }
+    : undefined
+  /**
+   * 工作流卡片的产出：已产出数量只认工具回执累计 —— 优先「已创建节点数」（声明式创建），
+   * 没有创建节点但提交过生成时退到「已提交数」。`target` 只在 Agent 声明过目标总数时才带。
+   */
+  const workflowOutput: CanvasAgentConsoleWorkflowOutput | undefined = folded.canvasCreated > 0
+    ? {
+        done: folded.canvasCreated,
+        ...(folded.canvasTarget ? { target: folded.canvasTarget.total } : {}),
+        unit: folded.canvasTarget?.unit || '个节点',
+      }
+    : (folded.progress
+        ? { done: folded.progress.done, unit: folded.progress.unit }
+        : undefined)
+  const workflowInputs = buildWorkflowInputs(folded.inputs)
+  const workflow: CanvasAgentConsoleWorkflow | undefined = workflowInputs.length || workflowOutput
+    ? {
+        inputs: workflowInputs,
+        ...(workflowOutput ? { output: workflowOutput } : {}),
       }
     : undefined
   const state: CanvasAgentConsoleState = {
@@ -434,6 +553,7 @@ export const deriveCanvasAgentConsole = (
     ...(folded.progress ? { progress: folded.progress } : {}),
     ...(folded.current ? { current: folded.current } : {}),
     ...(canvasActions ? { canvasActions } : {}),
+    ...(workflow ? { workflow } : {}),
     log: folded.log.map((item) => ({ mark: item.mark, text: item.text })),
   }
   return { state, memory: { phase: phase.key } }
@@ -442,7 +562,7 @@ export const deriveCanvasAgentConsole = (
 /** 只要快照（单测/前端契约用它；需要写回记忆用 deriveCanvasAgentConsole） */
 export const deriveCanvasAgentConsoleState = (
   events: ReadonlyArray<CanvasAgentConsoleEvent>,
-  input?: { project?: string; seed?: CanvasAgentConsoleSessionMemory },
+  input?: { project?: string; model?: string; seed?: CanvasAgentConsoleSessionMemory },
 ): CanvasAgentConsoleState => deriveCanvasAgentConsole(events, input).state
 
 /**

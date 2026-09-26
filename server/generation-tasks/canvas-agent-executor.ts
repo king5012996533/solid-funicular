@@ -522,6 +522,8 @@ export const executeCanvasAgentTaskFlow = async (
   const emitConsoleState = () => {
     const { state, memory } = deriveCanvasAgentConsole(consoleEvents, {
       project: consoleProjectName,
+      // 本轮实际使用的模型：工作流卡片「输入」的一项（运行时事实，不由模型自报）
+      model: modelKey,
       seed: consoleSeed,
     });
     consoleMemory = memory;
@@ -639,12 +641,21 @@ export const executeCanvasAgentTaskFlow = async (
                 Array.isArray(args.items) ? args.items.map((item) => String(item || "")) : [],
               )
             : undefined;
+          /**
+           * 工作流卡片的「输入」事实：load_playbook 取的是哪本手册。
+           * 名称取自工具入参（空则用默认 storyboard-production，与 resolveCanvasAgentPlaybook 一致）——
+           * 只给界面看，不进模型上下文。
+           */
+          const playbookName = definition.name === "load_playbook"
+            ? String(args.name || "storyboard-production").trim()
+            : "";
           pushConsoleEvent({
             type: "tool_start",
             toolName: definition.name,
             callId: toolCallId,
             ...(consoleTarget ? { target: consoleTarget } : {}),
             ...(declaredTarget ? { declaredTarget } : {}),
+            ...(playbookName ? { playbookName } : {}),
           });
 
           if (!definition.requiresClient) {

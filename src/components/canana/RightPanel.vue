@@ -45,6 +45,8 @@ import {
   collectConfirmationNodeIds,
   resolveAgentConfirmCostDisplay,
 } from '@/components/canana/agent-confirm-cost'
+import { buildAgentWorkflowCard } from '@/components/canana/agent-workflow-card'
+import { buildCanvasAgentCrew } from '@/components/canana/agent-crew'
 import {
   consumeHomeCanvasAgentPending,
   readHomeCanvasAgentPending,
@@ -177,27 +179,14 @@ const messages = ref([])
  */
 const consoleState = ref(null)
 
-/** 生命周期中文词（服务端给英文枚举，这里只做展示翻译） */
-const CONSOLE_LIFECYCLE_LABELS = {
-  thinking: '思考中',
-  analyzing: '分析中',
-  planning: '规划中',
-  generating: '执行中',
-  verifying: '校验中',
-  delivering: '交付中',
-}
-const consoleLifecycleLabel = computed(
-  () => CONSOLE_LIFECYCLE_LABELS[consoleState.value?.lifecycle] || '',
-)
-const consolePhaseLabel = computed(() => {
-  const stage = consoleState.value?.stage
-  if (!stage) return ''
-  return `阶段 ${stage.index}/${stage.total} · ${stage.label}`
-})
-/** 项目名优先用服务端给的画布名，拿不到就回落到面板标题（不显示空占位） */
-const consoleProjectLabel = computed(
-  () => String(consoleState.value?.project || props.title || '').trim(),
-)
+/**
+ * 工作流卡片（批次 4）：由控制台状态纯逻辑组装标题 / 输入 / 输出 / 状态。
+ *
+ * 组装里不含任何推算 —— 输入与产出都来自服务端从真实事件推导的 `workflow` 字段，
+ * 缺项显示「—」；空态（无 consoleState）返回 null，整块不渲染。
+ */
+const workflowCard = computed(() => buildAgentWorkflowCard(consoleState.value))
+
 /** 执行日志的标记符号（与产品约定的 ✓ ▶ ○ ! 一致） */
 const CONSOLE_MARK_SYMBOLS = { done: '✓', running: '▶', pending: '○', failed: '!' }
 const consoleMarkSymbol = (mark) => CONSOLE_MARK_SYMBOLS[mark] || '·'
@@ -990,6 +979,12 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
 const runningAgent = computed(() => messages.value.some((msg) => msg.type === 'ai-text' && msg.loading))
 
 /**
+ * AI CREW（批次 4，预览）：只有 Director 是真的在干活（就是本画布 Agent），其余是占位。
+ * 状态词随本轮是否真的在跑切换，不给未接入角色编任何状态。
+ */
+const crewMembers = computed(() => buildCanvasAgentCrew(runningAgent.value))
+
+/**
  * 强制释放画布锁，然后重试这一轮。
  *
  * 用在 beginPipelineRun 返回 locked 时：用户看到可操作的按钮，而不是干等 TTL。
@@ -1260,33 +1255,65 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       <input type="file" multiple accept="image/*" class="hidden-file-input" ref="fileInputRef" @change="handleFileChange">
 
       <!--
-        导演控制台（AI Director Console · 批次 1）。
+        导演控制台（AI Director Console）。
         内容全部来自服务端的 console_state 事件（由真实事件推导）；有会话/有任务且收到过状态才出现，
         空态保持下面的引导 + 示例 chip 不变。它只读，不参与消息流与 Markdown 渲染。
       -->
       <div v-if="hasMessages && consoleState" class="agent-console">
-        <div class="agent-console__head">
-          <span class="agent-console__title">🎬 Director Agent</span>
-          <span v-if="consoleProjectLabel" class="agent-console__project">{{ consoleProjectLabel }}</span>
-        </div>
-        <div class="agent-console__status">
-          <span class="agent-console__phase">{{ consolePhaseLabel }}</span>
-          <span v-if="consoleLifecycleLabel" class="agent-console__life">
-            {{ consoleLifecycleLabel }}<template v-if="consoleState.current?.title"> · {{ consoleState.current.title }}</template>
-          </span>
-        </div>
-        <!-- 进度只在真有分母时出现（服务端保证：没有分母就不带 progress 字段） -->
-        <div v-if="consoleState.progress" class="agent-console__progress">
-          {{ consoleState.progress.done }}/{{ consoleState.progress.total }} {{ consoleState.progress.unit }}
-        </div>
         <!--
-          画布动作（批次 3）：本回合创建了多少节点。
-          有「/目标」时才是 Agent 声明过的总数（服务端只从 request_confirmation 的逐条事项里解析）；
-          没有声明就只显示「已创建 N 个」——不编分母。
+          工作流卡片（批次 4）：当前在跑的那件事。
+          标题 = 🎬 + 当前阶段名；输入/输出/状态全部来自服务端真实事件推导的 workflow 字段，
+          缺项显示「—」——不写死示例、不编分母（分母只有 Agent 明确声明过才会带上）。
         -->
-        <div v-if="consoleState.canvasActions" class="agent-console__canvas-actions">
-          🖼 已创建 {{ consoleState.canvasActions.created }}<template v-if="consoleState.canvasActions.target">/{{ consoleState.canvasActions.target }}</template> {{ consoleState.canvasActions.unit }}
+        <div v-if="workflowCard" class="agent-workflow-card">
+          <div class="agent-workflow-card__head">
+            <span class="agent-workflow-card__title">{{ workflowCard.title }}</span>
+            <span v-if="workflowCard.project" class="agent-workflow-card__project">{{ workflowCard.project }}</span>
+          </div>
+          <div class="agent-workflow-card__row">
+            <span class="agent-workflow-card__key">输入</span>
+            <span class="agent-workflow-card__val">{{ workflowCard.inputText }}</span>
+          </div>
+          <div class="agent-workflow-card__row">
+            <span class="agent-workflow-card__key">输出</span>
+            <span class="agent-workflow-card__val">{{ workflowCard.outputText }}</span>
+          </div>
+          <!-- 批量提交的真实分母（批次 1 的 progress）：只在真有分母时出现 -->
+          <div v-if="consoleState.progress" class="agent-workflow-card__row">
+            <span class="agent-workflow-card__key">提交</span>
+            <span class="agent-workflow-card__val">
+              {{ consoleState.progress.done }}/{{ consoleState.progress.total }} {{ consoleState.progress.unit }}
+            </span>
+          </div>
+          <div class="agent-workflow-card__row">
+            <span class="agent-workflow-card__key">状态</span>
+            <span class="agent-workflow-card__val">{{ workflowCard.statusText }}</span>
+          </div>
         </div>
+
+        <!--
+          AI CREW（预览）：将来会有编剧/导演/摄影/美术/剪辑几路 Agent。
+          当前只有 Director 是活的（就是本画布 Agent），其余一律「待接入」——不假装它们在干活，
+          整块标注「预览」。角色与状态是数据驱动的列表，接入新角色只改 agent-crew.ts 一处。
+        -->
+        <div class="agent-crew" role="group" aria-label="AI CREW · 预览">
+          <div class="agent-crew__head">
+            <span class="agent-crew__title">AI CREW</span>
+            <span class="agent-crew__tag">预览</span>
+          </div>
+          <ul class="agent-crew__list">
+            <li
+              v-for="member in crewMembers"
+              :key="member.key"
+              :class="['agent-crew__item', `is-${member.status}`]"
+            >
+              <span class="agent-crew__icon" aria-hidden="true">{{ member.icon }}</span>
+              <span class="agent-crew__name">{{ member.name }}</span>
+              <span class="agent-crew__state">{{ member.label }}</span>
+            </li>
+          </ul>
+        </div>
+
         <ul v-if="consoleState.log?.length" class="agent-console__log">
           <li
             v-for="(item, index) in consoleState.log"
@@ -1297,7 +1324,6 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             <span class="agent-console__log-text">{{ item.text }}</span>
           </li>
         </ul>
-        <!-- 决策卡（导演决策）预留位：下一批在这里挂决策卡，本批不实现 -->
       </div>
 
       <!-- 空状态：一句引导 + 示例 chip（点一下只填进输入框，不自动发送） -->
@@ -1927,47 +1953,106 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   font-size: 11.5px;
   line-height: 1.5;
 }
-.agent-console__head {
+/*
+ * 工作流卡片（批次 4）：当前在跑的那件事。
+ * 刻意比决策卡轻 —— 细边框、紧凑、信息密度高，不放大卡片、不抢视觉。
+ */
+.agent-workflow-card {
+  padding: 6px 8px 7px;
+  border: 1px solid var(--agent-line-soft, #1e2027);
+  border-radius: 6px;
+  background: var(--agent-surface, #101216);
+}
+.agent-workflow-card__head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
 }
-.agent-console__title {
+.agent-workflow-card__title {
   flex: 0 0 auto;
   color: var(--agent-text, #e8eaed);
   font-size: 12px;
   font-weight: 600;
 }
-.agent-console__project {
+.agent-workflow-card__project {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--agent-text-3, #6b7280);
 }
-.agent-console__status {
+.agent-workflow-card__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  min-width: 0;
+}
+.agent-workflow-card__key {
+  flex: 0 0 auto;
+  width: 26px;
+  color: var(--agent-text-3, #6b7280);
+}
+.agent-workflow-card__val {
+  min-width: 0;
+  color: var(--agent-text-2, #9aa0a8);
+  word-break: break-word;
+}
+/*
+ * AI CREW（批次 4 · 预览）：一行角色占位。当前只有 Director 是活的，其余「待接入」。
+ * 整块标注「预览」，视觉上比工作流卡片更轻（虚线分隔 + 更小的字）。
+ */
+.agent-crew {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--agent-line-soft, #1e2027);
+}
+.agent-crew__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.agent-crew__title {
+  color: var(--agent-text, #e8eaed);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.agent-crew__tag {
+  padding: 0 4px;
+  border: 1px solid var(--agent-line-soft, #1e2027);
+  border-radius: 3px;
+  color: var(--agent-text-3, #6b7280);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.agent-crew__list {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
-  margin-top: 2px;
+  gap: 3px 10px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
 }
-.agent-console__phase {
-  color: var(--agent-accent-soft, #b9a6ff);
-  font-weight: 600;
+.agent-crew__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--agent-text-3, #6b7280);
 }
-.agent-console__life {
-  color: var(--agent-text-2, #9aa0a8);
+.agent-crew__icon {
+  font-size: 11px;
 }
-.agent-console__progress {
-  margin-top: 2px;
-  color: var(--agent-text-2, #9aa0a8);
+.agent-crew__state {
+  color: var(--agent-text-3, #6b7280);
 }
-/* 画布动作：与进度同层，单独一行（🖼 已创建 8/24 个镜头） */
-.agent-console__canvas-actions {
-  margin-top: 2px;
+/* 只有已接入（active）的角色提亮，并在跑任务时用强调色；未接入一律灰着 */
+.agent-crew__item.is-active {
   color: var(--agent-text, #e8eaed);
+}
+.agent-crew__item.is-active .agent-crew__state {
+  color: var(--agent-accent-soft, #b9a6ff);
 }
 .agent-console__log {
   margin: 5px 0 0;
