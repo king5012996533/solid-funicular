@@ -188,6 +188,44 @@ export const postGenerationTaskToolResult = async (
   return readApiData<{ accepted: boolean }>(response);
 };
 
+/** 插话方式：`steer` = 插入当前轮；`follow-up` = 排到这一轮之后 */
+export type GenerationTaskInterjectionMode = "steer" | "follow-up";
+
+export interface SteerGenerationTaskResult {
+  accepted: boolean;
+  mode: GenerationTaskInterjectionMode;
+  /** accepted=false 时的可读原因（这一轮已结束、内容为空等） */
+  reason?: string;
+}
+
+/**
+ * 一轮内插话：把用户新输入投递给**正在跑的那个 Agent 的队列**。
+ *
+ * 关键与工具回执一致：这是**同一个任务内的输入**，不是新任务 —— 用独立端点（`/steer`）而不是
+ * `createGenerationTask`，避免用户插一句话就并发起第二个任务去抢同一把画布锁。
+ * `accepted:false` 表示投递没成功（多半这一轮刚结束），调用方要如实提示，不能假装已送达。
+ */
+export const steerGenerationTask = async (
+  taskId: string,
+  payload: { content: string; mode?: GenerationTaskInterjectionMode },
+  options: RequestOptions = {},
+): Promise<SteerGenerationTaskResult> => {
+  const response = await fetch(
+    buildApiUrl(
+      `${GENERATION_TASKS_API_PATH}/${encodeURIComponent(taskId)}/steer`,
+    ),
+    {
+      method: "POST",
+      credentials: "include",
+      signal: options.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return readApiData<SteerGenerationTaskResult>(response);
+};
+
 // 订阅任务的实时状态事件流，页面切换回来后可直接重连。// 已内置自动重连（指数退避）+ watchdog（30s 无消息视为断流）。
 const ALLOWED_STREAM_EVENT_TYPES = new Set([
   "message",

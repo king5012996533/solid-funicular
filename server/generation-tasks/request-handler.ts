@@ -11,6 +11,7 @@ import {
   subscribeGenerationTaskStream,
 } from './service'
 import { resolveClientToolResult } from './canvas-agent-bridge'
+import { steerCanvasAgent } from './canvas-agent-steering'
 import type { AgentToolResultPayload } from '../../src/shared/generation-task-stream'
 import {
   GenerationTaskRequestError,
@@ -38,7 +39,9 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
       ? taskPath.slice(0, -'/events'.length)
       : taskPath.endsWith('/tool-result')
         ? taskPath.slice(0, -'/tool-result'.length)
-        : taskPath
+        : taskPath.endsWith('/steer')
+          ? taskPath.slice(0, -'/steer'.length)
+          : taskPath
 
   let currentUser: { id?: string | null } | null = null
   let payloadSummary: Record<string, unknown> | null = null
@@ -133,6 +136,30 @@ export const handleGenerationTasksRequest = async (req: any, res: any) => {
 
     if (req.method === 'POST' && requestUrl === `${GENERATION_TASKS_BASE_PATH}/${encodeURIComponent(taskId)}/stop`) {
       const data = await stopGenerationTask(taskId, currentUser.id)
+      sendJson(res, 200, { data })
+      return
+    }
+
+    /**
+     * 画布 Agent 的「一轮内插话」入口（steer / follow-up）。
+     *
+     * 用户在一轮进行中补一句话，走这里投递给正在跑的 Pi Agent 队列（`agent.steer` /
+     * `agent.followUp`）—— **不创建新任务**，所以不会出现两个任务抢同一把画布锁。
+     * 归属校验与工具回执同一条：`getGenerationTaskRecord` 查不到就 404，别人的任务插不进去。
+     *
+     * `accepted:false` 不是错误：多半是这一轮刚结束（插话窗口已关），如实回给前端由它提示用户。
+     */
+    if (
+      req.method === 'POST' &&
+      requestUrl === `${GENERATION_TASKS_BASE_PATH}/${encodeURIComponent(taskId)}/steer`
+    ) {
+      await getGenerationTaskRecord(taskId, currentUser.id)
+      const body = (await readGenerationTaskBody(req)) as unknown as { content?: string; mode?: string }
+      const content = String(body?.content || '').trim()
+      if (!content) {
+        throw new GenerationTaskRequestError(400, '缺少插话内容')
+      }
+      const data = steerCanvasAgent(taskId, { content, mode: body?.mode })
       sendJson(res, 200, { data })
       return
     }

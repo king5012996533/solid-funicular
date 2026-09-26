@@ -50,6 +50,15 @@ import {
   parseDeclaredCanvasTarget,
   type CanvasAgentConsoleEvent,
 } from "./canvas-agent-console-state";
+import {
+  registerCanvasAgentSteering,
+  unregisterCanvasAgentSteering,
+} from "./canvas-agent-steering";
+import {
+  CANVAS_AGENT_MAX_SELF_CHECKS,
+  decideCanvasAgentSelfCheck,
+  summarizeCanvasAgentDelivery,
+} from "./canvas-agent-turn-review";
 import type { CanvasAgentConsoleSessionMemory } from "../../src/shared/canvas-agent-console";
 
 /**
@@ -552,6 +561,14 @@ export const executeCanvasAgentTaskFlow = async (
     emitConsoleState();
   };
 
+  /**
+   * 交付前自检的续跑计数（本轮任务内，跨 turn）。
+   *
+   * 每自检续跑一次 +1，到 `CANVAS_AGENT_MAX_SELF_CHECKS` 就收口 —— `finishTurn` 无条件返回
+   * `continue` 会成为无限循环（Pi README 154 行原文警告），必须有个刹车。
+   */
+  let selfCheckCount = 0;
+
   const appendText = (chunk: string) => {
     if (!chunk) return;
     fullText += chunk;
@@ -962,6 +979,75 @@ export const executeCanvasAgentTaskFlow = async (
       }
       return undefined;
     },
+    /**
+     * 交付前自检（Pi 原生 `finishTurn` 挂点，README 144-154 行）。
+     *
+     * 时机：assistant 与全部工具结果定稿之后、`turn_end` 之前。只在**收尾回合**（纯文本、
+     * 无工具调用、无工具结果）判定「这一轮声称的交付是否成立」；还在调工具的回合不干预。
+     * 不成立就 `{ action: 'continue' }`，并把自检指令 `followUp` 进队列 —— 它作为一条用户消息
+     * 注入下一轮（也就进了转录与压缩），模型据此补齐或如实说明。
+     *
+     * 判定与指令文本都是纯函数（canvas-agent-turn-review），这里只做「投递 + 留痕」。
+     */
+    finishTurn: async (turn) => {
+      const parts = Array.isArray(turn?.message?.content) ? turn.message.content : [];
+      const hasToolCalls = parts.some((part) => (part as { type?: string })?.type === "toolCall");
+      const hasReportText = parts.some(
+        (part) =>
+          (part as { type?: string })?.type === "text"
+          && String((part as { text?: string })?.text || "").trim().length > 0,
+      );
+
+      const decision = decideCanvasAgentSelfCheck({
+        stopReason: String(turn?.message?.stopReason || ""),
+        hasToolCalls,
+        toolResultCount: Array.isArray(turn?.toolResults) ? turn.toolResults.length : 0,
+        hasReportText,
+        // 交付事实取自本轮的**真实事件序列**（与控制台同一份推导，不采信模型自报）
+        facts: summarizeCanvasAgentDelivery(consoleEvents),
+        selfCheckCount,
+        maxSelfChecks: CANVAS_AGENT_MAX_SELF_CHECKS,
+      });
+
+      if (decision.action !== "continue") {
+        if (decision.capped) {
+          // 到上限仍不成立：缺口照实记账（不粉饰），然后让这一轮收口，不再烧钱
+          context.logGenerationTask("canvas_agent:self_check_capped", {
+            recordId: task.recordId,
+            userId: task.userId,
+            selfCheckCount,
+            gap: JSON.stringify(decision.gap || null),
+          });
+        } else if (decision.reason === "fulfilled") {
+          context.logGenerationTask("canvas_agent:self_check_passed", {
+            recordId: task.recordId,
+            userId: task.userId,
+          });
+        }
+        return undefined;
+      }
+
+      selfCheckCount += 1;
+      context.logGenerationTask("canvas_agent:self_check_requested", {
+        recordId: task.recordId,
+        userId: task.userId,
+        round: selfCheckCount,
+        gap: JSON.stringify(decision.gap || null),
+      });
+      // 指令以「后续」排队：这一轮该干的都干完了，Pi 会把它注入下一轮请求
+      agent.followUp({
+        role: "user",
+        content: String(decision.instruction || ""),
+        timestamp: Date.now(),
+      });
+      return { action: "continue" };
+    },
+  });
+
+  // 一轮内插话的投递窗口：只在这一轮 Agent 存活期间打开（HTTP /steer 路由据此投递）
+  registerCanvasAgentSteering(task.recordId, {
+    steer: (message) => agent.steer(message),
+    followUp: (message) => agent.followUp(message),
   });
 
   /**
@@ -1097,6 +1183,8 @@ export const executeCanvasAgentTaskFlow = async (
     await agent.prompt(promptText);
     await agent.waitForIdle?.();
   } finally {
+    // 插话窗口随这一轮一起关闭：任务到终态后再插话必须明确失败，不能静默丢弃
+    unregisterCanvasAgentSteering(task.recordId);
     clearTimeout(wallClockTimer);
     // 任务结束（正常/异常/停止）都要把还在等的客户端调用清掉，否则 Promise 会一直挂着
     cancelPendingClientToolCalls(

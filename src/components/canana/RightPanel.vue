@@ -7,6 +7,7 @@ import AgentToolTrace from '@/components/canana/AgentToolTrace.vue'
 import AssistantSessionList from '@/components/canvas/AssistantSessionList.vue'
 import {
   createGenerationTask,
+  steerGenerationTask,
   subscribeGenerationTaskEvents,
   resolveGenerationTaskModel,
 } from '@/api/generation-tasks'
@@ -46,6 +47,11 @@ import {
 } from '@/components/canana/agent-confirm-cost'
 import { buildAgentWorkflowCard } from '@/components/canana/agent-workflow-card'
 import { buildCanvasAgentCrew } from '@/components/canana/agent-crew'
+import {
+  describeAgentInterjectionNotice,
+  normalizeAgentInterjectionMode,
+  resolveAgentSendRoute,
+} from '@/components/canana/agent-send-routing'
 import {
   consumeHomeCanvasAgentPending,
   readHomeCanvasAgentPending,
@@ -483,6 +489,20 @@ const scrollToBottom = () => {
 // 把 messages 数组里的最后一项以响应式代理形式取回，便于后续 mutation 触发 UI 更新
 const tailMessage = () => messages.value[messages.value.length - 1]
 
+/**
+ * 当前正在流式的那条 Agent 消息。
+ *
+ * 不能再用「数组最后一项」：一轮进行中用户可以插话，插话气泡会追加在流式气泡**之后**，
+ * 那时最后一项是用户消息。若仍按 tail 找，工具步骤/进行中标签就会挂到用户气泡上（静默不显示）。
+ */
+const activeAgentMessage = () => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const msg = messages.value[index]
+    if (msg.type === 'ai-text' && msg.loading) return msg
+  }
+  return null
+}
+
 const handleAddImageToCanvas = (url) => {
   if (!url) return
   emit('add-image-to-canvas', { url })
@@ -585,6 +605,16 @@ const toggleChatModelSelect = (event) => {
 }
 
 const turnReferenceImages = ref([])       // 本轮用户附的参考图（Agent 挂图时从这里取）
+/**
+ * 一轮内插话（steer / follow-up）。
+ *
+ * 运行中用户还能发消息 —— 但那条路走 `/steer` 投递给**正在跑的那个任务**（`activeAgentTaskId`），
+ * 绝不 `createGenerationTask`（否则就是两个任务抢同一把画布锁）。`interjectionMode` 是用户选的
+ * 「插入当前轮 / 排队」。见 agent-send-routing 的路由判定与单测。
+ */
+const activeAgentTaskId = ref('')         // 正在跑的 Agent 任务 id（投递插话用；空闲为空串）
+const interjectionMode = ref('steer')     // steer | follow-up
+const interjectionNotice = ref('')        // 插话结果提示（成功/失败都如实说）
 const confirmRequest = ref(null)          // { title, summary, items, nodeIds, riskLevel, resolve }
 const confirmNote = ref('')
 const confirmRemembered = ref(false)      // 用户勾了「本任务内不再问同类动作」
@@ -719,8 +749,8 @@ const agentBridge = useCanvasAgentBridge({
       }
     : null),
   onStep: (step) => {
-    const target = messages.value[messages.value.length - 1]
-    if (!target || target.type !== 'ai-text') return
+    const target = activeAgentMessage()
+    if (!target) return
     target.steps = [...(target.steps || []), step]
     const now = Date.now()
     if (!target.turnStartedAt) target.turnStartedAt = now
@@ -837,6 +867,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
 
     const taskId = String(saved?.id || '').trim()
     if (!taskId) throw new Error('Agent 任务创建失败')
+    // 记下这一轮的 taskId：运行中插话要走 /steer 投递给它（不建新任务）
+    activeAgentTaskId.value = taskId
 
     const controller = new AbortController()
     streamController = controller
@@ -850,8 +882,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
         if (event.type === 'tool_call' && event.agentToolCall) {
           const call = event.agentToolCall
           const callId = String(call.callId || '')
-          const target = messages.value[messages.value.length - 1]
-          if (target && target.type === 'ai-text' && callId && !pendingToolCallIds.has(callId)) {
+          const target = activeAgentMessage()
+          if (target && callId && !pendingToolCallIds.has(callId)) {
             pendingToolCallIds.add(callId)
             target.pendingLabel = call.label || call.name || '执行中'
             if (!target.turnStartedAt) target.turnStartedAt = Date.now()
@@ -918,6 +950,8 @@ const runCanvasAgentTurn = async (prompt, aiMsg, referenceImages = []) => {
   } finally {
     // 这一轮无论怎么结束，「执行中…」都不能留在界面上
     aiMsg.pendingLabel = ''
+    // 插话窗口关闭：任务终态后再投递会失败，前端据此如实提示（不假装送达）
+    activeAgentTaskId.value = ''
     // 回合结束：收掉所有「生成中」高亮（它没有 TTL，只能在这里/节点终态清），
     // 「刚创建」交给它自己的 4 秒 TTL 渐隐，不必提前掐断。
     clearAgentGeneratingNodes()
@@ -969,6 +1003,59 @@ const forceUnlockAndRetry = async (aiMsg) => {
 }
 
 /**
+ * 一轮进行中插话：投递给正在跑的那个任务（steer / follow-up），**不建新任务**。
+ *
+ * 与 sendMessage 的新建分支互斥（由 resolveAgentSendRoute 判定）：运行中永远走这里，
+ * 因此不会再 `createGenerationTask` —— 也就不会出现两个任务抢同一把画布锁。
+ *
+ * 为什么不能附参考图：参考图是**建任务时**带给服务端的（requestBody.referenceImages），
+ * 中途投递没有携带位。与其静默丢掉用户的图，不如如实说清「这一轮不行，等它跑完再发」。
+ */
+const sendAgentInterjection = async (content, refImages, mode, { onAccepted } = {}) => {
+  const text = String(content || '').trim()
+  interjectionNotice.value = ''
+  if (refImages.length) {
+    interjectionNotice.value = '一轮进行中暂不支持附参考图：请等这一轮结束后再发。'
+    return false
+  }
+  if (!text) return false
+
+  const taskId = String(activeAgentTaskId.value || '').trim()
+  if (!taskId) {
+    // 界面以为在跑、但本轮 taskId 已清（极少见的竞态）：绝不冒然新建任务，如实提示重发
+    interjectionNotice.value = '这一轮 Agent 已经结束，请重新发送。'
+    return false
+  }
+
+  const normalizedMode = normalizeAgentInterjectionMode(mode)
+  try {
+    const result = await steerGenerationTask(taskId, { content: text, mode: normalizedMode })
+    if (!result?.accepted) {
+      interjectionNotice.value = result?.reason || '插话没有送达（这一轮可能刚好结束），请重新发送。'
+      return false
+    }
+  } catch (err) {
+    interjectionNotice.value = `插话失败：${err?.message || err}`
+    return false
+  }
+
+  // 转录留痕：插话作为一条用户消息落进面板消息流；服务端同一份也会进 Pi 转录（参与记忆/压缩）
+  const id = Date.now()
+  messages.value.push({
+    id,
+    type: 'user-interjection',
+    content: text,
+    mode: normalizedMode,
+    time: id,
+  })
+  inputMessage.value = ''
+  scrollToBottom()
+  if (typeof onAccepted === 'function') onAccepted()
+  interjectionNotice.value = describeAgentInterjectionNotice(normalizedMode)
+  return true
+}
+
+/**
  * 发送消息：面板唯一的发送实现。
  *
  * 输入框回车/按钮、画布右键的「交给 Agent」、首页带来的自动发送，全都走这一条 ——
@@ -977,12 +1064,21 @@ const forceUnlockAndRetry = async (aiMsg) => {
  * `explicitMessage`：外部代发的文本（首页那句话 / 画布触发的消息）；不传就用输入框里的内容。
  * `onAccepted`：用户消息已经落到对话里时回调（画布触发入口靠它清掉待发状态，时机与以前一致，
  * 不必等整轮 Agent 跑完）。
+ *
+ * 运行中则分流到「插话」（见 sendAgentInterjection），不新建任务。
  */
 const sendMessage = async (explicitMessage, { onAccepted } = {}) => {
   const content = (typeof explicitMessage === 'string' ? explicitMessage : inputMessage.value).trim()
   const refImages = uploadedImages.value.map((img) => img.src)
 
   if (!content && !refImages.length) return false
+
+  const route = resolveAgentSendRoute({ running: runningAgent.value, mode: interjectionMode.value })
+  if (route.kind === 'interject') {
+    return await sendAgentInterjection(content, refImages, route.mode, { onAccepted })
+  }
+
+  interjectionNotice.value = ''
 
   // 确保有活跃会话（首次发送会自动定位到默认会话）
   try {
@@ -1027,6 +1123,11 @@ const handleKeydown = (e) => {
     e.preventDefault()
     void sendMessage()
   }
+}
+
+/** 切换插话方式：插入当前轮 ⇄ 排队（只在运行中有意义，空闲时不影响发送） */
+const toggleInterjectionMode = () => {
+  interjectionMode.value = interjectionMode.value === 'follow-up' ? 'steer' : 'follow-up'
 }
 
 // 监听从中间底部传来的消息（画布触发的入口）：走同一个发送实现
@@ -1312,6 +1413,16 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             </div>
           </div>
 
+          <!-- 用户插话（一轮进行中）：右对齐；标注它是插入当前轮还是排队，让用户知道那句话何时生效 -->
+          <div v-else-if="msg.type === 'user-interjection'" class="message-row user-MkS7tH">
+            <div class="user-col">
+              <div class="agent-who">
+                你 · {{ formatClock(msg.time) }} · {{ msg.mode === 'follow-up' ? '排队中' : '插入当前轮' }}
+              </div>
+              <div class="user-bubble user-bubble--interjection">{{ msg.content }}</div>
+            </div>
+          </div>
+
           <!-- AI 图片回复 -->
           <div v-else-if="msg.type === 'ai-images'" class="message-row ai">
             <div class="ai-block">
@@ -1558,6 +1669,7 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
       -->
       <div class="agent-composer">
         <div v-if="autoSendNotice" class="agent-composer__notice" role="status">{{ autoSendNotice }}</div>
+        <div v-if="interjectionNotice" class="agent-composer__notice" role="status">{{ interjectionNotice }}</div>
         <div v-if="uploadedImages.length" class="agent-composer__refs">
           <div v-for="img in uploadedImages" :key="img.id" class="agent-composer__ref">
             <img :src="img.src" :alt="img.name" @click="openPreview(img.src)" />
@@ -1610,25 +1722,38 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
             </button>
             <!-- 提示改到输入框下方常驻一行（原来只挂在 title 上，用户根本看不到） -->
             <span class="agent-composer__spacer"></span>
-            <!-- 停止只做视觉与禁用态：真正的 abort / 一轮内插话属于下一批（涉及画布锁并发），这里不接逻辑 -->
+            <!-- 停止仍只做视觉与禁用态：真正的 abort 属于另一批，这里不接逻辑（插话已接，见 /steer） -->
             <button
               type="button"
               class="agent-composer__stop"
               disabled
-              title="停止（下一批开放）"
+              title="停止（另一批开放）"
             >停止</button>
+            <!-- 插话方式开关：只在运行中出现。默认「插入当前轮」，可切「排队」 -->
+            <button
+              v-if="runningAgent"
+              type="button"
+              class="agent-composer__interject-mode"
+              :class="{ 'is-queued': interjectionMode === 'follow-up' }"
+              :title="interjectionMode === 'follow-up'
+                ? '当前：排队（这一轮结束后处理）——点击改为插入当前轮'
+                : '当前：插入当前轮——点击改为排队'"
+              @click="toggleInterjectionMode"
+            >{{ interjectionMode === 'follow-up' ? '排队' : '插入当前轮' }}</button>
+            <!-- 运行中不再禁用发送：输入的是「插话」，走 /steer 投递给正在跑的那一个任务（不建新任务） -->
             <button
               type="button"
               class="agent-composer__send"
-              :disabled="runningAgent || (!inputMessage.trim() && !uploadedImages.length)"
+              :disabled="!inputMessage.trim() && !uploadedImages.length"
               @click="sendMessage()"
-            >{{ runningAgent ? '执行中…' : '交给 Agent' }}</button>
+            >{{ runningAgent ? (interjectionMode === 'follow-up' ? '排队' : '插入') : '交给 Agent' }}</button>
           </div>
         </div>
         <div class="agent-composer__hint">
           <span>Enter 发送</span>
           <span>Shift+Enter 换行</span>
-          <span>工具默认折叠，点开看细节</span>
+          <span v-if="runningAgent">运行中可直接插话：插入当前轮 / 排队</span>
+          <span v-else>工具默认折叠，点开看细节</span>
         </div>
       </div>
 
@@ -1861,6 +1986,22 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
 .agent-composer__send:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+.agent-composer__interject-mode {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(124, 92, 255, 0.5);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--agent-accent-soft, #b9a6ff);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.agent-composer__interject-mode.is-queued {
+  border-color: var(--agent-line, #24262d);
+  color: var(--agent-text-2, #9aa0a8);
 }
 
 .agent-composer__model {
@@ -2549,6 +2690,11 @@ const contentGeneratorHeight = computed(() => hasMessages.value ? 102 : 102)
   color: var(--agent-text, #e8eaed);
   font-size: 13.5px;
   line-height: 1.6;
+}
+
+/* 插话气泡：与普通用户气泡同形，左缘加一道强调色 —— 一眼区分「这是运行中补的一句」 */
+.user-col .user-bubble--interjection {
+  border-left: 2px solid var(--agent-accent, #7c5cff);
 }
 
 /* 用户消息（带参考图）：右对齐气泡 + 缩略图 */
