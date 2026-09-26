@@ -16,6 +16,7 @@ import {
   type WorkflowVideoNodeData,
 } from './useWorkflowCanvas'
 import { nodeIndex, inboundEdges } from './workflow-graph-index'
+import { orderImageEdgesByRole } from './upstream-inputs'
 
 export type ReferenceKind = 'image' | 'text' | 'video'
 
@@ -100,7 +101,15 @@ export const collectReferenceableAssets = (nodeId: string): ReferenceableAsset[]
   const counters: Record<ReferenceKind, number> = { image: 0, text: 0, video: 0 }
   const buckets: Record<ReferenceKind, ReferenceableAsset[]> = { image: [], text: [], video: [] }
 
-  for (const edge of inboundEdges.value.get(nodeId) || []) {
+  /*
+   * 编号顺序 = **角色（首帧→尾帧→参考图）再「第 N 张」**，最后才回落到连线插入顺序 —— 2026-09-26 修。
+   *
+   * 必须在编号之前排好：`@图片1` 是纯文本存进提示词的，编号与真实进请求的顺序
+   * 一旦不一致，历史提示词就会指向另一张图（或另一帧）。
+   * 用同一个函数处理两类目标节点：图片节点的入边没有角色字段，全部落进首帧组，
+   * 于是退化成「按 imageOrder 排、没编号按插入顺序」—— 与修之前的行为一致，不会翻转老画布。
+   */
+  for (const edge of orderImageEdgesByRole(inboundEdges.value.get(nodeId) || [])) {
     // 历史快照里可能存在指向已删节点的悬挂边，读不到就跳过
     const sourceNode = nodeIndex.value.get(edge.source)
     if (!sourceNode) continue

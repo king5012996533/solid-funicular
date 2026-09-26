@@ -46,7 +46,7 @@ import { uploadStorageFile } from '@/api/storage'
 import { resolveFrameTimestamp, buildFrameFileName, type FramePosition } from '@/shared/video-frame-capture'
 import { loadPublicModelCatalog, getModelByName, getDefaultVideoModelKey, type VideoModel } from '@/config/models'
 import { pickValidChoice, resolveVideoParamSchema } from '@/config/model-params'
-import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { collectUpstreamPromptText, composePrompt, orderImageEdgesByRole } from '../../composables/upstream-inputs'
 import { useNodeInputState } from '../../composables/node-input-requirements'
 import { useNodeCollapse } from '../../composables/useNodeCollapse'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
@@ -108,10 +108,17 @@ watch(
  */
 const upstreamPromptText = computed(() => collectUpstreamPromptText(props.id))
 
-/** 上游图片节点的出图 → 作为首帧/参考帧 */
+/**
+ * 上游图片节点的出图 → 本节点的输入画面。
+ *
+ * **顺序按边上的角色定，不按连线先后**（2026-09-26 修）：
+ *   首帧 → 尾帧 → 其余（参考图），组内再看「第 N 张」。
+ * 为什么：下游是**按位置理解**这组图的（首尾帧模式下第 1 张=首帧、第 2 张=尾帧），
+ * 而这里原来是连线插入顺序 —— 用户在边上选的「尾帧」等于没选。
+ */
 const upstreamFrameUrls = computed<string[]>(() => {
   const frames: string[] = []
-  for (const edge of inboundEdges.value.get(props.id) || []) {
+  for (const edge of orderImageEdgesByRole(inboundEdges.value.get(props.id) || [])) {
     const sourceNode = nodeIndex.value.get(edge.source)
     if (sourceNode?.type !== 'image') continue
     const url = String((sourceNode.data as { url?: string })?.url || '').trim()

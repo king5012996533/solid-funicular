@@ -40,7 +40,7 @@ import { useComposerPanel } from '../../composables/useComposerPanel'
 import { useNodeToolbar } from '../../composables/useNodeToolbar'
 import { useNodeTitleEdit } from '@/composables/useNodeTitleEdit'
 import { isRasterReferenceUrl } from '@/config/reference-validation'
-import { collectUpstreamPromptText, composePrompt } from '../../composables/upstream-inputs'
+import { collectUpstreamPromptText, composePrompt, sortEdgesByExplicitOrder } from '../../composables/upstream-inputs'
 import { inboundEdges, nodeIndex } from '../../composables/workflow-graph-index'
 import { collectReferenceableAssets } from '../../composables/reference-resolver'
 import {
@@ -499,7 +499,12 @@ const droppedNonRasterRefsHint = ref(false)
 const upstreamReferenceUrls = computed<string[]>(() => {
   const refs: string[] = []
   let droppedCount = 0
-  for (const edge of inboundEdges.value.get(props.id) || []) {
+  /*
+   * 按边上的「第 N 张」（imageOrder）排序 —— 2026-09-26 修。
+   * 这段原来直接吃 `inboundEdges` 的插入顺序：用户在边上把某张点成 ③，
+   * 界面上编号变了、真正提交的顺序却没变，属于看着能用其实是空操作。
+   */
+  for (const edge of sortEdgesByExplicitOrder(inboundEdges.value.get(props.id) || [], 'imageOrder')) {
     const sourceNode = nodeIndex.value.get(edge.source)
     if (!sourceNode) continue
     if (sourceNode.type === 'image') {
