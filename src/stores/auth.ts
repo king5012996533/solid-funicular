@@ -49,6 +49,12 @@ export const useAuthStore = () => {
   // 当前是否已登录。
   const isLoggedIn = computed(() => Boolean(currentUser.value?.id))
 
+  /**
+   * 后端连不上（不是未登录）。界面据此显示「连接中」而不是登录页。
+   * 见 loadSession 里的注释：这两种情况以前被混成了一种。
+   */
+  const sessionUnreachable = ref(false)
+
   // 当前是否具备后台管理员权限。
   const isAdmin = computed(() => currentUser.value?.role === 'ADMIN')
 
@@ -56,6 +62,20 @@ export const useAuthStore = () => {
   const loginButtonText = computed(() => {
     return currentUser.value?.maskedPhone || currentUser.value?.maskedEmail || '登录'
   })
+
+  /**
+   * 「后端连不上」与「确实未登录」是两件事，不能混为一谈。
+   *
+   * 踩过的坑（真机上表现为「重启电脑后打开页面又要我登录」）：
+   * 原来是 `getAuthSession().catch(() => applySessionUser(null))` —— **任何**失败都当未登录，
+   * 而后端刚重启时 getAuthSession 会因为连不上而抛错（不是 401），于是界面直接判定未登录并弹登录框，
+   * 且 `sessionInitialized` 被置真、不会自动重试。用户看到的就是「明明登过，又要我登」。
+   */
+  const isNetworkFailure = (error: unknown): boolean => {
+    if (error instanceof TypeError) return true
+    const message = String((error as { message?: unknown })?.message || error || '')
+    return /failed to fetch|networkerror|network error|fetch failed|load failed/i.test(message)
+  }
 
   // 拉取当前会话。
   const loadSession = async (force = false) => {
@@ -65,14 +85,42 @@ export const useAuthStore = () => {
 
     sessionLoading.value = true
 
-    loadSessionPromise = getAuthSession()
-      .then((result) => applySessionUser(result?.user || null))
-      .catch(() => applySessionUser(null))
-      .finally(() => {
-        sessionInitialized.value = true
-        sessionLoading.value = false
-        loadSessionPromise = null
-      })
+    loadSessionPromise = (async () => {
+      // 后端可能正在启动（dev 下要跑迁移 + 生成 client，约半分钟）：退避重试几次再下结论
+      const MAX_ATTEMPTS = 4
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const result = await getAuthSession()
+          const user = applySessionUser(result?.user || null)
+          sessionUnreachable.value = false
+          sessionInitialized.value = true
+          return user
+        } catch (error) {
+          const lastAttempt = attempt >= MAX_ATTEMPTS
+          if (isNetworkFailure(error) && !lastAttempt) {
+            await new Promise((resolve) => setTimeout(resolve, 800 * attempt))
+            continue
+          }
+          if (isNetworkFailure(error)) {
+            /*
+             * 重试完还是连不上：**保持「未初始化」**并记下连不上，
+             * 绝不把「问不到」当成「没登录」—— 否则后端一慢就变成一次误报的登录弹窗。
+             */
+            sessionUnreachable.value = true
+            return null
+          }
+          // 拿到明确答复（401 等）才是真的未登录 / 会话失效
+          const user = applySessionUser(null)
+          sessionUnreachable.value = false
+          sessionInitialized.value = true
+          return user
+        }
+      }
+      return null
+    })().finally(() => {
+      sessionLoading.value = false
+      loadSessionPromise = null
+    })
 
     return loadSessionPromise
   }
@@ -123,6 +171,7 @@ export const useAuthStore = () => {
     currentUser,
     enabledMethods,
     isLoggedIn,
+    sessionUnreachable,
     isAdmin,
     loginButtonText,
     sessionLoading,
