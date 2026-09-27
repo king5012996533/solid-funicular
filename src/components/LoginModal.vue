@@ -423,14 +423,50 @@ const syncActiveMethod = () => {
   }
 }
 
+/**
+ * 按钮为什么点不动（2026-09-27）。
+ *
+ * 背景：这两个按钮是 `div` + `lv-btn-disabled` 样式（不是真的 disabled），点下去**会**触发，
+ * 但处理函数里 `if (!canXxx) return` 直接静默返回 —— 用户看到的就是"点了没反应"，
+ * 而最常见的原因（协议没勾）根本猜不到。这里把**第一件还没做的事**说出来。
+ *
+ * 只在真的"没填/没勾"时提示；"正在发送/提交"属于忙，不打扰。
+ */
+const explainSendCodeBlocker = (): string => {
+  if (!currentCodeMethod.value) return '当前没有可用的验证码登录方式'
+  if (!isTargetValid.value) return `请输入正确的${currentTargetLabel.value}`
+  if (countdown.value > 0) return `请 ${countdown.value} 秒后再获取验证码`
+  return '请稍候再试'
+}
+
+const explainSubmitBlocker = (): string => {
+  if (!currentPrimaryMethod.value) return '当前没有可用的登录方式'
+  if (!isTargetValid.value) return `请输入正确的${currentTargetLabel.value}`
+  if (currentPasswordMethod.value) {
+    if (passwordValue.value.length < 8) return '密码至少 8 位'
+    if (passwordValue.value.length > 64) return '密码最多 64 位'
+  } else if (!isCodeValid.value) {
+    return '请输入 6 位验证码'
+  }
+  if (policySettings.value.agreementRequired && !agreementChecked.value) return '请先勾选并同意用户协议'
+  return '请稍候再试'
+}
+
 // 请求验证码并自动填充。
 const handleSendCode = async () => {
-  if (!currentCodeMethod.value || !canSendCode.value) return
+  // 先取成局部量：`canSendCode` 已经蕴含了 currentCodeMethod 非空，但 TS 看不出来，
+  // 而下面要用它的 methodType（收窄一次，后面就不用再断言）
+  const codeMethod = currentCodeMethod.value
+  if (!codeMethod || !canSendCode.value) {
+    // 忙的时候不打扰（那是"正在做"，不是"还没填"）
+    if (!isSendingCode.value && !isSubmitting.value) ElMessage.info(explainSendCodeBlocker())
+    return
+  }
 
   try {
     isSendingCode.value = true
     const result = await requestAuthVerificationCode({
-      methodType: currentCodeMethod.value.methodType,
+      methodType: codeMethod.methodType,
       target: targetValue.value.trim(),
     })
 
@@ -471,7 +507,10 @@ const submitLoginAction = useAsyncAction(async () => {
 const isSubmitting = submitLoginAction.loading
 
 const handleSubmit = () => {
-  if (!currentPrimaryMethod.value || !canSubmit.value) return
+  if (!canSubmit.value) {
+    if (!isSubmitting.value) ElMessage.info(explainSubmitBlocker())
+    return
+  }
 
   if (currentCodeMethod.value && issuedCode.value && codeValue.value.trim() !== issuedCode.value) {
     ElMessage.error('请输入刚刚获取到的验证码')
