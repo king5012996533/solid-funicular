@@ -78,11 +78,19 @@ const edgeStyle = computed(() => ({
 <template>
   <BaseEdge :path="path" :style="edgeStyle" />
   <EdgeLabelRenderer>
+    <!--
+      只在**悬停或选中**时吃指针事件。
+
+      为什么：这个 22×22 的容器正好压在边的中点上，而它以前无条件 `pointer-events: all`，
+      于是**用户自然会点的那一处被它吞掉** —— 右键弹不出边的菜单（「插入节点」根本点不到），
+      实测 `elementFromPoint(边中点)` 命中的就是这个容器里的按钮（且它不在边元素内部，
+      边的事件因此收不到）。鼠标移开时它必须「透明」，把中点还给边本体。
+    -->
     <div
       :style="{
         position: 'absolute',
         transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
-        pointerEvents: 'all',
+        pointerEvents: isActive ? 'all' : 'none',
       }"
       class="nodrag nopan canvas-default-edge-label"
       @mouseenter="isHover = true"
