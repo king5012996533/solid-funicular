@@ -770,8 +770,21 @@ const removeMentionedToken = (tokenRaw?: string) => {
 const jumpToSourceNode = (nodeIdRaw?: string) => {
   const nodeId = String(nodeIdRaw || '').trim()
   if (!nodeId) return
-  selectOnlyNode(nodeId)
+  /*
+   * 视口先动，选中**延后一帧**。
+   *
+   * 为什么不能立刻选：这个 click 是在面板里点出来的，而面板属于下游卡片；
+   * Vue Flow 会在 mouseup 之后**异步**把「当前节点」设成选中 —— 那一步排在 click 之后，
+   * 会把我们刚设的选中盖回去（实测：click 确实触发、DOM 没被替换，但选中态纹丝不动，
+   * 且第二次点就正常，因为那时它已经选中、不再覆盖）。
+   * 一帧之后它的状态已经落定，此时再选就不会被盖。
+   */
   requestCenterOnNode(nodeId)
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => selectOnlyNode(nodeId))
+    return
+  }
+  selectOnlyNode(nodeId)
 }
 
 /** 清单里每一项的角标：显式引用显示 token，自动 / 手动各标各的来源 */

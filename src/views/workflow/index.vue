@@ -21,7 +21,7 @@ import {
   expandGroupChildIds, computeGroupBounds, GROUP_NODE_Z_INDEX,
   type WorkflowAddEdgeParams,
   type WorkflowCanvasEdge,
-  type WorkflowNodeType, registerFlowNodeSync, selectOnlyNode, pendingCenterNodeId, consumePendingCenterNodeId } from './composables/useWorkflowCanvas'
+  type WorkflowNodeType, registerFlowNodeSync, selectOnlyNode, pendingCenterNodeId, consumePendingCenterNodeId, registerFlowSelectionSync } from './composables/useWorkflowCanvas'
 import { WORKFLOW_TEMPLATES } from './config/workflows'
 import { decideInitialCanvasEntry } from './config/canvas-entry'
 import { useWorkflowPersistence } from './composables/useWorkflowPersistence'
@@ -90,6 +90,9 @@ const {
   setNodes,
   setCenter,
   findNode,
+  getNodes,
+  addSelectedNodes,
+  removeSelectedNodes,
   connectionStartHandle,
   getSelectedNodes,
 } = useVueFlow()
@@ -1243,8 +1246,17 @@ const panOnDragValue = computed<true | number[]>(() => (isSpacePressed.value ? [
  * 这个警告**改不掉**（除非改库或改成 `true`/`null` 那种语义、从而改变拖拽框选行为），
  * 而且**只在 dev 构建出现**、不进生产包，所以这里保留正确行为、不迁就声明。
  */
-const selectionKeyCode = 'Meta'
-const multiSelectionKeyCode = 'Shift'
+/*
+ * 选择键：**两个平台都要能用**。
+ * 实测问题：原来 `selectionKeyCode = 'Meta'` 意味着「框选要按住 Cmd」——
+ * Windows 键盘没有 Cmd 键，于是**在这台开发机上框选完全按不出来**；
+ * 而 `multiSelectionKeyCode = 'Shift'` 又和 Shift 框选冲突。
+ * 现在按两边的惯例各留一份：框选 = Cmd+拖 / Shift+拖，多选 = Cmd+点 / Ctrl+点。
+ * （Vue 的那条 "Expected Boolean | Null, got String" 警告依旧会出现，属库内声明与实现不一致，
+ *   见上一段注释；传数组同样会警告，但行为正确。）
+ */
+const selectionKeyCode = ['Meta', 'Shift']
+const multiSelectionKeyCode = ['Meta', 'Control']
 
 const isEditableSpaceTarget = (el: EventTarget | null): boolean => {
   if (!(el instanceof HTMLElement)) return false
@@ -2080,6 +2092,18 @@ const settleCanvasBaseline = async () => {
  * 见 useWorkflowCanvas.ts 里 selectOnlyNode 的注释：选中是 UI 状态，不进源数据。
  */
 registerFlowNodeSync(next => setNodes(next))
+
+/**
+ * 选中落点：用 Vue Flow 的选中 API。
+ * 只改 nodes 里的 `selected` 字段是不够的 —— 那个字段会被 Vue Flow 内部的选中状态盖回去
+ * （实测：从面板点「跳回上游卡片」时 click 触发了但选中态不变）。见 selectOnlyNode 的注释。
+ */
+registerFlowSelectionSync((id) => {
+  const currently = getSelectedNodes.value || []
+  if (currently.length) removeSelectedNodes(currently)
+  const target = (getNodes.value || []).find(node => node.id === id)
+  if (target) addSelectedNodes([target])
+})
 
 /**
  * 消费「请把这个节点移到视野中央」的请求（由生成器面板的"点引用跳回上游"发起）。

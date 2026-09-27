@@ -269,10 +269,23 @@ export const canvasViewport = ref<WorkflowCanvasViewportSnapshot>({ x: 100, y: 5
  * ========================================================================== */
 
 let applyNodesToFlow: ((next: WorkflowCanvasNode[]) => void) | null = null
+let applySelectionToFlow: ((id: string) => void) | null = null
 
 /** index.vue 挂载时把自己的 setNodes 注册进来（避免 composable 依赖组件实例） */
 export const registerFlowNodeSync = (apply: ((next: WorkflowCanvasNode[]) => void) | null) => {
   applyNodesToFlow = apply
+}
+
+/**
+ * 注册「选中」的落点：**必须走 Vue Flow 自己的选中 API**（addSelectedNodes / removeSelectedNodes）。
+ *
+ * 为什么不能用 setNodes 改 `selected` 字段：实测过 —— 从面板里点「跳回上游卡片」时，
+ * click 确实触发了、DOM 也没被替换，但选中态纹丝不动。原因是按住鼠标时 Vue Flow
+ * 已经把它自己的选中状态设成了当前节点，而 setNodes 传下去的 `selected` 会被它内部的
+ * 选中状态覆盖回去。`addSelectedNodes` 改的才是那份权威状态。
+ */
+export const registerFlowSelectionSync = (apply: ((id: string) => void) | null) => {
+  applySelectionToFlow = apply
 }
 
 /**
@@ -285,7 +298,18 @@ export const registerFlowNodeSync = (apply: ((next: WorkflowCanvasNode[]) => voi
 export const selectOnlyNode = (id: string) => {
   const target = String(id || '').trim()
   if (!target) return
-  applyNodesToFlow?.(nodes.value.map(node => ({ ...node, selected: node.id === target })))
+  /*
+   * **两侧一起写**（源数据 + Vue Flow 的选中态），缺一边都会被同步盖回去：
+   *   · 只写 Vue Flow 的选中 API → 下一次「源数据 → Flow」同步会把选中抹掉；
+   *   · 只写源数据的 selected 字段 → Vue Flow 内部选中态（鼠标按下时它自己设的）会盖回来。
+   * 两个方向都在真机上实测到了，所以这里两边都写，谁后谁先都不会出现「点了没反应」。
+   */
+  nodes.value = nodes.value.map(node => ({ ...node, selected: node.id === target }))
+  if (applySelectionToFlow) {
+    applySelectionToFlow(target)
+    return
+  }
+  applyNodesToFlow?.(nodes.value)
 }
 
 /** 「请把这个节点移到视野中央」的一次性请求，由 index.vue 消费 */
