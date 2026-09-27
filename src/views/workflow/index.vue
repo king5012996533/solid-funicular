@@ -58,6 +58,7 @@ import { useCanvasDrop } from '@/composables/useCanvasDrop'
 import {
   canvasBackgroundMode,
   removeNode,
+  duplicateNode,
   removeEdge,
   clearCanvas,
 } from './composables/useWorkflowCanvas'
@@ -1467,9 +1468,26 @@ const openCanvasAgentFromMenu = (options: { aboutNodeId?: string } = {}) => {
  * 建节点只有两条路：左侧工具栏直达、以及「拖线落空」在落点给出可接的类型。
  * 在这里再列一遍是纯重复入口（用户点名的「功能重叠」），删掉。
  */
+/**
+ * 右键空白处建节点：落点就是**右键那一下的位置**（转成画布坐标），不是视口中心。
+ * 「在哪点，在哪建」—— 这是右键这条路径存在的意义，别改成居中放置。
+ */
+const createNodeFromPaneContextMenu = (type: WorkflowNodeType) => {
+  const flowPosition = screenToFlowCoordinate({ x: contextMenuPosition.value.x, y: contextMenuPosition.value.y })
+  closeCanvasMenus()
+  placeNewNode(type, flowPosition)
+}
+
 const openPaneContextMenu = (event: MouseEvent) => {
   event.preventDefault()
   closeCanvasMenus()
+  /*
+   * **右键空白 = 建节点**（2026-09-27 恢复）。
+   *
+   * 我上一轮把这一段当成"与左栏重复的入口"删掉了，只留左栏 —— 这是判断错误：
+   * 右键是画布上最直接的手势，用户要的是「在这点一下右键就能建」，而不是先去左栏找一个图标。
+   * 现在恢复，并且**把全部节点类型都放进来（含音频）**：左栏与右键都能建，不是二选一。
+   */
   contextMenuItems.value = [
     {
       id: 'agent-create',
@@ -1477,6 +1495,12 @@ const openPaneContextMenu = (event: MouseEvent) => {
       iconPath: AGENT_SPARKLE_PATH,
       onClick: () => openCanvasAgentFromMenu(),
     },
+    { id: 'divider-node', label: '', type: 'divider' },
+    ...buildNodeTypeMenuItems(
+      NODE_TYPE_PRESENTATION.map(item => item.type),
+      'pane-create',
+      type => () => createNodeFromPaneContextMenu(type),
+    ),
     { id: 'divider', label: '', type: 'divider' },
     {
       id: 'paste',
@@ -1501,6 +1525,11 @@ const openNodeContextMenu = (payload: NodeMouseEvent) => {
    * 而且右键菜单紧挨着节点，误点删除的代价最高。所以破坏性动作从右键菜单里拿掉，
    * 集中在「悬停工具条 + 快捷键」这两处（就地、可预期）。
    */
+  /*
+   * 右键节点 = 对这个节点做点什么（2026-09-27 恢复复制/删除）。
+   * 同上一段的理由：我当时以"与 hover 工具条重复"为由把它们删了，
+   * 但右键是更直接的手势 —— 重复一点没关系，用户找不到才要命。
+   */
   contextMenuItems.value = [
     {
       id: 'agent-handle-node',
@@ -1508,6 +1537,9 @@ const openNodeContextMenu = (payload: NodeMouseEvent) => {
       iconPath: AGENT_SPARKLE_PATH,
       onClick: () => openCanvasAgentFromMenu({ aboutNodeId: payload.node.id }),
     },
+    { id: 'divider-node-actions', label: '', type: 'divider' },
+    { id: 'duplicate', label: '复制', shortcut: 'Cmd+C', onClick: () => duplicateNode(payload.node.id) },
+    { id: 'delete', label: '删除', shortcut: 'Del', danger: true, onClick: () => removeNode(payload.node.id) },
   ]
   contextMenuPosition.value = { x: e.clientX, y: e.clientY }
   contextMenuVisible.value = true
