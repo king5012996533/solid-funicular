@@ -12,6 +12,7 @@ import {
   buildNormalizedGenerationParams,
   isModelPricingRefusedError,
   ModelPricingRefusedError,
+  readDeclaredMaxVideoSeconds,
   type PricingFallbackReason,
 } from '../../src/shared/model-pricing-rules'
 import { normalizeChargeableEndpointType, type AiEndpointType } from '../../src/shared/provider-endpoint-strategy'
@@ -81,8 +82,11 @@ const sendUpstreamSelectorRequired = (res: any) => {
  *
  * 网关是低层转发：图片/视频的 size/count/seconds 散在 body 里，抽成一个函数免得两处各解释一遍。
  * multipart 路径此刻拿不到 body（还没解析就直接透传）→ 传 null，按 1 张/1 次计。
+ *
+ * `capabilityJson` 来自 `resolveGatewayProviderUpstream`（上游解析时顺带查了 AiModel），
+ * 用来取模型声明的最大时长档位当上限，避免把 30 秒请求夹成更小值而少收费。
  */
-const buildGatewayPricingParams = (endpointType: 'image' | 'video', body: unknown) => {
+const buildGatewayPricingParams = (endpointType: 'image' | 'video', body: unknown, capabilityJson?: unknown) => {
   const source = body && typeof body === 'object' && !Array.isArray(body)
     ? body as Record<string, unknown>
     : {}
@@ -91,6 +95,7 @@ const buildGatewayPricingParams = (endpointType: 'image' | 'video', body: unknow
     size: source.size,
     count: source.count ?? source.n,
     seconds: source.seconds ?? source.duration,
+    secondsMax: readDeclaredMaxVideoSeconds(capabilityJson),
   })
 }
 
@@ -150,7 +155,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
           modelKey: headerModelKey,
           endpointType: billedHeaderEndpointType as 'image' | 'video',
           // multipart 体积流未解析，拿不到 size/count —— 按默认 1 张/1 次计
-          params: buildGatewayPricingParams(billedHeaderEndpointType as 'image' | 'video', null),
+          params: buildGatewayPricingParams(billedHeaderEndpointType as 'image' | 'video', null, upstream.modelCapabilityJson),
         })
         : { pointCost: 0, usingDraft: false, refuse: false, detail: '', modelName: '' }
 
@@ -265,7 +270,7 @@ export const handleAiGatewayRequest = async (req: any, res: any) => {
         providerId: normalized.providerId,
         modelKey: normalized.modelKey,
         endpointType: billedJsonEndpointType as 'image' | 'video',
-        params: buildGatewayPricingParams(billedJsonEndpointType as 'image' | 'video', normalized.body),
+        params: buildGatewayPricingParams(billedJsonEndpointType as 'image' | 'video', normalized.body, upstream.modelCapabilityJson),
       })
       : { pointCost: 0, usingDraft: false, refuse: false, detail: '', modelName: '' }
 

@@ -4,6 +4,7 @@ import type {
 } from "./shared";
 import type { GenerationRecordPayload } from "../generation-records/shared";
 import type { RuntimeManagedTask } from "./task-runtime-governor";
+import { probeArtifactMetadata } from "../media/probe-artifact";
 
 /**
  * 视频任务执行器（2026-09-23）
@@ -223,6 +224,8 @@ export const executeVideoTask = async (
     stage: "syncing_record",
     message: "视频已转存到本站，正在写入记录",
   });
+  // 真实元数据（时长/宽高/字节数）尽力填：探测刚转存的本地文件，拿不到就留空，绝不写 0。
+  const outputMetadata = await probeArtifactMetadata(localUrl);
   await context.updateGenerationRecord(
     task.recordId,
     {
@@ -235,6 +238,12 @@ export const executeVideoTask = async (
         {
           outputType: "video",
           url: localUrl,
+          ...(outputMetadata?.width ? { width: outputMetadata.width } : {}),
+          ...(outputMetadata?.height ? { height: outputMetadata.height } : {}),
+          ...(outputMetadata?.durationSeconds
+            ? { durationSeconds: outputMetadata.durationSeconds }
+            : {}),
+          ...(outputMetadata?.mimeType ? { mimeType: outputMetadata.mimeType } : {}),
           metaJson: {
             // 只留可长期复用的信息：上游任务 id + 我们自己的存储位置。
             // 上游那条签名地址**不落库**（会过期，且带签名，没有复用的价值）。
@@ -242,6 +251,9 @@ export const executeVideoTask = async (
             storageType: stored.storageType,
             relativePath: stored.relativePath,
             fileSizeBytes: stored.size,
+            // GenerationOutputPayload 没有 byteSize 字段，按约定放 metaJson
+            ...(outputMetadata?.byteSize ? { byteSize: outputMetadata.byteSize } : {}),
+            ...(outputMetadata?.durationEstimated ? { durationEstimated: true } : {}),
           },
         },
       ],

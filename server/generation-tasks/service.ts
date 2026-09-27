@@ -52,6 +52,7 @@ import { getGenerationTaskExecutionStrategy, type GenerationTaskExecutionStrateg
 import { executeImageTask } from './image-task-executor'
 import { executeAudioTask } from './audio-task-executor'
 import { executeVideoTask } from './video-task-executor'
+import { probeArtifactMetadata } from '../media/probe-artifact'
 import {
   createVideoTaskRequest,
   materializeVideoOutput,
@@ -435,16 +436,28 @@ const persistAgentWorkspaceRecord = async (input: {
     content: '',
     agentRun: input.agentRun,
     referenceImages: undefined,
-    outputs: agentRunImages
-      .filter((image) => String(image?.imageSrc || '').trim())
-      .map((image, index) => ({
-        outputType: 'image' as const,
-        url: resolvePersistedImageUrl(image, index),
-        sortOrder: index,
-        metaJson: {
-          promptText: String(image.promptText || '').trim(),
-        },
-      })),
+    // 真实元数据（宽高/MIME/字节数）尽力填：探测失败就留空，绝不写 0 或编造
+    outputs: await Promise.all(
+      agentRunImages
+        .filter((image) => String(image?.imageSrc || '').trim())
+        .map(async (image, index) => {
+          const url = resolvePersistedImageUrl(image, index)
+          const metadata = await probeArtifactMetadata(url)
+          return {
+            outputType: 'image' as const,
+            url,
+            sortOrder: index,
+            ...(metadata?.width ? { width: metadata.width } : {}),
+            ...(metadata?.height ? { height: metadata.height } : {}),
+            ...(metadata?.mimeType ? { mimeType: metadata.mimeType } : {}),
+            metaJson: {
+              promptText: String(image.promptText || '').trim(),
+              // GenerationOutputPayload 没有 byteSize 字段，按约定放 metaJson
+              ...(metadata?.byteSize ? { byteSize: metadata.byteSize } : {}),
+            },
+          }
+        }),
+    ),
     done: Boolean(input.done),
     stopped: Boolean(input.stopped),
     error: input.error || '',

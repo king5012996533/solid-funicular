@@ -33,6 +33,7 @@ import type { WorkflowCanvasPosition } from './composables/workflow-orchestrator
 import TextNode from './components/nodes/TextNode.vue'
 import ImageNode from './components/nodes/ImageNode.vue'
 import VideoNode from './components/nodes/VideoNode.vue'
+import AudioNode from './components/nodes/AudioNode.vue'
 import AssetNode from './components/nodes/AssetNode.vue'
 import GroupNode from './components/nodes/GroupNode.vue'
 import { buildCanvasBrief } from './config/canvas-brief'
@@ -116,6 +117,7 @@ const nodeTypes = {
   text: markRaw(TextNode),
   image: markRaw(ImageNode),
   video: markRaw(VideoNode),
+  audio: markRaw(AudioNode),
   asset: markRaw(AssetNode),
   group: markRaw(GroupNode),
 } as any
@@ -531,6 +533,8 @@ const tools = [
   { id: 'text', name: '文本', icon: 'M4 6h16M4 12h8m-8 6h16', action: () => addNewNode('text') },
   { id: 'image', name: '文生图', icon: 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z', action: () => addNewNode('image') },
   { id: 'video', name: '视频生成', icon: 'M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z', action: () => addNewNode('video') },
+  // 音频生成：终点节点（上游只吃文本，产出没有下游会读）。图标与画布图标模块的 audio 同一形状
+  { id: 'audio', name: '音频生成', icon: 'M5 10h3l4 -3.5v11L8 14H5zM15.2 9.6a3.4 3.4 0 0 1 0 4.8M17 7.6a5 5 0 0 1 0 8.8', action: () => addNewNode('audio') },
   // 素材库：直接建一个素材节点（对齐 LibTV 底部工具条的「素材库」）
   { id: 'asset', name: '素材库', icon: 'M4 8a1.5 1.5 0 0 1 1.5-1.5h3.3a1.5 1.5 0 0 1 1.2.6l1 1.4h7.5A1.5 1.5 0 0 1 20 10v7.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z', action: () => addNewNode('asset') },
 ]

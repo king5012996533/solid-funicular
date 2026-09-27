@@ -102,16 +102,21 @@ const titleEdit = useNodeTitleEdit(props.id, () => props.data?.label || '图片'
  * 这里只放**拿得到真值**的那部分：数量取自节点 data 的批量生图组 —— 只有组首挂
  * `batchChildren`，里面的每一项就是本节点实际产出的图（含主图），长度即产出张数。
  *
- * 产出图的**真实宽高拿不到**：节点 data 与组件状态里没有任何字段承载产物像素
- * （`data.size` 是用户选的「计划尺寸」，不是产物尺寸；batchChildren 也只存 {id, url}），
- * 所以这一段不显示 —— 宁缺毋滥，绝不拿计划尺寸或写死数字冒充。
+ * 产出图的**真实宽高**（2026-09-27 起可用了）：
+ * 服务端会把产物文件的真实像素量出来（`artifactWidth/artifactHeight` 随记录一起下发），
+ * 这里只负责显示。**拿不到就整段不显示** —— 宁缺毋滥，绝不拿「计划尺寸」（`data.size`
+ * 是用户选的档位，不是产物像素）或写死数字冒充，这条底线不变。
  */
 const outputMeta = computed(() => {
+  const parts: string[] = []
+  const width = Number(props.data?.artifactWidth) || 0
+  const height = Number(props.data?.artifactHeight) || 0
+  if (width > 0 && height > 0) parts.push(`${width} × ${height}`)
   const children = props.data?.batchChildren
   if (props.data?.isBatchRoot && Array.isArray(children) && children.length > 1) {
-    return `${children.length}张`
+    parts.push(`${children.length}张`)
   }
-  return ''
+  return parts.join(' · ')
 })
 
 /**
@@ -924,6 +929,14 @@ const failRun = (message: string) => {
 const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
   if (event.type === 'snapshot' || event.type === 'completed') {
     const urls = Array.isArray(event.record?.images) ? event.record.images.filter(Boolean) : []
+    /*
+     * 首张产物的真实像素（服务端从文件字节里量的，见 server/media/artifact-metadata.ts）。
+     * 缺就整块不带 —— 卡片标题行据此决定显示「1456 × 816」还是留空。
+     */
+    const firstImageOutput = Array.isArray(event.record?.outputs)
+      ? (event.record.outputs as Array<{ outputType?: string; width?: number; height?: number }>)
+          .find((item) => String(item?.outputType || '').toLowerCase() === 'image' && Number(item?.width) > 0 && Number(item?.height) > 0)
+      : undefined
     if (urls.length) {
       clearDeadline()
       stopElapsedTimer()
@@ -937,6 +950,9 @@ const applyTaskEvent = (event: GenerationTaskStreamEvent) => {
         executed: true,
         submittedAt: 0,
         backgroundPending: false,
+        ...(firstImageOutput
+          ? { artifactWidth: Number(firstImageOutput.width), artifactHeight: Number(firstImageOutput.height) }
+          : {}),
         ...(urls.length > 1
           ? {
               isBatchRoot: true,

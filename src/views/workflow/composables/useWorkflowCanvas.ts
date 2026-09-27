@@ -22,7 +22,7 @@ import { computed, ref, watch } from 'vue'
 import { migrateLegacyConfigNodes } from './legacy-config-node-migration'
 import type { WorkflowCanvasPosition } from './workflow-orchestrator-types'
 
-export type WorkflowNodeType = 'text' | 'image' | 'video' | 'asset' | 'group'
+export type WorkflowNodeType = 'text' | 'image' | 'video' | 'audio' | 'asset' | 'group'
 
 export interface WorkflowNodeDataBase {
   label?: string
@@ -112,6 +112,23 @@ export interface WorkflowVideoNodeData extends WorkflowNodeDataBase, WorkflowGen
 }
 
 /**
+ * 音频节点（工作包 A）
+ *
+ * 它是**终点节点**：上游只吃文本（当提示词），产出没有任何节点会读
+ * （兼容表里 `audio: []`，理由见 config/node-suggestions.ts）。
+ * 参数（时长 / 格式）由下方的音频工具栏负责，卡片上只留一行摘要 ——
+ * 所以在节点里再放一套参数控件属于重复入口，这里不做。
+ *
+ * `duration` / `prompt` 来自 WorkflowGenerationParamsData，不在这里重复声明。
+ */
+export interface WorkflowAudioNodeData extends WorkflowNodeDataBase, WorkflowGenerationParamsData {
+  /** 音频地址（/uploads/generated/audio/... 或上游回传的 CDN 地址） */
+  url?: string
+  /** 产物格式，如 mp3 / wav。**从产物地址推导**，不是用户参数 */
+  format?: string
+}
+
+/**
  * 素材节点（清单 F6）
  *
  * 对齐 LibTV「添加节点 → 素材库」。它不产内容，只把资产库里的某个素材
@@ -152,6 +169,7 @@ export interface WorkflowNodeDataMap {
   text: WorkflowTextNodeData
   image: WorkflowImageNodeData
   video: WorkflowVideoNodeData
+  audio: WorkflowAudioNodeData
   asset: WorkflowAssetNodeData
   group: WorkflowGroupNodeData
 }
@@ -471,6 +489,16 @@ const getDefaultNodeData = <T extends WorkflowNodeType>(type: T): WorkflowNodeDa
         duration: 0,
         prompt: '',
         label: '视频节点'
+      } as WorkflowNodeDataMap[T]
+    }
+    case 'audio': {
+      // 与视频节点同款：模型/时长都不在这里写死（节点可能早于模型目录创建），
+      // 参数由工具栏写入，产物由生成事件流写回。
+      return {
+        url: '',
+        duration: 0,
+        prompt: '',
+        label: '音频节点'
       } as WorkflowNodeDataMap[T]
     }
     case 'asset':

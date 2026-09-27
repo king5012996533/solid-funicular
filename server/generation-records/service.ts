@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { probeArtifactMetadata } from '../media/probe-artifact'
 import { invalidateAssetItemsCaches } from '../asset-items/service'
 import { invalidateAdminDashboardOverviewCache } from '../admin-dashboard/service'
 import { invalidateAdminUsersCaches } from '../admin-users/service'
@@ -449,7 +450,43 @@ const normalizeOutputs = async (payload: GenerationRecordPayload) => {
     explicitOutputCount: Array.isArray(payload.outputs) ? payload.outputs.length : 0,
   })
 
-  const normalizedOutputs = await Promise.all(outputs.map((output, index) => materializeOutputAsset(output, index)))
+  const materializedOutputs = await Promise.all(outputs.map((output, index) => materializeOutputAsset(output, index)))
+
+  /*
+   * 补齐产物的**真实元数据**（宽高/时长/MIME/字节数）—— 2026-09-27。
+   *
+   * 为什么补在这一处、而不是各个 executor 里：
+   * 这里是**所有**生成路径的必经之地（普通出图 / 视频 / 音频 / Agent 工作台最后都走它）。
+   * 一开始只在部分 executor 里量，结果**日常"文生图"这条路依然拿不到尺寸**
+   * （它的产物是在这里由 `images: string[]` 转成 outputs 的），卡片标题就只能空着。
+   * 放在这里一次覆盖全部，以后新增链路也不会漏。
+   *
+   * executor 已经量过的（有宽高或时长）不再重复探测 —— 省一次 IO。
+   * 探测失败一律**原样返回**，绝不因为量不到而让整条落库失败。
+   */
+  const normalizedOutputs = await Promise.all(materializedOutputs.map(async (output) => {
+    const alreadyMeasured = Number(output.width) > 0 || Number(output.durationSeconds) > 0
+    if (alreadyMeasured || !output.url || output.outputType === 'text') return output
+    try {
+      const probed = await probeArtifactMetadata(output.url)
+      if (!probed) return output
+      return {
+        ...output,
+        ...(Number(probed.width) > 0 ? { width: Number(probed.width) } : {}),
+        ...(Number(probed.height) > 0 ? { height: Number(probed.height) } : {}),
+        ...(Number(probed.durationSeconds) > 0 ? { durationSeconds: Number(probed.durationSeconds) } : {}),
+        ...(probed.mimeType ? { mimeType: String(probed.mimeType) } : {}),
+        metaJson: {
+          ...(output.metaJson || {}),
+          ...(Number(probed.byteSize) > 0 ? { byteSize: Number(probed.byteSize) } : {}),
+          ...(probed.durationEstimated ? { durationEstimated: true } : {}),
+        },
+      }
+    } catch {
+      // 量不到就不量，别让它影响落库
+      return output
+    }
+  }))
 
   logGenerationRecord('normalize_outputs:success', {
     type: payload.type,
@@ -805,12 +842,24 @@ const serializeGenerationRecord = (record: any) => ({
   stopped: record.status === 'STOPPED',
   agentTaskId: record.agentTaskId || undefined,
   createdAt: record.createdAt,
+  /*
+   * 产物元数据要一起给到前端（2026-09-27）。
+   *
+   * 为什么：`width / height / durationSeconds / mimeType` 这几个字段在产物表里一直有，
+   * 但这一层以前只映射了 url 与 metaJson，于是节点卡片**永远拿不到产物的真实尺寸**
+   * —— 图片节点的标题行因此只能空着（当时写的是"拿不到就宁缺毋滥"）。
+   * 值缺失时给 undefined（不要用 0 冒充），前端据此决定显不显示。
+   */
   outputs: (record.outputs || []).map((output: any) => ({
     outputType: String(output.outputType || '').toLowerCase(),
     url: output.url || '',
     textContent: output.textContent || '',
     sortOrder: output.sortOrder || 0,
     metaJson: output.metaJson || null,
+    ...(Number(output.width) > 0 ? { width: Number(output.width) } : {}),
+    ...(Number(output.height) > 0 ? { height: Number(output.height) } : {}),
+    ...(Number(output.durationSeconds) > 0 ? { durationSeconds: Number(output.durationSeconds) } : {}),
+    ...(output.mimeType ? { mimeType: String(output.mimeType) } : {}),
   })),
   images: (record.outputs || [])
     .filter((output: any) => output.outputType === 'IMAGE' && output.url)

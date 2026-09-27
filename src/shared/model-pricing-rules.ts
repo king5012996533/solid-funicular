@@ -121,24 +121,88 @@ export const isModelPricingRefusedError = (error: unknown): error is ModelPricin
 }
 
 /**
- * 视频时长归一化：**clamp 到 1~20 秒**。
+ * 视频时长兜底区间的默认上限（秒）。
  *
- * 这条与旧项目 `normalizeVideoSeconds` 的口径保持一致 —— 之前的问题正是「两边各 clamp 一次、
- * 或者一边 clamp 一边不 clamp」，于是 30 秒的请求按 20 秒记账，差价平台自己吃。
- * 现在只有一个实现，预估与扣费都从它拿值。
+ * **为什么从 20 提到 60**：20 是少收费的根源 —— 库里 `seedance2.5` 的能力声明里
+ * `params.duration.options` 明确写着 30 秒档、`defaultParamsJson.duration = 30`，
+ * 而这里把请求的 30 夹成 20。perSecond 计价按秒算，于是**每个 30 秒任务只按 20 秒收钱**，
+ * 少收 1/3；记录里的时长也写成 20，用户看到的是「明明是 30 秒的视频、记录写着 20 秒」。
+ * 默认上限必须不低于模型自己声明的最大档位；调用方能拿到声明时用
+ * `buildNormalizedGenerationParams` 的 `secondsMax` 传入（见 `readDeclaredMaxVideoSeconds`），
+ * 拿不到才回退这个兜底值。
  */
-export const normalizeVideoSeconds = (input: number, max = 20, min = 1): number => {
+export const VIDEO_SECONDS_MAX = 60
+export const VIDEO_SECONDS_MIN = 1
+
+/**
+ * 视频时长归一化：**clamp 到 [min, max]**（默认 [1, 60]）。
+ *
+ * 仍然是 clamp，语义没变；变的只是默认上限不再是那个会把 30 秒砍成 20 秒的值。
+ * 预估与扣费都从这一个实现拿值，不可能出现「预估 30、实扣 20」。
+ */
+export const normalizeVideoSeconds = (
+  input: number,
+  max = VIDEO_SECONDS_MAX,
+  min = VIDEO_SECONDS_MIN,
+): number => {
   const value = Math.trunc(Number(input) || 0)
   if (!Number.isFinite(value)) return min
   return Math.max(min, Math.min(max, value))
 }
 
 /**
+ * 读模型能力声明里的「最大时长档位」（秒）。
+ *
+ * 声明位置（与 `capabilityJson.params.duration.options[].key`、`capabilityJson.seconds` 两种写法一致）：
+ *   · `params.duration.options` 里每项取 `key`（字符串数字，如 "30"）或 `value`
+ *   · 顶层 `seconds`（数字数组，如 [5, 10, 30]）
+ * 两者都读、取最大值；都读不到返回 undefined（调用方回退默认上限，**绝不硬编一个数**）。
+ */
+export const readDeclaredMaxVideoSeconds = (capabilityJson: unknown): number | undefined => {
+  if (!capabilityJson || typeof capabilityJson !== 'object' || Array.isArray(capabilityJson)) {
+    return undefined
+  }
+  const capability = capabilityJson as Record<string, unknown>
+  const candidates: number[] = []
+  const pushSeconds = (value: unknown) => {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed > 0) candidates.push(parsed)
+  }
+
+  const params = capability.params
+  if (params && typeof params === 'object' && !Array.isArray(params)) {
+    const duration = (params as Record<string, unknown>).duration
+    const options = Array.isArray(duration)
+      ? duration
+      : duration && typeof duration === 'object' && !Array.isArray(duration)
+        ? (duration as Record<string, unknown>).options
+        : null
+    if (Array.isArray(options)) {
+      for (const option of options) {
+        if (option && typeof option === 'object' && !Array.isArray(option)) {
+          const record = option as Record<string, unknown>
+          pushSeconds(record.key ?? record.value)
+        } else {
+          pushSeconds(option)
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(capability.seconds)) {
+    for (const value of capability.seconds) pushSeconds(value)
+  }
+
+  if (!candidates.length) return undefined
+  return Math.max(...candidates)
+}
+
+/**
  * 音频时长归一化：**clamp 到 1~600 秒**。
  *
- * 为什么不复用 `normalizeVideoSeconds`：那个的上限是 20 秒，是视频模型的档位决定的。
- * 音频/音乐常见 30s / 60s / 180s，套 20 秒的上限会把它们统统砍成 20 ——
- * 「请求 180 秒、按 20 秒记账」正是我们已经在视频上踩过的坑，不能在新分类上再犯一遍。
+ * 为什么不复用 `normalizeVideoSeconds`：那个的上限是视频模型的档位决定的（默认 60 秒），
+ * 对音频太短 —— 音频/音乐常见 30s / 60s / 180s，套视频的上限会把它们统统砍掉。
+ * 「请求 180 秒、按被砍后的秒数记账」正是我们已经在视频上踩过的坑，不能在新分类上再犯一遍。
  */
 export const AUDIO_SECONDS_MIN = 1
 export const AUDIO_SECONDS_MAX = 600
@@ -160,6 +224,8 @@ export const normalizeAudioSeconds = (
  *   同时把原样字符串塞进 `label`（label 模式的上游档位值就是它）。
  * - 视频 `seconds` 必须先经 `normalizeVideoSeconds` clamp —— 只归一化定价、不归一化时长，
  *   就会出现「预估 30 秒、实扣 20 秒」这种对不上的账。
+ * - 视频上限优先用调用方传入的 `secondsMax`（模型声明的最大档位，如 seedance2.5 的 30 秒）；
+ *   拿不到才回退默认值。上限低于模型档位就是少收费，所以默认值也不能再是 20。
  * - `count` 保底 1（perTask 渠道不随张数变化，perImage 渠道则要按张乘）。
  */
 export const buildNormalizedGenerationParams = (input: {
@@ -170,18 +236,27 @@ export const buildNormalizedGenerationParams = (input: {
   count?: unknown
   /** 视频时长（秒），传用户原始请求值即可，clamp 由这里负责 */
   seconds?: unknown
+  /**
+   * 视频专用：模型声明的最大时长档位（秒）。给了就用它当上限；
+   * 没给才回退 `VIDEO_SECONDS_MAX` —— 拿不到声明时也不能用低于模型档位的值去砍。
+   */
+  secondsMax?: unknown
 }): NormalizedGenerationParams => {
   const sizeText = String(input.size ?? '').trim()
   const sizeMatch = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(sizeText)
   const count = Math.max(1, Math.trunc(Number(input.count) || 1))
   const secondsValue = Number(input.seconds)
+  const secondsMaxValue = Number(input.secondsMax)
+  const resolvedSecondsMax = Number.isFinite(secondsMaxValue) && secondsMaxValue > 0
+    ? secondsMaxValue
+    : VIDEO_SECONDS_MAX
   return {
     kind: input.kind,
     count,
     ...(sizeMatch ? { width: Number(sizeMatch[1]), height: Number(sizeMatch[2]) } : {}),
     ...(sizeText ? { label: sizeText } : {}),
     ...(input.kind === 'video' && Number.isFinite(secondsValue) && secondsValue > 0
-      ? { seconds: normalizeVideoSeconds(secondsValue) }
+      ? { seconds: normalizeVideoSeconds(secondsValue, resolvedSecondsMax) }
       : {}),
     // 音频走自己的区间（见 normalizeAudioSeconds 的注释：不能用视频的 1~20）
     ...(input.kind === 'audio' && Number.isFinite(secondsValue) && secondsValue > 0

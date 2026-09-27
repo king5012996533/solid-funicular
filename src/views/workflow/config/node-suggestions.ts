@@ -29,7 +29,7 @@ export interface NodeTypePresentation {
 }
 
 /**
- * 四类节点的展示信息。
+ * 五类节点的展示信息。
  * 左侧工具栏、「+」菜单、拖线菜单都读这一份，避免同一个节点在三处有三套名字和图标。
  * 图标来自画布图标模块（24×24 的 path `d`，按 stroke 1.5 设计），
  * 保持字符串是为了让调用方继续用 `<path :d="opt.icon" />` 渲染。
@@ -38,6 +38,7 @@ export interface NodeTypePresentation {
  *   text  → brand-main（品牌主色）
  *   image → brand-image
  *   video → brand-video
+ *   audio → brand-music（音频类专用 token）
  *   llm   → brand-llm（画布内专用，见 libtv-tokens.css；不用 brand-bright 是因为
  *           那个 token 会被运行时主题接管，会导致节点颜色跟着后台品牌色漂移）
  */
@@ -61,6 +62,12 @@ export const NODE_TYPE_PRESENTATION: NodeTypePresentation[] = [
     icon: getCanvasIcon('video'),
   },
   {
+    type: 'audio',
+    name: '音频生成',
+    color: 'var(--brand-music)',
+    icon: getCanvasIcon('audio'),
+  },
+  {
     type: 'asset',
     name: '素材',
     color: 'var(--text-secondary)',
@@ -78,21 +85,29 @@ export const getNodeTypePresentation = (type: WorkflowNodeType): NodeTypePresent
  *
  * 判据是**下游节点真的会读这个输入**，不是「技术上能不能连」。
  * 表里的每一项都能在代码里找到对应读取逻辑（composables/upstream-inputs.ts）：
- *   text      产出 content      → 图片 / 视频（当提示词）、文本（当输入）（当创意）
- *   文本节点产出 content → 图片 / 视频（当提示词）
+ *   text      产出 content      → 图片 / 视频（当提示词）、音频（当提示词）
+ *   文本节点产出 content → 图片 / 视频 / 音频（当提示词）
  *   image     产出图片           → 图片（当参考图）、视频（当首帧）
  *   video     产出成片           → 没有任何节点读视频，所以目前接不下去
+ *   audio     产出音频           → 没有任何节点读音频，所以接不下去（终点节点）
  *
- * 故意不包含的两种组合，理由是「连了也没人读，等于静默空操作」：
+ * 故意不包含的几种组合，理由是「连了也没人读，等于静默空操作」：
  *   · 任何节点 → text   文本节点的内容由用户输入或导入文件决定，不读上游
  *   · 任何节点 → video  已经由 image 覆盖（视频唯一能读的素材就是图片）
+ *   · image    → audio  音频请求体不接受音频/图片参考（上游只剩 prompt / duration / format），
+ *                       把图连过去只会造出一条没有任何消费方的边
+ *   · audio    → 任何节点 音频是**终点节点**：产出只用来试听与下载，没有任何下游读取它
  */
 const COHERENT_DOWNSTREAM: Record<WorkflowNodeType, WorkflowNodeType[]> = {
-  text: ['image', 'video'],
+  text: ['image', 'video', 'audio'],
   image: ['image', 'video'],
   // 素材给下游当参考图 / 首帧，和图片节点的下游一致
   asset: ['image', 'video'],
   video: [],
+  // 音频是终点节点：上游只吃文本（提示词），**下游一个也不给**。
+  // 不要为了让图好看而写成 ['video'] —— 那是一条没有任何消费方的边，
+  // 正是 imageRole 变成假功能的那条老路（详见文件头）。
+  audio: [],
   // 编组框不产内容、也不消费内容 —— 它只是把其它节点框在一起，不参加连线
   group: [],
 }
@@ -126,6 +141,7 @@ export const describeCoherentRefusal = (
     return '视频节点的成片目前没有任何节点会读取，连过去不会生效'
   }
   if (sourceType === 'video') return '视频节点产出的成片目前没有任何节点会读取，连过去不会生效'
+  if (sourceType === 'audio') return '音频节点是终点节点，产出的音频没有任何节点会读取，连过去不会生效'
   if (targetType === 'text') return '文本节点的内容由你自己输入或导入文件决定，它不读上游'
   return '这两类节点之间没有可用的数据流向'
 }

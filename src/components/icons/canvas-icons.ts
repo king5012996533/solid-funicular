@@ -26,6 +26,7 @@ export const CANVAS_ICON_NAMES = [
   'text',
   'image',
   'video',
+  'audio',
   'llm',
   'upload',
   'duplicate',
@@ -59,6 +60,12 @@ export const CANVAS_ICONS: Record<CanavasIconName, string> = {
   video:
     'M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5H5a1.5 1.5 0 0 1 -1.5 -1.5V7A1.5 1.5 0 0 1 5 5.5z' +
     'M10 9.3l4.4 2.7 -4.4 2.7z',
+
+  // 喇叭 + 两道声波：音频的通用符号，和 video 的「相框」拉开区分
+  audio:
+    'M5 10h3l4 -3.5v11L8 14H5z' +
+    'M15.2 9.6a3.4 3.4 0 0 1 0 4.8' +
+    'M17 7.6a5 5 0 0 1 0 8.8',
 
   // 对话气泡 + 两行内容：LLM 节点的产物是文本，气泡比「芯片」更直白
   llm:

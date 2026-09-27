@@ -61,6 +61,13 @@ export const NODE_INPUT_SPECS: Record<WorkflowNodeType, NodeInputSpec> = {
     optional: ['text', 'image'],
     emptyHint: '连接图片节点作为首帧，或直接描述画面生成',
   },
+  // 音频节点：上游只吃文本（当提示词）。音频请求体不接受图片/视频参考，
+  // 所以这里不列 image —— 列了会让空态提示引导用户去连一条不会被读的边。
+  audio: {
+    required: [],
+    optional: ['text'],
+    emptyHint: '连接文本节点写提示词，或直接描述要生成的音频',
+  },
   // 素材节点是上游来源，不消费别的节点
   asset: {
     required: [],

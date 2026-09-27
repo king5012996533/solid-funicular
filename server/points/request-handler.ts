@@ -99,6 +99,8 @@ export const handlePointsEstimateRequest = async (req: any, res: any) => {
         kind: item.endpointType === 'video' ? 'video' : 'image',
         size: item.size,
         count: item.count,
+        // 预估入参（EstimateItemInput）只有 model/size/count，不含时长，也没有 capabilityJson，
+        // 故不传 seconds/secondsMax —— 不凭空编一个时长去算钱。
       }),
     }))
 

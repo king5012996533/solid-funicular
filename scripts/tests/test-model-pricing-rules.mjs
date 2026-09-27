@@ -17,6 +17,8 @@ import {
   matchPricingTier,
   normalizeVideoSeconds,
   normalizeAudioSeconds,
+  readDeclaredMaxVideoSeconds,
+  VIDEO_SECONDS_MAX,
   AUDIO_SECONDS_MAX,
   validateModelPricing,
 } from '../../src/shared/model-pricing-rules.ts'
@@ -34,8 +36,14 @@ const DRAFT = { perImage: 6 }
 
 console.log('== 时长归一化（预估与扣费必须用同一个值）==')
 
-check('30 秒会被 clamp 到 20 —— 这正是「按 20 秒记账、按 30 秒出片」的那个坑', () => {
-  assert(normalizeVideoSeconds(30) === 20, `应 clamp 到 20，实际 ${normalizeVideoSeconds(30)}`)
+// 这条旧断言（30 → 20）本身就是那个少收费 bug 的固化，这次**故意反转**：
+// 库里 seedance2.5 明写 30 秒档、defaultParamsJson.duration=30，却把请求的 30 夹成 20，
+// perSecond 计价下每个 30 秒任务少收 1/3。默认上限提到 60 后，30 秒请求必须原样保留 30。
+check('反转：30 秒请求必须原样保留 30（旧的「clamp 到 20」正是少收费 bug 本身）', () => {
+  assert(normalizeVideoSeconds(30) === 30, `30 秒应原样保留，实际 ${normalizeVideoSeconds(30)}`)
+})
+check(`越界仍会被夹住：999 → 默认上限 ${VIDEO_SECONDS_MAX}（clamp 语义没变）`, () => {
+  assert(normalizeVideoSeconds(999) === VIDEO_SECONDS_MAX, `应 clamp 到 ${VIDEO_SECONDS_MAX}，实际 ${normalizeVideoSeconds(999)}`)
 })
 check('0 / 负数 / 非法值 → 保底 1 秒（不产生 0 或负价）', () => {
   assert(normalizeVideoSeconds(0) === 1 && normalizeVideoSeconds(-5) === 1, '应保底 1')
@@ -43,6 +51,32 @@ check('0 / 负数 / 非法值 → 保底 1 秒（不产生 0 或负价）', () =
 })
 check('范围内的值原样通过', () => {
   assert(normalizeVideoSeconds(8) === 8, '8 秒不该被改')
+})
+check('显式传入 secondsMax 时用它当上限（模型声明的档位优先于默认值）', () => {
+  assert(normalizeVideoSeconds(30, 10) === 10, `上限 10 时应夹到 10，实际 ${normalizeVideoSeconds(30, 10)}`)
+})
+
+console.log('\n== 读模型声明的最大时长档位（计费上限的来源）==')
+
+check('params.duration.options[].key（字符串数字）取最大值', () => {
+  const capability = { params: { duration: { options: [{ key: '5' }, { key: '10' }, { key: '30' }], default: '30' } } }
+  assert(readDeclaredMaxVideoSeconds(capability) === 30, `应取最大档位 30，实际 ${readDeclaredMaxVideoSeconds(capability)}`)
+})
+check('顶层 seconds（数字数组）也认', () => {
+  assert(readDeclaredMaxVideoSeconds({ seconds: [5, 10, 30] }) === 30, '应取 30')
+})
+check('两套写法都读、取全局最大', () => {
+  const capability = { params: { duration: { options: [{ key: '30' }] } }, seconds: [5, 60] }
+  assert(readDeclaredMaxVideoSeconds(capability) === 60, '应取 60')
+})
+check('读不到就返回 undefined（调用方回退默认上限，绝不硬编一个数）', () => {
+  assert(readDeclaredMaxVideoSeconds(null) === undefined, 'null 应为 undefined')
+  assert(readDeclaredMaxVideoSeconds({}) === undefined, '空对象应为 undefined')
+  assert(readDeclaredMaxVideoSeconds({ params: { duration: { options: [{ key: 'abc' }] } } }) === undefined, '非数字应跳过')
+})
+check('反证：seedance2.5 那种「声明里就是 30」的配置必须读成 30（不是被夹小的 20）', () => {
+  const capability = { params: { duration: { options: [{ label: '30 秒', key: '30' }], default: '30' } } }
+  assert(readDeclaredMaxVideoSeconds(capability) === 30, `必须读到 30，实际 ${readDeclaredMaxVideoSeconds(capability)}`)
 })
 
 check('音频时长走自己的区间：180 秒**不能**被砍成 20（那是视频的上限）', () => {
@@ -56,7 +90,7 @@ check('音频时长：0 / 负数 / NaN 保底 1 秒（不产生 0 或负价）',
 check(`音频时长上限是 ${AUDIO_SECONDS_MAX} 秒，超出要被拦住`, () => {
   assert(normalizeAudioSeconds(99999) === AUDIO_SECONDS_MAX, `应 clamp 到 ${AUDIO_SECONDS_MAX}`)
 })
-check('反证：音频若误用视频的 20 秒上限，180 秒就会被改掉', () => {
+check('反证：音频若误用视频的上限，180 秒就会被改掉', () => {
   assert(normalizeVideoSeconds(180) !== 180, '视频 clamp 确实会改掉 180 —— 所以音频不能复用它')
 })
 
@@ -68,7 +102,11 @@ check('size 拆成长宽并保留原串作 label（longEdge/shortEdge 与 label 
   assert(params.label === '2048x1152' && params.count === 2, 'label 与 count 应带上')
 })
 check('视频时长在归一化时就 clamp（预估与实扣必须拿到同一个秒数）', () => {
-  assert(buildNormalizedGenerationParams({ kind: 'video', seconds: 30 }).seconds === 20, '30 秒应 clamp 到 20')
+  assert(buildNormalizedGenerationParams({ kind: 'video', seconds: 30 }).seconds === 30, '30 秒应原样保留（20 是少收费 bug 的旧值）')
+})
+check('secondsMax 用模型声明的最大档位当上限（30 秒模型给 30 → 保留；给 10 → 夹到 10）', () => {
+  assert(buildNormalizedGenerationParams({ kind: 'video', seconds: 30, secondsMax: 30 }).seconds === 30, '声明 30 应保留 30')
+  assert(buildNormalizedGenerationParams({ kind: 'video', seconds: 30, secondsMax: 10 }).seconds === 10, '超过声明上限应夹到声明上限')
 })
 check('没有 size 时不含糊造长宽（交给档位匹配 miss 走兜底），count 保底 1', () => {
   const params = buildNormalizedGenerationParams({ kind: 'image' })

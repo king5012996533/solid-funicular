@@ -13,7 +13,7 @@ import {
 } from '../src/views/workflow/config/node-suggestions'
 import type { WorkflowNodeType } from '../src/views/workflow/composables/useWorkflowCanvas'
 
-const ALL_TYPES: WorkflowNodeType[] = ['text', 'image', 'video', 'asset']
+const ALL_TYPES: WorkflowNodeType[] = ['text', 'image', 'video', 'audio', 'asset']
 
 let passed = 0
 let failed = 0
@@ -34,17 +34,19 @@ console.log('\n【1】展示信息覆盖全部节点类型，且展示顺序稳�
 {
   const types = NODE_TYPE_PRESENTATION.map(item => item.type)
   // 用对象字面量做全量校验：以后新增节点类型忘了补展示信息，这里会直接编译报错
-  check('四类节点都有展示信息', types, ['text', 'image', 'video', 'asset'])
+  check('五类节点都有展示信息', types, ['text', 'image', 'video', 'audio', 'asset'])
   check('每项都有名字和图标', NODE_TYPE_PRESENTATION.every(i => !!i.name && !!i.icon && !!i.color), true)
   check('能按类型取到展示信息', getNodeTypePresentation('image')?.name, '图片生成')
 }
 
 console.log('\n【2】从右侧拖出（下游）：只给「下游真的会读这个输入」的类型')
 {
-  check('文本 → 图片/视频', suggestNodeTypes('text', 'downstream'), ['image', 'video'])
+  check('文本 → 图片/视频/音频', suggestNodeTypes('text', 'downstream'), ['image', 'video', 'audio'])
     check('图片 → 图片/视频', suggestNodeTypes('image', 'downstream'), ['image', 'video'])
   // 视频产出的成片目前没有任何节点会读，所以不该给出候选，也不该弹菜单
   check('视频 → 没有候选', suggestNodeTypes('video', 'downstream'), [])
+  // 音频是终点节点：产出只用来试听 / 下载，没有任何下游会读
+  check('音频 → 没有候选（终点节点）', suggestNodeTypes('audio', 'downstream'), [])
 }
 
 console.log('\n【3】从左侧拖出（上游）：新节点会变成上游，候选要反查')
@@ -52,6 +54,8 @@ console.log('\n【3】从左侧拖出（上游）：新节点会变成上游，�
   // 会读上游文本与参考图的：图片、视频、剧本
   check('图片的上游 → 文本/图片/素材', suggestNodeTypes('image', 'upstream'), ['text', 'image', 'asset'])
   check('视频的上游 → 文本/图片/素材', suggestNodeTypes('video', 'upstream'), ['text', 'image', 'asset'])
+  // 音频只读文本（提示词）；图片故意不算它的上游 —— 音频请求体不接受图片参考
+  check('音频的上游 → 只有文本', suggestNodeTypes('audio', 'upstream'), ['text'])
   // 会读上游文本的：LLM（链式）。剧本只吃文本创意，所以文本可以接在剧本前面
   // 剧本产出剧本文本 → 它自己可以往下接图片/视频（这是 B3 要串起的主流程）
   // 文本节点不读上游，所以它没有上游候选

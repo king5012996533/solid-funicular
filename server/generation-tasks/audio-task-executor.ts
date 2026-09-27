@@ -1,6 +1,7 @@
 import type { GenerationTaskStartPayload, GenerationTaskStreamEvent } from './shared'
 import type { GenerationRecordPayload } from '../generation-records/shared'
 import type { RuntimeManagedTask } from './task-runtime-governor'
+import { probeArtifactMetadata } from '../media/probe-artifact'
 
 // 与运行时治理层、策略层统一同一份任务类型（详见 execution-strategies.ts 的说明）
 type AudioExecutionTask = RuntimeManagedTask
@@ -126,14 +127,30 @@ export const executeAudioTask = async (
     message: '音频结果已解析，正在同步记录与资源信息',
   })
 
-  const durationSeconds = resolveAudioDurationSeconds(requestBody)
-  const outputs = audioUrls.map((url, index) => ({
-    outputType: 'audio' as const,
-    url,
-    mimeType: resolveAudioMimeType(url),
-    durationSeconds,
-    sortOrder: index,
-  }))
+  const requestedDurationSeconds = resolveAudioDurationSeconds(requestBody)
+  // 真实元数据尽力填：时长优先用探测到的（MP3 会标注为估算），拿不到才退回请求值；都没有就不填，绝不写 0。
+  const outputs = await Promise.all(
+    audioUrls.map(async (url, index) => {
+      const metadata = await probeArtifactMetadata(url)
+      const durationSeconds = metadata?.durationSeconds ?? requestedDurationSeconds
+      return {
+        outputType: 'audio' as const,
+        url,
+        mimeType: metadata?.mimeType || resolveAudioMimeType(url),
+        ...(durationSeconds ? { durationSeconds } : {}),
+        sortOrder: index,
+        ...(metadata?.byteSize || metadata?.durationEstimated
+          ? {
+              metaJson: {
+                // GenerationOutputPayload 没有 byteSize 字段，按约定放 metaJson
+                ...(metadata?.byteSize ? { byteSize: metadata.byteSize } : {}),
+                ...(metadata?.durationEstimated ? { durationEstimated: true } : {}),
+              },
+            }
+          : {}),
+      }
+    }),
+  )
 
   await context.updateGenerationRecord(task.recordId, {
     ...context.buildInitialRecordPayload(payload),

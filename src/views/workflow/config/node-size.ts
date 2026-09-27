@@ -81,12 +81,14 @@ export const cardSizeStyle = (size: NodeCardSize) => ({
 /**
  * 按节点类型解析卡片尺寸，用于「算插入节点落点」这类不依赖 Vue Flow 测量的场合。
  *
- * 生成类（图片 / 视频）跟比例走；其余（文本 / 素材，以及编组框自身）按工具类正方形。
+ * 生成类（图片 / 视频 / 音频）跟比例走；其余（文本 / 素材，以及编组框自身）按工具类正方形。
+ * 音频没有画面比例概念，传进来的 ratio 恒为空 → 直接落到生成类的横版档（622 × 350），
+ * 与视频节点同一档，不再为它单开一套尺寸。
  * 类型用 string 而不是 WorkflowNodeType —— 这个文件是纯几何层，不反过来依赖状态层。
  */
 export const resolveCardSize = (input: { type?: string; ratio?: string }): NodeCardSize => {
   const type = String(input?.type || '')
-  if (type === 'image' || type === 'video') return resolveGenerationCardSize(input?.ratio)
+  if (type === 'image' || type === 'video' || type === 'audio') return resolveGenerationCardSize(input?.ratio)
   return CANVAS_TOOL_NODE_SIZE
 }
 

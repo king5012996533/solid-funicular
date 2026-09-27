@@ -514,6 +514,8 @@ export const startGenerationTask = async (
         size: requestBody.size,
         count: requestBody.count ?? requestBody.n,
         seconds: requestBody.seconds ?? requestBody.duration,
+        // 本条链路只有 providerId/modelKey，拿不到 AiModel.capabilityJson（模型声明的最大时长档位），
+        // 故走 normalizeVideoSeconds 的默认上限（60）——至少不再用会把 30 秒砍成 20 秒的旧默认值。
       }),
     })
 
